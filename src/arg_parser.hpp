@@ -1,6 +1,6 @@
 #pragma once
-// Parsing de argumentos de linea de comandos: tamanos con sufijos (k/m/b/t),
-// hilos, rutas de salida, tamano de segmento.
+// Command-line argument parsing: sizes with suffixes (k/m/b/t), thread
+// count, output path, segment width, count-only mode.
 
 #include <cstdint>
 #include <string>
@@ -10,15 +10,16 @@
 #include <thread>
 
 struct Options {
-    uint64_t limit = 0;                 // N: sieve hasta N (inclusive)
+    uint64_t limit = 0;                 // N: sieve up to N (inclusive)
     unsigned threads = 0;                // 0 => auto (hardware_concurrency)
-    std::string output = "primes.txt";   // fichero final
-    uint64_t segment_width = 1u << 18;   // ancho del rango numerico por segmento (debe ser par)
+    std::string output = "primes.txt";   // final file
+    uint64_t segment_width = 1u << 18;   // numeric width per segment (must be even)
+    bool count_only = false;             // skip the write pass entirely
     bool show_help = false;
 };
 
-// Interpreta sufijos: k=1e3 m=1e6 b=1e9 (billon ingles) t=1e12
-// Tambien acepta notacion cientifica (1e11) y numeros planos (100000000000)
+// Interprets suffixes: k=1e3 m=1e6 b=1e9 (short scale billion) t=1e12
+// Also accepts scientific notation (1e11) and plain numbers (100000000000)
 inline uint64_t parse_size(const std::string& raw) {
     if (raw.empty()) throw std::runtime_error("valor de tamano vacio");
     std::string s = raw;
@@ -44,8 +45,8 @@ inline uint64_t parse_size(const std::string& raw) {
         case 0:   mult = 1.0; break;
         case 'k': mult = 1e3; break;
         case 'm': mult = 1e6; break;
-        case 'b': mult = 1e9; break;   // billon ingles (10^9)
-        case 'g': mult = 1e9; break;   // giga, alias de b
+        case 'b': mult = 1e9; break;   // short scale billion (10^9)
+        case 'g': mult = 1e9; break;   // giga, alias for b
         case 't': mult = 1e12; break;
         default:
             throw std::runtime_error("sufijo desconocido en tamano: " + raw);
@@ -70,12 +71,14 @@ inline void print_usage(const char* prog) {
         "  -o, --output PATH      Fichero de salida (default: primes.txt)\n"
         "  -t, --threads N        Numero de hilos (default: nucleos disponibles)\n"
         "  -s, --segment-width N  Ancho numerico de cada segmento (default: 262144)\n"
+        "  -c, --count-only       Solo cuenta los primos, sin escribir el fichero\n"
         "  -h, --help             Muestra esta ayuda\n"
         "\n"
         "Ejemplos:\n"
         "  %s --limit 1000000 -o primos_1M.txt\n"
-        "  %s --limit 100b -o primos_100b.txt -t 12\n",
-        prog, prog, prog);
+        "  %s --limit 100b -o primos_100b.txt -t 12\n"
+        "  %s --limit 100b -t 12 --count-only\n",
+        prog, prog, prog, prog);
 }
 
 inline Options parse_args(int argc, char** argv) {
@@ -99,6 +102,8 @@ inline Options parse_args(int argc, char** argv) {
             opt.threads = static_cast<unsigned>(std::stoul(need_value(i, a.c_str())));
         } else if (a == "-s" || a == "--segment-width") {
             opt.segment_width = parse_size(need_value(i, a.c_str()));
+        } else if (a == "-c" || a == "--count-only") {
+            opt.count_only = true;
         } else {
             throw std::runtime_error("argumento desconocido: " + a);
         }
@@ -111,7 +116,7 @@ inline Options parse_args(int argc, char** argv) {
         opt.threads = std::max(1u, std::thread::hardware_concurrency());
     }
     if (opt.segment_width < 64) opt.segment_width = 64;
-    if (opt.segment_width % 2 != 0) opt.segment_width += 1; // debe ser par
+    if (opt.segment_width % 2 != 0) opt.segment_width += 1; // must be even
 
     return opt;
 }

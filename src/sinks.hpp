@@ -1,14 +1,18 @@
 #pragma once
-// "Sinks" para SegmentSieve: dos formas de consumir los primos encontrados.
+// "Sinks" for SegmentSieve: three ways to consume the primes it finds.
 //
-//  - ByteCounter: no escribe nada, solo cuenta cuantos bytes ocuparia el
-//    resultado en texto (digitos + salto de linea). Se usa en una primera
-//    pasada, sin E/S, para saber exactamente donde debe escribir cada hilo.
+//  - NullSink: does nothing at all. Used for --count-only, where we only
+//    care about the total count (already tracked by sieve_and_emit itself)
+//    and want to skip both the to_chars conversion and any I/O.
 //
-//  - DirectWriter: escribe con pwrite() en una posicion absoluta del
-//    fichero final, ya pre-dimensionado. Como cada hilo tiene un rango de
-//    bytes disjunto, todos pueden escribir en paralelo sobre el mismo
-//    descriptor sin bloquearse ni necesitar una fusion posterior.
+//  - ByteCounter: writes nothing, just counts how many bytes the result
+//    would take as text (digits + newline). Used in a first pass, with no
+//    I/O, to know exactly where each thread must start writing.
+//
+//  - DirectWriter: writes with pwrite() at an absolute position in the
+//    final, already-sized file. Since each thread owns a disjoint byte
+//    range, all of them can write in parallel on the same descriptor with
+//    no locking and no later merge step.
 
 #include <cstdint>
 #include <cstring>
@@ -17,13 +21,17 @@
 #include <stdexcept>
 #include <unistd.h>
 
+struct NullSink {
+    void write_uint64(uint64_t) {}
+};
+
 struct ByteCounter {
     uint64_t total_bytes = 0;
 
     void write_uint64(uint64_t v) {
         char scratch[24];
         auto res = std::to_chars(scratch, scratch + sizeof(scratch), v);
-        total_bytes += static_cast<uint64_t>(res.ptr - scratch) + 1; // +1 por '\n'
+        total_bytes += static_cast<uint64_t>(res.ptr - scratch) + 1; // +1 for '\n'
     }
 };
 
@@ -55,7 +63,7 @@ public:
         while (total_written < pos_) {
             ssize_t w = ::pwrite(fd_, buf_.data() + total_written, pos_ - total_written,
                                   static_cast<off_t>(offset_ + total_written));
-            if (w < 0) throw std::runtime_error("pwrite fallo escribiendo el fichero de salida");
+            if (w < 0) throw std::runtime_error("pwrite failed writing the output file");
             total_written += static_cast<size_t>(w);
         }
         offset_ += pos_;

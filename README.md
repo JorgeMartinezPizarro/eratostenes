@@ -1,8 +1,8 @@
 # eratostenes
 
-Criba de Eratostenes segmentada, paralela y empaquetada en bits, pensada para
-generar listados de primos muy grandes (probado hasta 10^11 = 100 000
-millones) en un tiempo razonable.
+Criba de Eratostenes segmentada, paralela y empaquetada en bits, sobre una
+rueda modulo 2*3*5*7*11 = 2310, pensada para generar listados de primos muy
+grandes (probado hasta 10^11 = 100 000 millones) en un tiempo razonable.
 
 ## Resultado de referencia
 
@@ -16,7 +16,34 @@ Listo. 4118054813 primos encontrados hasta 100000000000 (48.90 GB).
 
 Medido en un Intel Core i5-11400F (12 hilos logicos), sobre WSL2/ext4, disco
 con ~300 MB/s de escritura secuencial sostenida. El resultado (4 118 054 813
-primos) coincide exactamente con el valor conocido de pi(10^11).
+primos) coincide exactamente con el valor conocido de pi(10^11). Esta medida
+es previa a la rueda modulo 2310 (ver "Comparativa" mas abajo para el efecto
+de ese cambio); a esta escala el cuello de botella real es la escritura a
+disco, no el marcado de bits.
+
+## Comparativa: rueda modulo 2310 frente a solo-impares
+
+Medido con `--count-only` (sin E/S, ver mas abajo) para aislar el trabajo de
+la CPU, mismo hardware, N=10^10 (pi(10^10) = 455 052 511):
+
+| hilos | solo-impares | rueda mod 2310 | mejora |
+|------:|-------------:|----------------:|-------:|
+| 1     | 13.01s       | 8.02s            | 1.62x  |
+| 12    | 2.00s        | 1.52s            | 1.32x  |
+
+La rueda descarta de entrada los multiplos de 2, 3, 5, 7 y 11 (480 de cada
+2310 numeros sobreviven, frente a 15 de cada 30 en la version "solo
+impares"), lo que reduce a mas de un tercio el numero de veces que hay que
+marcar un compuesto. La mejora medida es menor que esa reduccion teorica
+porque cada primo base ahora carga una tabla de saltos de 480 entradas (ver
+"Diseno"), y esa tabla -- aunque de solo lectura y compartida entre hilos --
+es varios MB por hilo activo y compite por ancho de banda de memoria/cache
+L3 cuando muchos hilos la recorren a la vez; por eso la mejora cae de 1.62x
+con 1 hilo a 1.32x con 12. Se probo primero una rueda modulo 30 (solo 2, 3 y
+5) con una tabla de 8 entradas por primo, y tambien modulo 2310: la tabla
+mas grande de esta ultima solo compensa si se guarda en `uint32_t` en vez de
+`uint64_t` (ver commits); sin esa reduccion de memoria, la version modulo
+2310 llegaba a ser *mas lenta* que la version solo-impares con 12 hilos.
 
 ## Compilar
 
@@ -58,6 +85,7 @@ ejecuta con `--help`.
   -o, --output PATH      Fichero de salida (default: primes.txt)
   -t, --threads N        Numero de hilos (default: nucleos disponibles)
   -s, --segment-width N  Ancho numerico de cada segmento (default: 262144)
+  -c, --count-only       Solo cuenta los primos, sin escribir el fichero
   -h, --help             Ayuda
 ```
 
@@ -66,22 +94,41 @@ Ejemplos:
 ```
 ./eratostenes -n 1000000 -o primos_1M.txt
 ./eratostenes -n 100b -o ~/primos_100b.txt -t 12
+./eratostenes -n 100b -t 12 --count-only
 ```
+
+`--count-only` salta por completo la segunda pasada (no crea ni
+redimensiona ningun fichero, ni convierte los primos a texto): solo corre
+la pasada de conteo, con un sink que no hace nada (`NullSink`) en vez de
+`ByteCounter`, asi que tampoco paga el coste de `to_chars` por cada primo.
+Util para medir pi(N) o el rendimiento puro de la criba sin que la E/S a
+disco distorsione la medida.
 
 ## Diseno
 
-**Bits, no bytes.** Cada segmento se representa como un array de bits
-(`uint64_t` words) donde cada bit corresponde a un numero impar del rango
-(los pares se descartan de entrada salvo el 2, que es un caso especial). Un
-bit a 1 significa "compuesto"; los primos se extraen invirtiendo la palabra
-y recorriendo los bits puestos a 1 con `__builtin_ctzll` + "clear lowest set
-bit", en vez de comprobar bit a bit.
+**Rueda modulo 2310, no solo impares.** 2310 = 2*3*5*7*11; de cada 2310
+numeros consecutivos solo 480 (= phi(2310)) son coprimos con esos cinco
+primos, y son los unicos candidatos a primo que se representan. Se numeran
+con un "indice de rueda" k=0,1,2,... continuo (`wheel_number`/`wheel_index`
+en `src/wheel.hpp`) y cada segmento se representa como un array de bits
+(`uint64_t` words) donde el bit i corresponde al numero
+`wheel_number(k_low + i)`. 2, 3, 5, 7 y 11 quedan fuera de esa numeracion y
+se emiten aparte (caso especial en el hilo 0), igual que el 2 en un sieve
+"solo impares". Marcar los multiplos de un primo base p sin dividir en el
+bucle caliente requiere, para cada p, una tabla de 480 "saltos" de indice de
+rueda precalculada una vez (`compute_wheel_deltas`); esa tabla se guarda en
+`uint32_t` (no `uint64_t`) porque su tamano total (varios MB, compartidos
+entre hilos) resulto ser el factor dominante para el rendimiento en
+paralelo -- ver "Comparativa" mas arriba. Los primos se extraen invirtiendo
+cada palabra y recorriendo los bits puestos a 1 con `__builtin_ctzll` +
+"clear lowest set bit", en vez de comprobar bit a bit.
 
 **Criba fragmentada (segmentada).** Se calculan primero los primos base
 (<= sqrt(N)) con una criba simple en memoria (siempre pequena: sqrt(10^11)
-~= 316 228). Despues, el rango [3, N] se recorre en segmentos pequenos
-(por defecto ~256K numeros, configurable con `-s`) que caben en cache L1/L2,
-marcando multiplos de cada primo base dentro de cada segmento.
+~= 316 228). Despues, el rango de indices de rueda equivalente a [3, N] se
+recorre en segmentos pequenos (por defecto equivalentes a ~256K numeros,
+configurable con `-s`) que caben en cache L1/L2, marcando multiplos de cada
+primo base dentro de cada segmento.
 
 **Paralelizacion.** El rango completo se divide en tantos fragmentos
 contiguos como hilos, cada uno cribando su propio tramo de forma
@@ -116,11 +163,13 @@ frente al esquema con fusion (22s vs 64s cribando hasta 10^10).
 
 ## Limitaciones y posibles mejoras futuras
 
-- Solo se descartan los pares (ademas del 2). Una rueda modulo 30 (descartar
-  tambien multiplos de 3 y 5) reduciria el trabajo de marcado y la memoria
-  por segmento en, aproximadamente, otro factor 1.3-1.5x. No se implemento
-  para mantener el codigo simple y facil de verificar; el cuello de botella
-  actual a gran escala es la E/S de disco, no el marcado de bits.
+- Extender la rueda mas alla de 2310 (p.ej. incluyendo el 13, modulo 30030)
+  reduciria aun mas el numero de marcados, pero la tabla de saltos por primo
+  creceria proporcionalmente (30030/2310 = 13x mas entradas); dado que ya a
+  480 entradas la memoria compartida es el factor limitante en paralelo (ver
+  "Comparativa"), es dudoso que compense sin cambiar tambien la estructura
+  de la tabla (p.ej. compartirla entre primos con el mismo resto modulo la
+  rueda, en vez de una tabla completa por primo).
 - El offset de escritura de cada hilo se basa en `pwrite`, especifico de
   POSIX. Para un build nativo de Windows habria que sustituirlo por
   `WriteFile` con `OVERLAPPED` (offset explicito) o volver a un esquema de
@@ -131,6 +180,10 @@ frente al esquema con fusion (22s vs 64s cribando hasta 10^10).
 ## Verificacion
 
 Se comprobo que el conteo de primos coincide con pi(N) conocido para
-N = 10, 100, 1000, 10^6, 2*10^6, 10^9, 10^10 y 10^11, y que el resultado es
-identico (mismo hash) al variar el numero de hilos (1, 7, 12), lo que
-descarta errores en los limites entre fragmentos.
+N = 10, 100, 1000, 10^6, 2*10^6, 10^9, 10^10 y 10^11, incluyendo los limites
+alrededor de los primos propios de la rueda (11, 12, 13, 14), y que el
+resultado es identico (mismo hash) al variar el numero de hilos (1, 3, 7,
+12) y entre `--count-only` y la escritura normal, lo que descarta errores en
+los limites entre fragmentos. El fichero de salida de esta version (rueda
+modulo 2310) es byte a byte identico al de la version anterior "solo
+impares" para los mismos N.
