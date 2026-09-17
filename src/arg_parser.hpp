@@ -16,19 +16,11 @@ struct Options {
     uint64_t limit = 0;                 // N: sieve up to N (inclusive)
     unsigned threads = 0;                // 0 => auto (hardware_concurrency)
     std::string output = "primes.txt";   // final file
-    // Numeric width per segment (must be even). 1<<22 (~4.19M) measured as
-    // the sweet spot on a 12MB-L3 machine with the mod-30 wheel: big enough
-    // that per-segment overhead (bucket lookup, activation check,
-    // extraction loop setup -- roughly constant per segment, independent
-    // of its width) stays a small fraction of total time, small enough
-    // that each thread's per-segment bit array (proportional to this,
-    // divided by ~4 for the wheel density) still fits comfortably in L2.
-    // Measured effect at N=1e12, 12 threads: 275.27s (old default,
-    // 1<<18=262144) -> 89.54s (1<<22) -- keeps growing with N (2.2x at
-    // 1e11, 3.07x at 1e12) since more segments means more total per-segment
-    // overhead to amortize. Segment widths beyond ~1<<23 start regressing
-    // sharply (measured: 30s at 1<<25, 165s at 1<<26) once the bit array
-    // outgrows L2/L3 -- see BENCHMARK.md for the full sweep.
+    // Numeric width per segment (must be even). Wide enough that the
+    // roughly-fixed per-segment overhead (bucket lookup, activation check,
+    // extraction setup) stays a small fraction of total time, narrow
+    // enough that each thread's bit array still fits its cache -- see
+    // BENCHMARK.md for the sweep behind this default.
     uint64_t segment_width = 1u << 22;
     bool count_only = false;             // skip the write pass entirely
     bool show_help = false;

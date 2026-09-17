@@ -1,42 +1,24 @@
 #pragma once
 // Segmented sieve on a compile-time wheel (see wheel.hpp), bit-packed into
-// uint64_t words, using a BUCKET SIEVE to mark multiples.
+// uint64_t words, using a bucket sieve to mark multiples.
 //
-// The naive version of this (kept in git history) loops over every
-// "active" base prime for every segment, checking whether it has a
-// multiple to mark. That's fine for small primes (they always have
-// multiples in every segment), but for large primes -- with a step
-// comparable to or bigger than the segment width -- most of those visits
-// find nothing to mark. The number of (prime, segment) pairs grows faster
-// than N (roughly pi(sqrt(N)) * segment_count, and segment_count alone
-// already grows linearly with N), so at large N most of that looping is
-// pure overhead: dividing, checking "am I active", finding nothing to do.
+// Each base prime is scheduled into the "bucket" of the future segment
+// where its next multiple falls (a fixed-size ring, buckets_). Processing
+// a segment means looking at only its own bucket: mark, then reschedule
+// each prime into whichever future bucket its next hit belongs to. Buckets
+// are indexed by segment number modulo the ring size, which only works
+// because no prime's multiples can ever be more than num_buckets_ segments
+// apart -- see the constructor for how that bound is computed and
+// margined, and schedule() for the runtime check that would catch it
+// (loudly) if that bound were ever wrong.
 //
-// Bucket sieve inverts this: instead of every segment asking every active
-// prime "do you have work here?", every prime is scheduled into the bucket
-// of the exact future segment where its next multiple falls. Processing a
-// segment means looking at *only* its own bucket -- exactly the primes
-// with real work there, nothing else -- marking, then rescheduling each
-// one into whichever future bucket its *next* hit belongs to.
+// Newly-relevant primes (p*p just crossed into range) are picked up by a
+// single monotonically-advancing pointer into wheel_base_primes (sorted by
+// p) -- each prime is activated exactly once per thread chunk.
 //
-// Buckets live in a fixed-size ring (buckets_), indexed by segment number
-// modulo the ring size. This only works because no prime's multiples can
-// ever be more than num_buckets_ segments apart -- see the constructor for
-// how that bound is computed and margined, and schedule() for the runtime
-// check that would catch it (loudly) if that bound were ever wrong.
-//
-// Small primes still get visited via their own bucket every time they have
-// work, same as before -- bucket sieve doesn't change how *often* a prime
-// is touched, only how *many other, irrelevant primes* get checked
-// alongside it. Newly-relevant primes (p*p just crossed into range) are
-// picked up by a single monotonically-advancing pointer into
-// wheel_base_primes (sorted by p) -- each prime is "activated" exactly
-// once across a whole chunk, not once per segment.
-//
-// Extraction (turning the finished bit array into actual prime values) is
-// unchanged from the non-bucket version: invert each word, decompose into
-// (q, r) = (k / WHEEL_SIZE, k % WHEEL_SIZE) once per word, then walk set
-// bits with ctz + clear-lowest-bit.
+// Extraction (turning the finished bit array into actual prime values):
+// invert each word, decompose into (q, r) = (k / WHEEL_SIZE, k %
+// WHEEL_SIZE) once per word, then walk set bits with ctz + clear-lowest-bit.
 
 #include <cstdint>
 #include <vector>
@@ -74,8 +56,7 @@ public:
     // independent run of consecutive segments in increasing k order (a
     // thread's chunk). Resets all bucket state and the "which primes have
     // activated yet" pointer. Never reuse a SegmentSieve across threads or
-    // out of order -- same restriction the old persistent-cursor attempt
-    // had, but this time the payoff is real (see header comment).
+    // out of order.
     void begin_chunk() {
         cur_segment_ = 0;
         next_prime_idx_ = 0;
@@ -104,9 +85,8 @@ public:
                 uint64_t p = wheel_base_primes[next_prime_idx_].p;
                 if (p * p >= high_n) break;
 
-                // Same "find the first multiple" logic as the non-bucket
-                // version, just done once per prime instead of once per
-                // (prime, segment) pair.
+                // Find the smallest m coprime with WHEEL_MOD such that
+                // p*m >= max(p*p, low_n): the prime's first relevant multiple.
                 uint64_t start_val = std::max(p * p, low_n);
                 uint64_t m = (start_val + p - 1) / p;
                 uint64_t r = m % WHEEL_MOD;
@@ -145,8 +125,7 @@ public:
         bucket.clear();
         ++cur_segment_;
 
-        // Extraction: bit=0 => prime candidate. Unchanged from the
-        // non-bucket version.
+        // Extraction: bit=0 => prime candidate.
         for (size_t w = 0; w < words_needed; ++w) {
             uint64_t bits = ~words_[w];
             uint64_t base_idx = w * 64ULL;
