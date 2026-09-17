@@ -78,17 +78,29 @@ CPU's page on ark.intel.com / similar will have L2/L3; L1 rarely matters
 for this tuning.
 
 **Wheel vs L3.** Each base prime costs `8 + 4*phi(wheel)` bytes in the
-shared jump table (see [BENCHMARK.md](BENCHMARK.md) for the derivation),
-and there are `pi(sqrt(N))` base primes, so the table is:
+shared jump table, and there are `pi(sqrt(N))` base primes, so the table
+is:
 
 ```
 table_bytes = pi(sqrt(N)) * (8 + 4 * phi(wheel))
 ```
 
-Pick the largest of the prepared configs in `src/wheel.hpp` (`2,3` / `2,3,5`
-/ `2,3,5,7` / `2,3,5,7,11`) whose `table_bytes` stays comfortably under your
-L3 (leave headroom -- other things share that cache too), for the largest N
-you plan to run. `phi` values: 2, 8, 48, 480 respectively.
+Pick the largest of the prepared configs in `src/wheel.hpp` whose
+`table_bytes` stays comfortably under your L3 (leave headroom -- other
+things share that cache too), for the largest N you plan to run:
+
+| N | pi(sqrt(N)) | `2,3` (mod 6) | `2,3,5` (mod 30) | `2,3,5,7` (mod 210) | `2,3,5,7,11` (mod 2310) |
+|---|---:|---:|---:|---:|---:|
+| 10^10 | 9,592 | 150 KiB | 375 KiB | 1.8 MiB | 17.6 MiB |
+| 10^11 | 27,184 | 425 KiB | 1.0 MiB | 5.2 MiB | 50.0 MiB |
+| 10^12 | 78,498 | 1.2 MiB | 3.0 MiB | 15.0 MiB | 144.3 MiB |
+| 10^13 | ~224,000 | 3.4 MiB | 8.5 MiB | 42.7 MiB | 411.9 MiB |
+| 10^14 | 620,160 | 9.5 MiB | 23.7 MiB | 118.3 MiB | 1140.4 MiB |
+| 10^15 | ~1,955,000 | 29.8 MiB | 74.6 MiB | 372.9 MiB | 3593 MiB |
+
+(`pi(sqrt(N))` for 10^13 and 10^15 is approximate -- sqrt(N) isn't a round
+number there, so it's the standard `x/(ln(x)-1)` estimate rather than an
+exact count; 10^10/10^11/10^12/10^14 are exact.)
 
 **Segment width vs L2.** Each thread's per-segment bit array is:
 
@@ -96,11 +108,20 @@ you plan to run. `phi` values: 2, 8, 48, 480 respectively.
 array_bytes = segment_width * phi(wheel) / wheel_mod / 8
 ```
 
-(`wheel_mod` = product of the wheel's primes: 6, 30, 210, 2310.) Pick the
-largest `-s` that keeps this comfortably under your per-core L2. From
-there, sweep a few values around it (`-s` up and down by 2x) -- the optimum
-is usually a flat plateau, not a single sharp point, and it's cheap to
-check directly with `--count-only` on a middling N.
+| `-s` | `2,3` (mod 6) | `2,3,5` (mod 30) | `2,3,5,7` (mod 210) | `2,3,5,7,11` (mod 2310) |
+|---|---:|---:|---:|---:|
+| 2^22 = 4,194,304 (default) | 171 KiB | 137 KiB | 117 KiB | 106 KiB |
+| 2^23 = 8,388,608 | 341 KiB | 273 KiB | 234 KiB | 213 KiB |
+| 2^24 = 16,777,216 | 683 KiB | 546 KiB | 468 KiB | 426 KiB |
+| 2^25 = 33,554,432 | 1.33 MiB | 1.07 MiB | 936 KiB | 851 KiB |
+| 2^26 = 67,108,864 | 2.67 MiB | 2.13 MiB | 1.83 MiB | 1.66 MiB |
+| 2^27 = 134,217,728 | 5.33 MiB | 4.27 MiB | 3.66 MiB | 3.33 MiB |
+
+Pick the largest `-s` that keeps this comfortably under your per-core L2
+(on a chip with mixed core types, use the smallest L2-per-thread figure
+across all core types). From there, sweep a few values around it -- the
+optimum is usually a flat plateau, not a single sharp point, and it's cheap
+to check directly with `--count-only` on a middling N.
 
 ## Design
 
