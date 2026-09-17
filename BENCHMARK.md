@@ -24,6 +24,7 @@ instead of memory-bandwidth-bound:
 | 10^10 | 9,592 | 154KB | 384KB | 1.9MB |
 | 10^11 | 27,184 | 435KB | 1.1MB | 5.4MB |
 | 10^12 | 78,498 | 1.3MB | 3.1MB | 15.7MB |
+| 10^13 | ~224,376 | ~3.6MB | ~9.0MB | ~44.9MB |
 
 ## Results
 

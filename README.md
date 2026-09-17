@@ -61,6 +61,47 @@ is converted to text. Use it to get pi(N) or to measure raw sieve speed
 without disk I/O -- essential from around 10^11 up, where the equivalent
 text file already weighs tens of GB.
 
+## Tuning for your machine
+
+The two knobs that matter -- which wheel (`WHEEL_PRIMES` in
+`src/wheel.hpp`) and `-s` (segment width) -- both come down to fitting a
+per-thread data structure into a specific cache level. Find your CPU's
+cache sizes first:
+
+```
+lscpu                                              # Linux / WSL: L1d, L1i, L2, L3 sizes
+cat /sys/devices/system/cpu/cpu0/cache/index*/size # per-level detail, same info
+```
+
+On native Windows, `Get-CimInstance Win32_CacheMemory` (PowerShell) or the
+CPU's page on ark.intel.com / similar will have L2/L3; L1 rarely matters
+for this tuning.
+
+**Wheel vs L3.** Each base prime costs `8 + 4*phi(wheel)` bytes in the
+shared jump table (see [BENCHMARK.md](BENCHMARK.md) for the derivation),
+and there are `pi(sqrt(N))` base primes, so the table is:
+
+```
+table_bytes = pi(sqrt(N)) * (8 + 4 * phi(wheel))
+```
+
+Pick the largest of the prepared configs in `src/wheel.hpp` (`2,3` / `2,3,5`
+/ `2,3,5,7` / `2,3,5,7,11`) whose `table_bytes` stays comfortably under your
+L3 (leave headroom -- other things share that cache too), for the largest N
+you plan to run. `phi` values: 2, 8, 48, 480 respectively.
+
+**Segment width vs L2.** Each thread's per-segment bit array is:
+
+```
+array_bytes = segment_width * phi(wheel) / wheel_mod / 8
+```
+
+(`wheel_mod` = product of the wheel's primes: 6, 30, 210, 2310.) Pick the
+largest `-s` that keeps this comfortably under your per-core L2. From
+there, sweep a few values around it (`-s` up and down by 2x) -- the optimum
+is usually a flat plateau, not a single sharp point, and it's cheap to
+check directly with `--count-only` on a middling N.
+
 ## Design
 
 **Wheel factorization.** `WHEEL_PRIMES` in `src/wheel.hpp` picks which
