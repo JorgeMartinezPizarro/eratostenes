@@ -54,7 +54,7 @@
 #include <cstdint>
 #include <array>
 
-constexpr std::array<uint64_t, 3> WHEEL_PRIMES = {2, 3, 5}; // <-- active config: mod 30 (best at N~1e12 on 12MB L3, even with bucket sieve)
+constexpr std::array<uint64_t, 3> WHEEL_PRIMES = {2, 3, 5}; // <-- active config: mod 30 (best at N~1e12 on 12MB L3)
 
 constexpr uint64_t wheel_gcd(uint64_t a, uint64_t b) {
     while (b != 0) {
@@ -94,7 +94,12 @@ constexpr int compute_wheel_size_log2() {
     while (v > 1) { v >>= 1; ++log; }
     return log;
 }
-constexpr int WHEEL_SIZE_LOG2 = WHEEL_SIZE_IS_POW2 ? compute_wheel_size_log2() : -1;
+// 0 (not -1) when not a power of 2: that branch is never taken at runtime
+// (see the `if constexpr` in segment_sieve.hpp), but since WHEEL_SIZE_IS_POW2
+// isn't template-dependent there, the compiler still type-checks the
+// discarded branch, and a negative shift count would warn (UB if it were
+// ever evaluated, even though it never is).
+constexpr int WHEEL_SIZE_LOG2 = WHEEL_SIZE_IS_POW2 ? compute_wheel_size_log2() : 0;
 
 constexpr bool is_prime_trial(uint64_t n) {
     if (n < 2) return false;

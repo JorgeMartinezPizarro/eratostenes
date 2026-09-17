@@ -28,7 +28,7 @@ struct Options {
     // 1e11, 3.07x at 1e12) since more segments means more total per-segment
     // overhead to amortize. Segment widths beyond ~1<<23 start regressing
     // sharply (measured: 30s at 1<<25, 165s at 1<<26) once the bit array
-    // outgrows L2/L3 -- see benchmark.md for the full sweep.
+    // outgrows L2/L3 -- see BENCHMARK.md for the full sweep.
     uint64_t segment_width = 1u << 22;
     bool count_only = false;             // skip the write pass entirely
     bool show_help = false;
