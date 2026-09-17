@@ -1,38 +1,60 @@
 #pragma once
-// Wheel factorization: skips multiples of a small fixed set of primes
-// (WHEEL_PRIMES below) up front. Change that one array to switch wheels
-// (e.g. {2,3,5} for mod 30, {2,3,5,7} for mod 210, {2,3,5,7,11} for mod
-// 2310) -- everything else (WHEEL_MOD, WHEEL_SIZE, the tables, the first
-// prime not covered by the wheel) is derived from it at compile time.
+// Wheel factorization: skips multiples of a small fixed set of primes up
+// front. WHEEL_PRIMES below is a compile-time constant on purpose (see the
+// note further down): to try a different wheel, uncomment one of the
+// labeled configs and recompile (`make`).
 //
 // Bigger wheels remove more candidates up front, but the marginal cost and
-// benefit scale very differently: adding prime p multiplies WHEEL_SIZE (and
-// so the per-prime jump table in WheelBasePrime, see below) by (p-1), while
-// it only cuts remaining density by a factor of (p-1)/p. For p=7 that's a
-// 6x bigger table for a 14% smaller density; for p=11, a 10x bigger table
-// for a 9% smaller density. Past a certain point the jump table (shared,
-// read by every thread every segment) stops fitting the CPU's L3 cache and
-// the sieve becomes memory-bandwidth bound rather than compute bound --
-// measured concretely on this project at N=1e12: mod 2310's ~151MB table
-// (12x this machine's 12MB L3) made the sieve slower than a plain
-// division-per-segment approach would suggest, and slower relative to a
-// reference JS sieve on the same hardware than the raw operation count
-// would predict. See README for the numbers. mod 30's table is only a few
-// MB, comfortably cache-resident even at N=1e12.
+// benefit scale very differently: adding prime p multiplies the wheel's
+// period length (WHEEL_SIZE, and so the per-prime jump table -- see
+// WheelBasePrime below) by (p-1), while it only cuts remaining density by
+// a factor of (p-1)/p. For p=7 that's a 6x bigger table for a 14% smaller
+// density; for p=11, a 10x bigger table for a 9% smaller density. Past a
+// certain point the jump table (shared, read by every thread every
+// segment) stops fitting the CPU's L3 cache and the sieve becomes
+// memory-bandwidth bound rather than compute bound -- measured concretely
+// on this project at N=1e12 on a 12MB-L3 machine (Intel i5-11400F):
 //
-// The WHEEL_SIZE residues coprime with WHEEL_MOD are numbered with a
-// continuous "wheel index" k = 0,1,2,... that walks them in increasing
-// order (k=0 -> 1, k=1 -> the next coprime number, ...).
-// wheel_number()/wheel_index() are inverses of each other.
+//   wheel        table size   vs L3   time
+//   2,3              1.3 MB     11%   352.10s
+//   2,3,5            3.1 MB     26%   303.10s  <- fastest at N=1e12 here
+//   2,3,5,7         15.7 MB    131%   571.78s
+//   2,3,5,7,11     151.0 MB   1260%   970.67s
 //
-// The primes in WHEEL_PRIMES fall outside this numbering and are handled
-// separately by the caller (the same way 2 was special-cased in an
-// odds-only sieve).
+// ...and at N=1e11 on the same machine, 2,3,5,7 (21.02s) beat 2,3,5
+// (23.01s): the right wheel depends on N (bigger N needs more base primes,
+// so a bigger table for the same wheel) *and* the machine's L3 size, not
+// on one being generically "better". There's a real interior minimum, not
+// a monotonic tradeoff: too small a wheel wastes cache headroom doing more
+// marking than necessary; too big a wheel blows the cache and pays
+// main-memory latency on most accesses, with diminishing (but very real)
+// extra damage the further over budget it goes.
+//
+// Why compile-time and not a --wheel CLI flag: it was tried. Making
+// WHEEL_MOD/WHEEL_SIZE runtime values instead of compile-time constants
+// stops GCC from turning "x % WHEEL_MOD" into a cheap multiply+shift, so
+// every such operation becomes a real hardware DIV. That divide happens
+// once per (base prime, segment) pair, and that pair count grows faster
+// than N (it's roughly pi(sqrt(N)) * segment_count, and segment_count
+// alone already grows linearly with N) -- so the overhead is negligible at
+// N=1e10 but measured at +44% at N=1e12 (303.10s -> 437.13s for the same
+// 2,3,5 wheel). Not worth paying on every run just to avoid a recompile
+// when switching wheels is already a one-line edit.
+//
+//   Some configs to try (uncomment one, comment the rest, then `make`):
+//
+//     constexpr std::array<uint64_t, 2> WHEEL_PRIMES = {2, 3};             // mod 6
+//     constexpr std::array<uint64_t, 3> WHEEL_PRIMES = {2, 3, 5};          // mod 30    (best at N~1e12 on a 12MB-L3 machine)
+//     constexpr std::array<uint64_t, 4> WHEEL_PRIMES = {2, 3, 5, 7};       // mod 210   (best at N~1e11 on a 12MB-L3 machine)
+//     constexpr std::array<uint64_t, 5> WHEEL_PRIMES = {2, 3, 5, 7, 11};   // mod 2310  (needs a much bigger L3 to pay off)
+//
+// The array size (the std::array<uint64_t, N> template argument) must
+// match the number of primes listed.
 
 #include <cstdint>
 #include <array>
 
-constexpr std::array<uint64_t, 3> WHEEL_PRIMES = {2, 3, 5}; // <-- change this to switch wheels
+constexpr std::array<uint64_t, 3> WHEEL_PRIMES = {2, 3, 5}; // <-- active config: mod 30 (best at N~1e12 on 12MB L3, even with bucket sieve)
 
 constexpr uint64_t wheel_gcd(uint64_t a, uint64_t b) {
     while (b != 0) {
@@ -58,6 +80,21 @@ constexpr int compute_wheel_size() {
     return static_cast<int>(phi);
 }
 constexpr int WHEEL_SIZE = compute_wheel_size();
+
+// Whether WHEEL_SIZE is a power of 2 (true for 2,3 -> 2 and 2,3,5 -> 8, the
+// two wheels worth using per the table above; false for 2,3,5,7 -> 48 and
+// 2,3,5,7,11 -> 480). When it is, phase wraparound (j -> (j+1) mod
+// WHEEL_SIZE) can use a mask instead of a compare-and-reset branch -- see
+// segment_sieve.hpp, where this is used via `if constexpr`.
+constexpr bool WHEEL_SIZE_IS_POW2 = (WHEEL_SIZE & (WHEEL_SIZE - 1)) == 0;
+
+constexpr int compute_wheel_size_log2() {
+    int v = WHEEL_SIZE;
+    int log = 0;
+    while (v > 1) { v >>= 1; ++log; }
+    return log;
+}
+constexpr int WHEEL_SIZE_LOG2 = WHEEL_SIZE_IS_POW2 ? compute_wheel_size_log2() : -1;
 
 constexpr bool is_prime_trial(uint64_t n) {
     if (n < 2) return false;
@@ -169,8 +206,8 @@ inline uint64_t wheel_count_upto(uint64_t limit) {
 // threads -- see the header comment. delta is stored as uint32_t (halving
 // the footprint vs uint64_t): its value is bounded by roughly p *
 // max(WHEEL_GAP) * WHEEL_SIZE / WHEEL_MOD, which stays well under 2^32 for
-// base primes far beyond what this tool's stated range (up to ~1e12, base
-// primes up to ~1e6) ever produces.
+// base primes far beyond what this tool's stated range (up to ~1e13, base
+// primes up to ~3.2e6) ever produces.
 struct WheelBasePrime {
     uint64_t p;
     std::array<uint32_t, WHEEL_SIZE> delta;

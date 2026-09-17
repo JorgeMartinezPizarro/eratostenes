@@ -1,53 +1,85 @@
 #pragma once
-// Segmented sieve on a mod-2310 wheel (2,3,5,7,11), bit-packed into
-// uint64_t words.
+// Segmented sieve on a compile-time wheel (see wheel.hpp), bit-packed into
+// uint64_t words, using a BUCKET SIEVE to mark multiples.
 //
-// Each segment covers a range of "wheel indices" [k_low, k_high): bit i is
-// 1 if wheel_number(k_low + i) is COMPOSITE, 0 if it is a prime candidate.
-// The numbers 2, 3, 5, 7 and 11 don't take part in this numbering (emitted
-// separately by the caller); wheel_base_primes must include every prime
-// <= sqrt(high) except those five, each with its jump table already
-// computed (see wheel.hpp) -- computed once per prime, not once per
-// segment.
+// The naive version of this (kept in git history) loops over every
+// "active" base prime for every segment, checking whether it has a
+// multiple to mark. That's fine for small primes (they always have
+// multiples in every segment), but for large primes -- with a step
+// comparable to or bigger than the segment width -- most of those visits
+// find nothing to mark. The number of (prime, segment) pairs grows faster
+// than N (roughly pi(sqrt(N)) * segment_count, and segment_count alone
+// already grows linearly with N), so at large N most of that looping is
+// pure overhead: dividing, checking "am I active", finding nothing to do.
 //
-// A persistent per-prime cursor across segments (carrying each prime's
-// wheel-index position forward instead of re-deriving it every segment)
-// was tried and measured *worse* at N=1e12 (1102s vs 970s here): at that
-// scale the per-prime jump table (see wheel.hpp) is far bigger than the
-// CPU's L3 cache (e.g. ~151MB vs 12MB for base primes up to sqrt(1e12)),
-// so the dominant cost is memory bandwidth to stream that shared table,
-// not the couple of divisions this class does per (prime, segment) pair.
-// The cursor added its own per-thread memory traffic without addressing
-// that, so it lost. Kept simple/stateless here on purpose; the real lever
-// for N in the 1e12+ range is shrinking that per-prime table (a smaller
-// wheel, or a structure shared across primes) rather than removing
-// divisions -- see README.
+// Bucket sieve inverts this: instead of every segment asking every active
+// prime "do you have work here?", every prime is scheduled into the bucket
+// of the exact future segment where its next multiple falls. Processing a
+// segment means looking at *only* its own bucket -- exactly the primes
+// with real work there, nothing else -- marking, then rescheduling each
+// one into whichever future bucket its *next* hit belongs to.
 //
-// Marking multiples without division (or multiplication) in the inner
-// loop: the wheel index k=wheel_index(p*m) is advanced directly using each
-// prime's precomputed delta table (see compute_wheel_deltas in wheel.hpp)
-// up to the segment's k_high bound; there is no need to reconstruct n=p*m
-// at every step.
+// Buckets live in a fixed-size ring (buckets_), indexed by segment number
+// modulo the ring size. This only works because no prime's multiples can
+// ever be more than num_buckets_ segments apart -- see the constructor for
+// how that bound is computed and margined, and schedule() for the runtime
+// check that would catch it (loudly) if that bound were ever wrong.
 //
-// Extraction: each word is decomposed into (q, r) = (k / WHEEL_SIZE,
-// k % WHEEL_SIZE) once per word (one division, amortized over up to 64
-// primes), and then advanced bit by bit with a bounded wrap-around
-// increment -- no further division anywhere in the hot path.
+// Small primes still get visited via their own bucket every time they have
+// work, same as before -- bucket sieve doesn't change how *often* a prime
+// is touched, only how *many other, irrelevant primes* get checked
+// alongside it. Newly-relevant primes (p*p just crossed into range) are
+// picked up by a single monotonically-advancing pointer into
+// wheel_base_primes (sorted by p) -- each prime is "activated" exactly
+// once across a whole chunk, not once per segment.
 //
-// Bits are inverted and walked with ctz + clear-lowest-bit, which is
-// faster than testing every bit individually.
+// Extraction (turning the finished bit array into actual prime values) is
+// unchanged from the non-bucket version: invert each word, decompose into
+// (q, r) = (k / WHEEL_SIZE, k % WHEEL_SIZE) once per word, then walk set
+// bits with ctz + clear-lowest-bit.
 
 #include <cstdint>
 #include <vector>
 #include <algorithm>
+#include <stdexcept>
 
 #include "wheel.hpp"
 
 class SegmentSieve {
 public:
-    explicit SegmentSieve(uint64_t max_wheel_count) {
-        size_t words = (max_wheel_count + 63) / 64;
-        words_.assign(words, 0);
+    // seg_k_width: wheel-index width of a normal (non-final) segment, same
+    // as passed to sieve_and_emit's k_high-k_low in every call but the
+    // last of a chunk.
+    // base_prime_max: the largest base prime this sieve will ever be given
+    // (i.e. isqrt(limit)) -- used to size the bucket ring generously
+    // enough that no prime's skip between hits can ever wrap around it.
+    SegmentSieve(uint64_t seg_k_width, uint64_t base_prime_max)
+        : words_((seg_k_width + 63) / 64, 0),
+          seg_k_width_(seg_k_width) {
+        uint64_t max_gap = 0;
+        for (uint64_t g : WHEEL_GAP) max_gap = std::max(max_gap, g);
+        // Upper bound on delta[] (see compute_wheel_deltas in wheel.hpp):
+        // floor_term*WHEEL_SIZE + (WHEEL_SIZE-1), floor_term <= (d+WHEEL_MOD-1)/WHEEL_MOD
+        // with d = p*max_gap. A few extra WHEEL_SIZE's of slack cost
+        // nothing (buckets are cheap) and keep this comfortably safe.
+        uint64_t d = base_prime_max * max_gap;
+        uint64_t delta_max = (d / WHEEL_MOD + 1) * static_cast<uint64_t>(WHEEL_SIZE) + 2 * static_cast<uint64_t>(WHEEL_SIZE);
+        uint64_t segments_ahead_max = delta_max / seg_k_width_ + 2;
+        num_buckets_ = 1;
+        while (num_buckets_ < (segments_ahead_max + 1) * 4) num_buckets_ <<= 1; // power of 2, 4x margin
+        buckets_.resize(num_buckets_);
+    }
+
+    // Must be called once before the first sieve_and_emit call for a new,
+    // independent run of consecutive segments in increasing k order (a
+    // thread's chunk). Resets all bucket state and the "which primes have
+    // activated yet" pointer. Never reuse a SegmentSieve across threads or
+    // out of order -- same restriction the old persistent-cursor attempt
+    // had, but this time the payoff is real (see header comment).
+    void begin_chunk() {
+        cur_segment_ = 0;
+        next_prime_idx_ = 0;
+        for (auto& b : buckets_) b.clear();
     }
 
     template <typename Writer>
@@ -60,42 +92,61 @@ public:
         size_t words_needed = (count + 63) / 64;
         std::fill(words_.begin(), words_.begin() + words_needed, 0ULL);
 
-        uint64_t low_n = wheel_number(k_low);
         uint64_t high_n = wheel_number(k_high); // exclusive numeric bound, valid for the p*p cutoff
 
-        for (const auto& wp : wheel_base_primes) {
-            uint64_t p = wp.p;
-            if (p * p >= high_n) break; // wheel_base_primes is sorted by p
+        // Activate any base primes that just became relevant (p*p < high_n).
+        // wheel_base_primes is sorted by p, so a single pointer that only
+        // ever moves forward is enough: each prime is visited here exactly
+        // once for the whole chunk, not once per segment.
+        if (next_prime_idx_ < wheel_base_primes.size()) {
+            uint64_t low_n = wheel_number(k_low);
+            while (next_prime_idx_ < wheel_base_primes.size()) {
+                uint64_t p = wheel_base_primes[next_prime_idx_].p;
+                if (p * p >= high_n) break;
 
-            // Find the smallest m coprime with WHEEL_MOD such that
-            // p*m >= max(p*p, low_n). One division to get m's residue, one
-            // table lookup to jump straight to the next coprime value --
-            // no per-step search loop.
-            uint64_t start_val = std::max(p * p, low_n);
-            uint64_t m = (start_val + p - 1) / p;
-            uint64_t r = m % WHEEL_MOD;
-            uint64_t step = STEP_TO_COPRIME[r];
-            m += step;
-            r += step;
-            if (r >= WHEEL_MOD) r -= WHEEL_MOD;
-            int j = WHEEL_POS[r];
+                // Same "find the first multiple" logic as the non-bucket
+                // version, just done once per prime instead of once per
+                // (prime, segment) pair.
+                uint64_t start_val = std::max(p * p, low_n);
+                uint64_t m = (start_val + p - 1) / p;
+                uint64_t r = m % WHEEL_MOD;
+                uint64_t step = STEP_TO_COPRIME[r];
+                m += step;
+                r += step;
+                if (r >= WHEEL_MOD) r -= WHEEL_MOD;
+                int j = WHEEL_POS[r];
+                uint64_t k = wheel_index(p * m);
 
-            uint64_t k = wheel_index(p * m);
-            const auto& delta = wp.delta;
+                schedule(k, j, static_cast<uint32_t>(next_prime_idx_), k_high);
+                ++next_prime_idx_;
+            }
+        }
 
-            // k_high is the exact wheel-index bound: no need to track "n"
-            // inside the loop (see header comment), just advance k with the
-            // precomputed jump table.
+        // Process exactly the entries due this segment: mark, advance,
+        // reschedule into whichever future bucket the next hit lands in.
+        Bucket& bucket = buckets_[cur_segment_ & (num_buckets_ - 1)];
+        for (const Entry& e : bucket) {
+            const auto& delta = wheel_base_primes[e.prime_idx].delta;
+            uint64_t k = e.k;
+            int j = e.j;
             while (k < k_high) {
                 uint64_t idx = k - k_low;
                 words_[idx >> 6] |= (1ULL << (idx & 63));
                 k += delta[j];
-                ++j;
-                if (j == WHEEL_SIZE) j = 0; // avoid a real division (WHEEL_SIZE isn't a power of 2)
+                if constexpr (WHEEL_SIZE_IS_POW2) {
+                    j = (j + 1) & (WHEEL_SIZE - 1); // branchless wraparound
+                } else {
+                    ++j;
+                    if (j == WHEEL_SIZE) j = 0;
+                }
             }
+            schedule(k, j, e.prime_idx, k_high);
         }
+        bucket.clear();
+        ++cur_segment_;
 
-        // Extraction: bit=0 => prime candidate.
+        // Extraction: bit=0 => prime candidate. Unchanged from the
+        // non-bucket version.
         for (size_t w = 0; w < words_needed; ++w) {
             uint64_t bits = ~words_[w];
             uint64_t base_idx = w * 64ULL;
@@ -105,8 +156,6 @@ public:
             }
             if (bits == 0) continue;
 
-            // One real division per word to locate its (q, r) decomposition;
-            // amortized over up to 64 primes below.
             uint64_t k_word_start = k_low + base_idx;
             uint64_t q = k_word_start / WHEEL_SIZE;
             uint64_t r = k_word_start % WHEEL_SIZE;
@@ -116,8 +165,14 @@ public:
                 uint64_t bit_pos = static_cast<uint64_t>(__builtin_ctzll(bits));
                 uint64_t step2 = bit_pos - prev_bit;
                 prev_bit = bit_pos;
-                r += step2;
-                while (r >= static_cast<uint64_t>(WHEEL_SIZE)) { r -= WHEEL_SIZE; ++q; }
+                if constexpr (WHEEL_SIZE_IS_POW2) {
+                    uint64_t rq = r + step2;
+                    q += rq >> WHEEL_SIZE_LOG2;
+                    r = rq & (static_cast<uint64_t>(WHEEL_SIZE) - 1);
+                } else {
+                    r += step2;
+                    while (r >= static_cast<uint64_t>(WHEEL_SIZE)) { r -= WHEEL_SIZE; ++q; }
+                }
 
                 uint64_t value = q * WHEEL_MOD + WHEEL_R[r];
                 out.write_uint64(value);
@@ -128,5 +183,32 @@ public:
     }
 
 private:
+    struct Entry {
+        uint64_t k;
+        int j;
+        uint32_t prime_idx; // index into wheel_base_primes
+    };
+    using Bucket = std::vector<Entry>;
+
+    // Schedules (k, j, prime_idx) into the bucket for whichever segment k
+    // falls into, given that the segment currently being processed ends at
+    // k_high. k < k_high means "due right now" (this segment's bucket);
+    // asserts rather than silently corrupting results if the ring ever
+    // turns out too small for the actual data (see constructor).
+    void schedule(uint64_t k, int j, uint32_t prime_idx, uint64_t k_high) {
+        uint64_t segments_ahead = (k < k_high) ? 0 : (k - k_high) / seg_k_width_ + 1;
+        if (segments_ahead >= num_buckets_) {
+            throw std::runtime_error(
+                "bucket sieve: salto de un primo mayor que el margen del anillo de cubos "
+                "(bug de dimensionamiento en el constructor de SegmentSieve)");
+        }
+        buckets_[(cur_segment_ + segments_ahead) & (num_buckets_ - 1)].push_back({k, j, prime_idx});
+    }
+
     std::vector<uint64_t> words_;
+    uint64_t seg_k_width_;
+    uint64_t num_buckets_ = 1;
+    std::vector<Bucket> buckets_;
+    uint64_t cur_segment_ = 0;
+    size_t next_prime_idx_ = 0;
 };

@@ -10,7 +10,7 @@ BIN := eratostenes
 IMAGE := eratostenes:latest
 OUT_DIR := $(CURDIR)/output
 
-.PHONY: all portable debug clean docker run
+.PHONY: all portable debug clean docker run test
 
 all: $(BIN)
 
@@ -36,3 +36,8 @@ docker:
 run:
 	mkdir -p $(OUT_DIR)
 	docker run --rm -v $(OUT_DIR):/output $(IMAGE) $(ARGS)
+
+# Compara pi(N) contra el valor conocido para N=1e8..1e11 (--count-only,
+# sin E/S). THREADS=N make test para fijar el numero de hilos.
+test: $(BIN)
+	./test.sh

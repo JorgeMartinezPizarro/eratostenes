@@ -1,6 +1,9 @@
 #pragma once
 // Command-line argument parsing: sizes with suffixes (k/m/b/t), thread
 // count, output path, segment width, count-only mode.
+//
+// The wheel (which primes to skip up front) is NOT here: it's a
+// compile-time constant in wheel.hpp, on purpose -- see that file.
 
 #include <cstdint>
 #include <string>
@@ -13,7 +16,20 @@ struct Options {
     uint64_t limit = 0;                 // N: sieve up to N (inclusive)
     unsigned threads = 0;                // 0 => auto (hardware_concurrency)
     std::string output = "primes.txt";   // final file
-    uint64_t segment_width = 1u << 18;   // numeric width per segment (must be even)
+    // Numeric width per segment (must be even). 1<<22 (~4.19M) measured as
+    // the sweet spot on a 12MB-L3 machine with the mod-30 wheel: big enough
+    // that per-segment overhead (bucket lookup, activation check,
+    // extraction loop setup -- roughly constant per segment, independent
+    // of its width) stays a small fraction of total time, small enough
+    // that each thread's per-segment bit array (proportional to this,
+    // divided by ~4 for the wheel density) still fits comfortably in L2.
+    // Measured effect at N=1e12, 12 threads: 275.27s (old default,
+    // 1<<18=262144) -> 89.54s (1<<22) -- keeps growing with N (2.2x at
+    // 1e11, 3.07x at 1e12) since more segments means more total per-segment
+    // overhead to amortize. Segment widths beyond ~1<<23 start regressing
+    // sharply (measured: 30s at 1<<25, 165s at 1<<26) once the bit array
+    // outgrows L2/L3 -- see benchmark.md for the full sweep.
+    uint64_t segment_width = 1u << 22;
     bool count_only = false;             // skip the write pass entirely
     bool show_help = false;
 };
@@ -70,9 +86,13 @@ inline void print_usage(const char* prog) {
         "                         (b = billon ingles = 1e9). Ej: 100b = 1e11\n"
         "  -o, --output PATH      Fichero de salida (default: primes.txt)\n"
         "  -t, --threads N        Numero de hilos (default: nucleos disponibles)\n"
-        "  -s, --segment-width N  Ancho numerico de cada segmento (default: 262144)\n"
+        "  -s, --segment-width N  Ancho numerico de cada segmento (default: 4194304)\n"
         "  -c, --count-only       Solo cuenta los primos, sin escribir el fichero\n"
         "  -h, --help             Muestra esta ayuda\n"
+        "\n"
+        "La rueda (que primos se descartan de entrada) se fija en tiempo de\n"
+        "compilacion en src/wheel.hpp (WHEEL_PRIMES) -- ver ese fichero para\n"
+        "las configuraciones ya preparadas y por que no es un flag de CLI.\n"
         "\n"
         "Ejemplos:\n"
         "  %s --limit 1000000 -o primos_1M.txt\n"
