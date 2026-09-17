@@ -10,22 +10,18 @@
 // computed (see wheel.hpp) -- computed once per prime, not once per
 // segment.
 //
-// Persistent per-prime cursor across segments: a naive segmented sieve
-// re-derives, for every (prime, segment) pair, "where is this prime's
-// first multiple in this segment" via a couple of divisions. That cost is
-// fine for a handful of segments, but the number of (prime, segment) pairs
-// grows roughly like pi(sqrt(N)) * N (segment count grows linearly with N,
-// while the number of active primes grows with sqrt(N)) -- it outgrows the
-// actual marking work (which grows closer to N*log(log(N))) as N gets
-// large, and ends up dominating the run time at N in the 1e12+ range.
-//
-// Instead, each prime's wheel-index position and phase (k, j) is computed
-// ONCE per prime per thread chunk (see begin_chunk), and carried forward
-// from one sieve_and_emit call to the next as a member Cursor: advancing
-// it a segment at a time is pure addition, no division anywhere. This is
-// only safe because a single SegmentSieve instance is used, by one thread,
-// for a whole contiguous run of segments in increasing k order (see
-// sieve_chunk in main.cpp) -- never reused across threads or out of order.
+// A persistent per-prime cursor across segments (carrying each prime's
+// wheel-index position forward instead of re-deriving it every segment)
+// was tried and measured *worse* at N=1e12 (1102s vs 970s here): at that
+// scale the per-prime jump table (see wheel.hpp) is far bigger than the
+// CPU's L3 cache (e.g. ~151MB vs 12MB for base primes up to sqrt(1e12)),
+// so the dominant cost is memory bandwidth to stream that shared table,
+// not the couple of divisions this class does per (prime, segment) pair.
+// The cursor added its own per-thread memory traffic without addressing
+// that, so it lost. Kept simple/stateless here on purpose; the real lever
+// for N in the 1e12+ range is shrinking that per-prime table (a smaller
+// wheel, or a structure shared across primes) rather than removing
+// divisions -- see README.
 //
 // Marking multiples without division (or multiplication) in the inner
 // loop: the wheel index k=wheel_index(p*m) is advanced directly using each
@@ -54,31 +50,6 @@ public:
         words_.assign(words, 0);
     }
 
-    // Must be called once, before the first sieve_and_emit call, with the
-    // wheel index the upcoming run of segments will start at. Sets up each
-    // prime's persistent cursor at its first relevant multiple -- the only
-    // place in this class that divides.
-    void begin_chunk(uint64_t chunk_k_low,
-                      const std::vector<WheelBasePrime>& wheel_base_primes) {
-        uint64_t low_n = wheel_number(chunk_k_low);
-        cursors_.resize(wheel_base_primes.size());
-        for (size_t i = 0; i < wheel_base_primes.size(); ++i) {
-            uint64_t p = wheel_base_primes[i].p;
-
-            // Smallest m coprime with WHEEL_MOD such that p*m >= max(p*p, low_n).
-            uint64_t start_val = std::max(p * p, low_n);
-            uint64_t m = (start_val + p - 1) / p;
-            uint64_t r = m % WHEEL_MOD;
-            uint64_t step = STEP_TO_COPRIME[r];
-            m += step;
-            r += step;
-            if (r >= WHEEL_MOD) r -= WHEEL_MOD;
-
-            cursors_[i].k = wheel_index(p * m);
-            cursors_[i].j = WHEEL_POS[r];
-        }
-    }
-
     template <typename Writer>
     void sieve_and_emit(uint64_t k_low, uint64_t k_high,
                          const std::vector<WheelBasePrime>& wheel_base_primes,
@@ -89,26 +60,38 @@ public:
         size_t words_needed = (count + 63) / 64;
         std::fill(words_.begin(), words_.begin() + words_needed, 0ULL);
 
+        uint64_t low_n = wheel_number(k_low);
         uint64_t high_n = wheel_number(k_high); // exclusive numeric bound, valid for the p*p cutoff
 
-        for (size_t i = 0; i < wheel_base_primes.size(); ++i) {
-            uint64_t p = wheel_base_primes[i].p;
+        for (const auto& wp : wheel_base_primes) {
+            uint64_t p = wp.p;
             if (p * p >= high_n) break; // wheel_base_primes is sorted by p
 
-            Cursor& c = cursors_[i];
-            const auto& delta = wheel_base_primes[i].delta;
+            // Find the smallest m coprime with WHEEL_MOD such that
+            // p*m >= max(p*p, low_n). One division to get m's residue, one
+            // table lookup to jump straight to the next coprime value --
+            // no per-step search loop.
+            uint64_t start_val = std::max(p * p, low_n);
+            uint64_t m = (start_val + p - 1) / p;
+            uint64_t r = m % WHEEL_MOD;
+            uint64_t step = STEP_TO_COPRIME[r];
+            m += step;
+            r += step;
+            if (r >= WHEEL_MOD) r -= WHEEL_MOD;
+            int j = WHEEL_POS[r];
+
+            uint64_t k = wheel_index(p * m);
+            const auto& delta = wp.delta;
 
             // k_high is the exact wheel-index bound: no need to track "n"
             // inside the loop (see header comment), just advance k with the
-            // precomputed jump table. c.k/c.j carry over to the next
-            // segment untouched when this loop runs zero times (prime not
-            // yet active in this segment) or stops mid-segment.
-            while (c.k < k_high) {
-                uint64_t idx = c.k - k_low;
+            // precomputed jump table.
+            while (k < k_high) {
+                uint64_t idx = k - k_low;
                 words_[idx >> 6] |= (1ULL << (idx & 63));
-                c.k += delta[c.j];
-                ++c.j;
-                if (c.j == WHEEL_SIZE) c.j = 0; // avoid a real division (WHEEL_SIZE isn't a power of 2)
+                k += delta[j];
+                ++j;
+                if (j == WHEEL_SIZE) j = 0; // avoid a real division (WHEEL_SIZE isn't a power of 2)
             }
         }
 
@@ -131,9 +114,9 @@ public:
             uint64_t prev_bit = 0;
             while (bits) {
                 uint64_t bit_pos = static_cast<uint64_t>(__builtin_ctzll(bits));
-                uint64_t step = bit_pos - prev_bit;
+                uint64_t step2 = bit_pos - prev_bit;
                 prev_bit = bit_pos;
-                r += step;
+                r += step2;
                 while (r >= static_cast<uint64_t>(WHEEL_SIZE)) { r -= WHEEL_SIZE; ++q; }
 
                 uint64_t value = q * WHEEL_MOD + WHEEL_R[r];
@@ -145,11 +128,5 @@ public:
     }
 
 private:
-    struct Cursor {
-        uint64_t k;
-        int j;
-    };
-
     std::vector<uint64_t> words_;
-    std::vector<Cursor> cursors_; // parallel to wheel_base_primes, set by begin_chunk
 };

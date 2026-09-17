@@ -1,11 +1,12 @@
-// Segmented, parallel, bit-packed Sieve of Eratosthenes, on a mod-2310
-// wheel (2*3*5*7*11 -- skips multiples of those five primes up front).
+// Segmented, parallel, bit-packed Sieve of Eratosthenes, on a wheel that
+// skips multiples of a small fixed set of primes up front (WHEEL_PRIMES in
+// wheel.hpp -- see that file for why bigger isn't always better here).
 //
 // Strategy:
 //   1. Compute the base primes (<= sqrt(N)) with a simple sieve.
 //   2. The "wheel index" range [1, wheel_count_upto(N)) -- which enumerates
-//      the numbers coprime with 2310 in (11, N], see wheel.hpp -- is split
-//      into T contiguous chunks, one per thread.
+//      the numbers coprime with WHEEL_MOD above the wheel's own primes, see
+//      wheel.hpp -- is split into T contiguous chunks, one per thread.
 //   3. COUNT PASS: each thread sieves its chunk and counts how many bytes
 //      of text its primes will take (writes nothing to disk). From those
 //      totals, prefix sums give the exact offset where each thread must
@@ -24,9 +25,9 @@
 // --count-only skips the write pass (and the file) entirely: the count
 // pass alone already yields the total, so nothing else needs to run.
 //
-// 2, 3, 5, 7 and 11 are the only primes that are multiples of themselves
-// among the wheel's own primes, and are special-cased in thread 0 (they
-// don't take part in the wheel numbering).
+// The wheel's own primes (WHEEL_PRIMES) are special-cased in thread 0 --
+// they don't take part in the wheel numbering, so they're just emitted
+// directly instead of being found by sieving.
 
 #include <cstdio>
 #include <cstdint>
@@ -49,11 +50,19 @@
 
 namespace fs = std::filesystem;
 
-// The smallest prime not covered by the wheel (2,3,5,7,11) itself.
-constexpr uint64_t FIRST_WHEEL_PRIME = 13;
-constexpr const char* SMALL_PRIMES_TEXT = "2\n3\n5\n7\n11\n";
-constexpr uint64_t SMALL_PRIMES_BYTES = 11; // strlen(SMALL_PRIMES_TEXT)
-constexpr uint64_t SMALL_PRIMES_COUNT = 5;
+// Text for the wheel's own primes (e.g. "2\n3\n5\n" for a mod-30 wheel),
+// built once from WHEEL_PRIMES so it never needs to be kept in sync by hand.
+inline std::string build_small_primes_text() {
+    std::string s;
+    for (uint64_t p : WHEEL_PRIMES) {
+        s += std::to_string(p);
+        s += '\n';
+    }
+    return s;
+}
+const std::string SMALL_PRIMES_TEXT = build_small_primes_text();
+const uint64_t SMALL_PRIMES_BYTES = SMALL_PRIMES_TEXT.size();
+const uint64_t SMALL_PRIMES_COUNT = WHEEL_PRIMES.size();
 
 struct ChunkRange {
     uint64_t low;   // first wheel index of the chunk (inclusive)
@@ -96,7 +105,6 @@ static void sieve_chunk(ChunkRange range, uint64_t seg_k_width,
                          Writer& out, uint64_t& local_count,
                          std::atomic<uint64_t>& progress) {
     SegmentSieve sieve(seg_k_width);
-    sieve.begin_chunk(range.low, wheel_base_primes);
     for (uint64_t k_low = range.low; k_low < range.high; k_low += seg_k_width) {
         uint64_t k_high = std::min(k_low + seg_k_width, range.high);
         sieve.sieve_and_emit(k_low, k_high, wheel_base_primes, out, local_count);
@@ -137,7 +145,7 @@ static void emit_worker(int idx, ChunkRange range, uint64_t seg_k_width,
     uint64_t local_count = 0;
 
     if (idx == 0) {
-        out.write_raw(SMALL_PRIMES_TEXT, SMALL_PRIMES_BYTES);
+        out.write_raw(SMALL_PRIMES_TEXT.data(), SMALL_PRIMES_BYTES);
     }
 
     sieve_chunk(range, seg_k_width, wheel_base_primes, out, local_count, progress);
@@ -185,17 +193,17 @@ int main(int argc, char** argv) {
         return 0;
     }
     if (opt.limit < FIRST_WHEEL_PRIME) {
-        // 2, 3, 5, 7 and 11 fall outside the mod-2310 wheel numbering; for
-        // limits this small there is no wheel range to sieve at all, so
-        // this is resolved directly, without the parallel machinery.
+        // The wheel's own primes fall outside its numbering; for limits
+        // this small there is no wheel range to sieve at all, so this is
+        // resolved directly, without the parallel machinery.
         unsigned n = 0;
-        for (uint64_t p : {2ULL, 3ULL, 5ULL, 7ULL, 11ULL}) if (opt.limit >= p) ++n;
+        for (uint64_t p : WHEEL_PRIMES) if (opt.limit >= p) ++n;
         if (opt.count_only) {
             std::fprintf(stderr, "Listo. %u primo(s) encontrado(s) hasta %llu.\n",
                          n, static_cast<unsigned long long>(opt.limit));
         } else {
             std::ofstream ofs(opt.output, std::ios::binary | std::ios::trunc);
-            for (uint64_t p : {2ULL, 3ULL, 5ULL, 7ULL, 11ULL}) if (opt.limit >= p) ofs << p << "\n";
+            for (uint64_t p : WHEEL_PRIMES) if (opt.limit >= p) ofs << p << "\n";
             std::fprintf(stderr, "Listo. %u primo(s) escrito(s) en %s\n", n, opt.output.c_str());
         }
         return 0;
@@ -207,8 +215,8 @@ int main(int argc, char** argv) {
     std::vector<uint64_t> base_primes = sieve_base_primes(base_limit);
     std::fprintf(stderr, "  %zu primos base encontrados.\n", base_primes.size());
 
-    // Per-prime wheel jump table (2, 3, 5, 7 and 11 don't need one: they
-    // are special-cased). Computed once here, not once per segment.
+    // Per-prime wheel jump table (the wheel's own primes don't need one:
+    // they are special-cased). Computed once here, not once per segment.
     std::vector<WheelBasePrime> wheel_base_primes;
     wheel_base_primes.reserve(base_primes.size());
     for (uint64_t p : base_primes) {

@@ -1,22 +1,38 @@
 #pragma once
-// Wheel factorization modulo 2*3*5*7*11 = 2310 (skips multiples of 2, 3, 5,
-// 7 and 11 up front).
+// Wheel factorization: skips multiples of a small fixed set of primes
+// (WHEEL_PRIMES below) up front. Change that one array to switch wheels
+// (e.g. {2,3,5} for mod 30, {2,3,5,7} for mod 210, {2,3,5,7,11} for mod
+// 2310) -- everything else (WHEEL_MOD, WHEEL_SIZE, the tables, the first
+// prime not covered by the wheel) is derived from it at compile time.
 //
-// The residues coprime with 2310 are WHEEL_SIZE = phi(2310) = 480 numbers
-// out of every 2310 (vs. 15 out of 30 for "odds only", or 8 out of 30 for
-// a mod-30 wheel). They are numbered with a continuous "wheel index"
-// k = 0,1,2,... that walks them in increasing order (k=0 -> 1, k=1 -> 13,
-// ..., k=479 -> 2309, k=480 -> 2311, ...). wheel_number()/wheel_index() are
-// inverses of each other.
+// Bigger wheels remove more candidates up front, but the marginal cost and
+// benefit scale very differently: adding prime p multiplies WHEEL_SIZE (and
+// so the per-prime jump table in WheelBasePrime, see below) by (p-1), while
+// it only cuts remaining density by a factor of (p-1)/p. For p=7 that's a
+// 6x bigger table for a 14% smaller density; for p=11, a 10x bigger table
+// for a 9% smaller density. Past a certain point the jump table (shared,
+// read by every thread every segment) stops fitting the CPU's L3 cache and
+// the sieve becomes memory-bandwidth bound rather than compute bound --
+// measured concretely on this project at N=1e12: mod 2310's ~151MB table
+// (12x this machine's 12MB L3) made the sieve slower than a plain
+// division-per-segment approach would suggest, and slower relative to a
+// reference JS sieve on the same hardware than the raw operation count
+// would predict. See README for the numbers. mod 30's table is only a few
+// MB, comfortably cache-resident even at N=1e12.
 //
-// 2, 3, 5, 7 and 11 fall outside this numbering and are handled separately
-// by the caller, the same way 2 was special-cased in the odds-only version.
+// The WHEEL_SIZE residues coprime with WHEEL_MOD are numbered with a
+// continuous "wheel index" k = 0,1,2,... that walks them in increasing
+// order (k=0 -> 1, k=1 -> the next coprime number, ...).
+// wheel_number()/wheel_index() are inverses of each other.
+//
+// The primes in WHEEL_PRIMES fall outside this numbering and are handled
+// separately by the caller (the same way 2 was special-cased in an
+// odds-only sieve).
 
 #include <cstdint>
 #include <array>
 
-constexpr uint64_t WHEEL_MOD = 2310;   // 2*3*5*7*11
-constexpr int WHEEL_SIZE = 480;        // phi(2310)
+constexpr std::array<uint64_t, 3> WHEEL_PRIMES = {2, 3, 5}; // <-- change this to switch wheels
 
 constexpr uint64_t wheel_gcd(uint64_t a, uint64_t b) {
     while (b != 0) {
@@ -26,6 +42,39 @@ constexpr uint64_t wheel_gcd(uint64_t a, uint64_t b) {
     }
     return a;
 }
+
+constexpr uint64_t compute_wheel_mod() {
+    uint64_t m = 1;
+    for (uint64_t p : WHEEL_PRIMES) m *= p;
+    return m;
+}
+constexpr uint64_t WHEEL_MOD = compute_wheel_mod();
+
+constexpr int compute_wheel_size() {
+    // WHEEL_MOD is squarefree (product of distinct primes), so
+    // phi(WHEEL_MOD) = product(p - 1) over its prime factors.
+    uint64_t phi = 1;
+    for (uint64_t p : WHEEL_PRIMES) phi *= (p - 1);
+    return static_cast<int>(phi);
+}
+constexpr int WHEEL_SIZE = compute_wheel_size();
+
+constexpr bool is_prime_trial(uint64_t n) {
+    if (n < 2) return false;
+    for (uint64_t d = 2; d * d <= n; ++d) {
+        if (n % d == 0) return false;
+    }
+    return true;
+}
+
+// The smallest prime not covered by the wheel -- the first "base prime"
+// that actually needs marking (below it, primes are emitted directly).
+constexpr uint64_t compute_first_wheel_prime() {
+    uint64_t c = WHEEL_PRIMES.back() + 1;
+    while (!is_prime_trial(c)) ++c;
+    return c;
+}
+constexpr uint64_t FIRST_WHEEL_PRIME = compute_first_wheel_prime();
 
 // The WHEEL_SIZE residues in [1, WHEEL_MOD) coprime with WHEEL_MOD, sorted.
 constexpr std::array<uint64_t, WHEEL_SIZE> make_wheel_r() {
@@ -75,7 +124,7 @@ constexpr std::array<uint32_t, WHEEL_MOD> make_step_to_coprime() {
 }
 constexpr std::array<uint32_t, WHEEL_MOD> STEP_TO_COPRIME = make_step_to_coprime();
 
-// The k-th number coprime with WHEEL_MOD (k=0 -> 1, k=1 -> 13, ...).
+// The k-th number coprime with WHEEL_MOD (k=0 -> 1, k=1 -> the next one, ...).
 inline uint64_t wheel_number(uint64_t k) {
     uint64_t q = k / WHEEL_SIZE;
     uint64_t j = k % WHEEL_SIZE;
@@ -103,8 +152,8 @@ inline uint64_t wheel_count_upto(uint64_t limit) {
     return q * WHEEL_SIZE + partial;
 }
 
-// A base prime (p >= 13, i.e. not one of the wheel's own primes) together
-// with its wheel-index jump table.
+// A base prime (p >= FIRST_WHEEL_PRIME, i.e. not one of the wheel's own
+// primes) together with its wheel-index jump table.
 //
 // For a multiplier m coprime with WHEEL_MOD, the product n=p*m is also
 // coprime with WHEEL_MOD (gcd(p, WHEEL_MOD)=1), and every multiple of p
@@ -117,11 +166,11 @@ inline uint64_t wheel_count_upto(uint64_t limit) {
 // This table is the single biggest piece of read-only state every thread
 // walks through for every segment (WHEEL_SIZE entries per base prime), so
 // its footprint matters for cache/memory-bandwidth behavior under many
-// threads. delta is stored as uint32_t (halving that footprint vs
-// uint64_t): its value is bounded by roughly p * max(WHEEL_GAP) *
-// WHEEL_SIZE / WHEEL_MOD, which stays well under 2^32 for base primes far
-// beyond what this tool's stated range (up to ~1e11, base primes up to
-// ~3.2e5) ever produces.
+// threads -- see the header comment. delta is stored as uint32_t (halving
+// the footprint vs uint64_t): its value is bounded by roughly p *
+// max(WHEEL_GAP) * WHEEL_SIZE / WHEEL_MOD, which stays well under 2^32 for
+// base primes far beyond what this tool's stated range (up to ~1e12, base
+// primes up to ~1e6) ever produces.
 struct WheelBasePrime {
     uint64_t p;
     std::array<uint32_t, WHEEL_SIZE> delta;
