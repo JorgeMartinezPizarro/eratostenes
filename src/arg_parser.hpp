@@ -20,7 +20,7 @@ struct Options {
     // roughly-fixed per-segment overhead (bucket lookup, activation check,
     // extraction setup) stays a small fraction of total time, narrow
     // enough that each thread's bit array still fits its cache -- see
-    // BENCHMARK.md for the sweep behind this default.
+    // README.md#benchmarks for the sweep behind this default.
     uint64_t segment_width = 1u << 22;
     bool count_only = false;             // skip the write pass entirely
     bool show_help = false;

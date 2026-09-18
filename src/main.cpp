@@ -33,6 +33,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdint>
+#include <exception>
 #include <vector>
 #include <string>
 #include <thread>
@@ -179,6 +180,41 @@ static void print_progress(const Colors& C, const char* label, std::atomic<uint6
     std::fprintf(stderr, "\r  %s%s:%s %s100.0%%%s   \n", C.label, label, C.reset, C.time, C.reset);
 }
 
+// Stops the progress thread on scope exit, normal or exceptional -- a
+// joinable std::thread whose destructor runs while still joinable calls
+// std::terminate(), so a worker exception unwinding past `prog` without
+// this would crash before ever reaching the catch in main().
+struct ProgressGuard {
+    std::atomic<bool>& done;
+    std::thread& th;
+    ~ProgressGuard() { done = true; th.join(); }
+};
+
+// Spawns fn(i) for i in [0, count) each in its own thread and joins them
+// all, then rethrows the first exception any of them raised. Plain
+// std::thread has no way to propagate an exception back to the caller on
+// its own -- one escaping a thread's function calls std::terminate()
+// instead -- so every worker call is run under a try/catch that stashes it
+// here (a full disk during the write pass, or the bucket-sieve sizing
+// check in SegmentSieve::schedule, are the realistic ways this fires).
+template <typename Fn>
+static void run_parallel(unsigned count, Fn&& fn) {
+    std::vector<std::exception_ptr> errors(count);
+    std::vector<std::thread> pool;
+    pool.reserve(count);
+    for (unsigned i = 0; i < count; ++i) {
+        pool.emplace_back([&fn, &errors, i]() {
+            try {
+                fn(i);
+            } catch (...) {
+                errors[i] = std::current_exception();
+            }
+        });
+    }
+    for (auto& th : pool) th.join();
+    for (auto& e : errors) if (e) std::rethrow_exception(e);
+}
+
 int main(int argc, char** argv) {
     Options opt;
     try {
@@ -244,12 +280,9 @@ int main(int argc, char** argv) {
     // themselves composite either way, so they survive extraction exactly
     // as before.
     //
-    // The rest split dense/sparse (see segment_sieve.hpp): a prime's
-    // average hit-gap in wheel-index terms is ~p itself, so p >=
-    // seg_k_width means at most ~1 hit per segment -- not enough repeats
-    // within a segment for the per-phase delta table to earn its keep.
-    // Those primes skip the table (sparse_primes, just the plain uint64_t)
-    // instead of paying wheel.hpp's `8 + 4*phi(wheel)` bytes each.
+    // The rest split dense/sparse -- see segment_sieve.hpp for why (p >=
+    // seg_k_width doesn't earn back the per-phase delta table's cost).
+    // sparse_primes skips it (just the plain uint64_t).
     std::vector<WheelBasePrime> wheel_base_primes;
     std::vector<uint64_t> sparse_primes;
     wheel_base_primes.reserve(base_primes.size());
@@ -279,121 +312,127 @@ int main(int argc, char** argv) {
                  WHEEL_PRIMES.size(),
                  wheel_base_primes.size(), sparse_primes.size());
 
-    if (opt.count_only) {
-        // Single pass, no I/O of any kind: NullSink skips even the
-        // to_chars conversion, since we only need the running count that
-        // sieve_and_emit already tracks internally.
-        std::vector<uint64_t> prime_counts(actual_threads, 0);
-        std::atomic<uint64_t> progress{0};
-        std::atomic<bool> done{false};
-        std::thread prog(print_progress, std::cref(C), "contando", std::ref(progress), total_span, std::ref(done));
+    // Every pass below runs worker threads that can throw (pwrite() on a
+    // full disk, or the bucket-sieve sizing check) -- see run_parallel for
+    // why that needs this try/catch rather than main()'s existing one
+    // around parse_args.
+    try {
+        if (opt.count_only) {
+            // Single pass, no I/O of any kind: NullSink skips even the
+            // to_chars conversion, since we only need the running count that
+            // sieve_and_emit already tracks internally.
+            std::vector<uint64_t> prime_counts(actual_threads, 0);
+            {
+                std::atomic<uint64_t> progress{0};
+                std::atomic<bool> done{false};
+                std::thread prog(print_progress, std::cref(C), "contando", std::ref(progress), total_span, std::ref(done));
+                ProgressGuard guard{done, prog};
 
-        std::vector<std::thread> pool;
-        for (unsigned i = 0; i < actual_threads; ++i) {
-            pool.emplace_back(count_only_worker, ranges[i], seg_k_width, base_limit, std::cref(wheel_base_primes),
-                               std::cref(sparse_primes), std::cref(presieve), std::ref(prime_counts[i]), std::ref(progress));
+                run_parallel(actual_threads, [&](unsigned i) {
+                    count_only_worker(ranges[i], seg_k_width, base_limit, wheel_base_primes,
+                                       sparse_primes, presieve, prime_counts[i], progress);
+                });
+            } // guard destructs here: progress thread joined before the summary prints below
+
+            uint64_t total_primes = SMALL_PRIMES_COUNT;
+            for (auto c : prime_counts) total_primes += c;
+
+            auto t_end = std::chrono::steady_clock::now();
+            double total_s = std::chrono::duration<double>(t_end - t_start).count();
+            double total_mprimes = total_s > 0 ? (total_primes / 1e6 / total_s) : 0.0;
+
+            std::fprintf(stderr,
+                "%sListo.%s %s%s%s primos encontrados hasta %s.\n"
+                "  %stotal:%s      %s%.2fs%s (%s%.1f M primos/s%s)\n",
+                C.headline, C.reset,
+                C.bold, format_thousands(total_primes).c_str(), C.reset,
+                format_thousands(opt.limit).c_str(),
+                C.headline, C.reset, C.time, total_s, C.reset, C.headline, total_mprimes, C.reset);
+
+            return 0;
         }
-        for (auto& th : pool) th.join();
-        done = true;
-        prog.join();
 
-        uint64_t total_primes = SMALL_PRIMES_COUNT;
+        // --- Pass 1: byte counting (no I/O) ---
+        std::vector<uint64_t> byte_counts(actual_threads, 0);
+        std::vector<uint64_t> prime_counts(actual_threads, 0);
+        {
+            std::atomic<uint64_t> progress{0};
+            std::atomic<bool> done{false};
+            std::thread prog(print_progress, std::cref(C), "contando", std::ref(progress), total_span, std::ref(done));
+            ProgressGuard guard{done, prog};
+
+            run_parallel(actual_threads, [&](unsigned i) {
+                count_worker(ranges[i], seg_k_width, base_limit, wheel_base_primes,
+                             sparse_primes, presieve, byte_counts[i], prime_counts[i], progress);
+            });
+        }
+
+        byte_counts[0] += SMALL_PRIMES_BYTES;
+        prime_counts[0] += SMALL_PRIMES_COUNT;
+
+        std::vector<uint64_t> offsets(actual_threads, 0);
+        for (unsigned i = 1; i < actual_threads; ++i) offsets[i] = offsets[i - 1] + byte_counts[i - 1];
+        uint64_t total_bytes = offsets.back() + byte_counts.back();
+        uint64_t total_primes = 0;
         for (auto c : prime_counts) total_primes += c;
 
+        auto t_count_done = std::chrono::steady_clock::now();
+
+        // --- Size the final file exactly ---
+        {
+            std::ofstream(opt.output, std::ios::binary | std::ios::trunc); // create/truncate
+        }
+        fs::resize_file(opt.output, total_bytes);
+
+        int fd = ::open(opt.output.c_str(), O_WRONLY);
+        if (fd < 0) {
+            std::fprintf(stderr, "Error: no se pudo abrir %s para escritura\n", opt.output.c_str());
+            return 1;
+        }
+
+        // --- Pass 2: parallel direct write ---
+        {
+            std::atomic<uint64_t> progress{0};
+            std::atomic<bool> done{false};
+            std::thread prog(print_progress, std::cref(C), "escribiendo", std::ref(progress), total_span, std::ref(done));
+            ProgressGuard guard{done, prog};
+
+            try {
+                run_parallel(actual_threads, [&](unsigned i) {
+                    emit_worker(static_cast<int>(i), ranges[i], seg_k_width, base_limit,
+                                wheel_base_primes, sparse_primes, presieve, fd, offsets[i], progress);
+                });
+            } catch (...) {
+                ::close(fd);
+                throw;
+            }
+        }
+        ::close(fd);
+
         auto t_end = std::chrono::steady_clock::now();
+        double count_s = std::chrono::duration<double>(t_count_done - t_start).count();
+        double write_s = std::chrono::duration<double>(t_end - t_count_done).count();
         double total_s = std::chrono::duration<double>(t_end - t_start).count();
+        double count_mprimes = count_s > 0 ? (total_primes / 1e6 / count_s) : 0.0;
+        double write_gbps = write_s > 0 ? (total_bytes / 1e9 / write_s) : 0.0;
         double total_mprimes = total_s > 0 ? (total_primes / 1e6 / total_s) : 0.0;
 
         std::fprintf(stderr,
-            "%sListo.%s %s%s%s primos encontrados hasta %s.\n"
-            "  %stotal:%s      %s%.2fs%s (%s%.1f M primos/s%s)\n",
+            "%sListo.%s %s%s%s primos encontrados hasta %s %s(%.2f GB)%s.\n"
+            "  %sconteo:%s     %s%6.2fs%s  (%s%.1f M primos/s%s)\n"
+            "  %sescritura:%s  %s%6.2fs%s  (%s%.2f GB/s%s)\n"
+            "  %stotal:%s      %s%6.2fs%s  (%s%.1f M primos/s%s)\n",
             C.headline, C.reset,
             C.bold, format_thousands(total_primes).c_str(), C.reset,
             format_thousands(opt.limit).c_str(),
+            C.dim, total_bytes / 1e9, C.reset,
+            C.label, C.reset, C.time, count_s, C.reset, C.rate, count_mprimes, C.reset,
+            C.label, C.reset, C.time, write_s, C.reset, C.io, write_gbps, C.reset,
             C.headline, C.reset, C.time, total_s, C.reset, C.headline, total_mprimes, C.reset);
 
         return 0;
-    }
-
-    // --- Pass 1: byte counting (no I/O) ---
-    std::vector<uint64_t> byte_counts(actual_threads, 0);
-    std::vector<uint64_t> prime_counts(actual_threads, 0);
-    {
-        std::atomic<uint64_t> progress{0};
-        std::atomic<bool> done{false};
-        std::thread prog(print_progress, std::cref(C), "contando", std::ref(progress), total_span, std::ref(done));
-
-        std::vector<std::thread> pool;
-        for (unsigned i = 0; i < actual_threads; ++i) {
-            pool.emplace_back(count_worker, ranges[i], seg_k_width, base_limit, std::cref(wheel_base_primes),
-                               std::cref(sparse_primes), std::cref(presieve), std::ref(byte_counts[i]), std::ref(prime_counts[i]), std::ref(progress));
-        }
-        for (auto& th : pool) th.join();
-        done = true;
-        prog.join();
-    }
-
-    byte_counts[0] += SMALL_PRIMES_BYTES;
-    prime_counts[0] += SMALL_PRIMES_COUNT;
-
-    std::vector<uint64_t> offsets(actual_threads, 0);
-    for (unsigned i = 1; i < actual_threads; ++i) offsets[i] = offsets[i - 1] + byte_counts[i - 1];
-    uint64_t total_bytes = offsets.back() + byte_counts.back();
-    uint64_t total_primes = 0;
-    for (auto c : prime_counts) total_primes += c;
-
-    auto t_count_done = std::chrono::steady_clock::now();
-
-    // --- Size the final file exactly ---
-    {
-        std::ofstream(opt.output, std::ios::binary | std::ios::trunc); // create/truncate
-    }
-    fs::resize_file(opt.output, total_bytes);
-
-    int fd = ::open(opt.output.c_str(), O_WRONLY);
-    if (fd < 0) {
-        std::fprintf(stderr, "Error: no se pudo abrir %s para escritura\n", opt.output.c_str());
+    } catch (const std::exception& e) {
+        std::fprintf(stderr, "\nError: %s\n", e.what());
         return 1;
     }
-
-    // --- Pass 2: parallel direct write ---
-    {
-        std::atomic<uint64_t> progress{0};
-        std::atomic<bool> done{false};
-        std::thread prog(print_progress, std::cref(C), "escribiendo", std::ref(progress), total_span, std::ref(done));
-
-        std::vector<std::thread> pool;
-        for (unsigned i = 0; i < actual_threads; ++i) {
-            pool.emplace_back(emit_worker, static_cast<int>(i), ranges[i], seg_k_width, base_limit,
-                               std::cref(wheel_base_primes), std::cref(sparse_primes), std::cref(presieve),
-                               fd, offsets[i], std::ref(progress));
-        }
-        for (auto& th : pool) th.join();
-        done = true;
-        prog.join();
-    }
-    ::close(fd);
-
-    auto t_end = std::chrono::steady_clock::now();
-    double count_s = std::chrono::duration<double>(t_count_done - t_start).count();
-    double write_s = std::chrono::duration<double>(t_end - t_count_done).count();
-    double total_s = std::chrono::duration<double>(t_end - t_start).count();
-    double count_mprimes = count_s > 0 ? (total_primes / 1e6 / count_s) : 0.0;
-    double write_gbps = write_s > 0 ? (total_bytes / 1e9 / write_s) : 0.0;
-    double total_mprimes = total_s > 0 ? (total_primes / 1e6 / total_s) : 0.0;
-
-    std::fprintf(stderr,
-        "%sListo.%s %s%s%s primos encontrados hasta %s %s(%.2f GB)%s.\n"
-        "  %sconteo:%s     %s%6.2fs%s  (%s%.1f M primos/s%s)\n"
-        "  %sescritura:%s  %s%6.2fs%s  (%s%.2f GB/s%s)\n"
-        "  %stotal:%s      %s%6.2fs%s  (%s%.1f M primos/s%s)\n",
-        C.headline, C.reset,
-        C.bold, format_thousands(total_primes).c_str(), C.reset,
-        format_thousands(opt.limit).c_str(),
-        C.dim, total_bytes / 1e9, C.reset,
-        C.label, C.reset, C.time, count_s, C.reset, C.rate, count_mprimes, C.reset,
-        C.label, C.reset, C.time, write_s, C.reset, C.io, write_gbps, C.reset,
-        C.headline, C.reset, C.time, total_s, C.reset, C.headline, total_mprimes, C.reset);
-
-    return 0;
 }

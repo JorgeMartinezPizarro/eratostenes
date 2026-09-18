@@ -11,8 +11,8 @@
 // faster than the benefit: adding prime p multiplies the table by (p-1)
 // but only cuts marking work by (p-1)/p. Past a certain size that table
 // stops fitting the CPU's L3 cache and the sieve becomes
-// memory-bandwidth-bound rather than compute-bound. See BENCHMARK.md for
-// measured table sizes and timings across wheels and N.
+// memory-bandwidth-bound rather than compute-bound. See README.md#benchmarks
+// for measured table sizes and timings across wheels and N.
 //
 //   Some configs to try (uncomment one, comment the rest, then `make`):
 //
