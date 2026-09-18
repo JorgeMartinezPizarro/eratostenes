@@ -1,30 +1,64 @@
 CXX ?= g++
-CXXFLAGS_COMMON := -std=c++20 -Wall -Wextra -pthread
-CXXFLAGS_RELEASE := $(CXXFLAGS_COMMON) -O3 -march=native -flto
+CXXFLAGS_COMMON   := -std=c++20 -Wall -Wextra -pthread
+CXXFLAGS_RELEASE  := $(CXXFLAGS_COMMON) -O3 -march=native -flto
 CXXFLAGS_PORTABLE := $(CXXFLAGS_COMMON) -O3
-CXXFLAGS_DEBUG := $(CXXFLAGS_COMMON) -O0 -g -fsanitize=address,undefined
+CXXFLAGS_DEBUG    := $(CXXFLAGS_COMMON) -O0 -g -fsanitize=address,undefined
 
-SRC := src/main.cpp
-BIN := eratostenes
+BIN     := eratostenes
+SRC_DIR := src
+SRCS    := $(wildcard $(SRC_DIR)/*.cpp)
+HEADERS := $(wildcard $(SRC_DIR)/*.hpp)
 
-IMAGE := eratostenes:latest
+# Un obj/<perfil>/ por perfil de compilacion (release/portable/debug): cada
+# uno usa flags distintos, asi que sus .o no pueden compartirse -- si
+# vivieran en el mismo directorio, cambiar de perfil enlazaria objetos
+# compilados con las flags del perfil anterior sin recompilarlos.
+OBJ_DIR_RELEASE  := obj/release
+OBJ_DIR_PORTABLE := obj/portable
+OBJ_DIR_DEBUG    := obj/debug
+
+OBJS_RELEASE  := $(SRCS:$(SRC_DIR)/%.cpp=$(OBJ_DIR_RELEASE)/%.o)
+OBJS_PORTABLE := $(SRCS:$(SRC_DIR)/%.cpp=$(OBJ_DIR_PORTABLE)/%.o)
+OBJS_DEBUG    := $(SRCS:$(SRC_DIR)/%.cpp=$(OBJ_DIR_DEBUG)/%.o)
+
+IMAGE   := eratostenes:latest
 OUT_DIR := $(CURDIR)/output
 
-.PHONY: all portable debug clean docker run test
+.PHONY: all portable debug clean fclean re docker run test
 
+# --- release (default) ---
 all: $(BIN)
 
-$(BIN): $(SRC) src/*.hpp
-	$(CXX) $(CXXFLAGS_RELEASE) -o $(BIN) $(SRC)
+$(BIN): $(OBJS_RELEASE)
+	$(CXX) $(CXXFLAGS_RELEASE) -o $@ $(OBJS_RELEASE)
 
-portable: $(SRC) src/*.hpp
-	$(CXX) $(CXXFLAGS_PORTABLE) -o $(BIN) $(SRC)
+$(OBJ_DIR_RELEASE)/%.o: $(SRC_DIR)/%.cpp $(HEADERS) | $(OBJ_DIR_RELEASE)
+	$(CXX) $(CXXFLAGS_RELEASE) -c $< -o $@
 
-debug: $(SRC) src/*.hpp
-	$(CXX) $(CXXFLAGS_DEBUG) -o $(BIN)_debug $(SRC)
+# --- portable: no -march=native, for a binary you'll copy to another machine ---
+portable: $(OBJS_PORTABLE)
+	$(CXX) $(CXXFLAGS_PORTABLE) -o $(BIN) $(OBJS_PORTABLE)
+
+$(OBJ_DIR_PORTABLE)/%.o: $(SRC_DIR)/%.cpp $(HEADERS) | $(OBJ_DIR_PORTABLE)
+	$(CXX) $(CXXFLAGS_PORTABLE) -c $< -o $@
+
+# --- debug: ASan/UBSan ---
+debug: $(OBJS_DEBUG)
+	$(CXX) $(CXXFLAGS_DEBUG) -o $(BIN)_debug $(OBJS_DEBUG)
+
+$(OBJ_DIR_DEBUG)/%.o: $(SRC_DIR)/%.cpp $(HEADERS) | $(OBJ_DIR_DEBUG)
+	$(CXX) $(CXXFLAGS_DEBUG) -c $< -o $@
+
+$(OBJ_DIR_RELEASE) $(OBJ_DIR_PORTABLE) $(OBJ_DIR_DEBUG):
+	mkdir -p $@
 
 clean:
+	rm -rf obj
+
+fclean: clean
 	rm -f $(BIN) $(BIN)_debug
+
+re: fclean all
 
 docker:
 	docker build -t $(IMAGE) .
@@ -35,7 +69,8 @@ docker:
 # Ejemplo: make run ARGS="--limit 1e9 -o /output/primos.txt -t 8"
 run:
 	mkdir -p $(OUT_DIR)
-	docker run --rm -v $(OUT_DIR):/output $(IMAGE) $(ARGS)
+	@if [ -t 1 ]; then tty_flag=-t; else tty_flag=; fi; \
+	docker run --rm $$tty_flag -e DISPLAY=$$DISPLAY -v $(OUT_DIR):/output $(IMAGE) $(ARGS)
 
 # Compara pi(N) contra el valor conocido para N=1e8..1e11 (--count-only,
 # sin E/S). THREADS=N make test para fijar el numero de hilos.
