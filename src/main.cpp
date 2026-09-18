@@ -31,6 +31,7 @@
 // directly instead of being found by sieving.
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstdint>
 #include <exception>
@@ -48,12 +49,40 @@
 #include "arg_parser.hpp"
 #include "base_sieve.hpp"
 #include "colors.hpp"
+#include "gap_block_sink.hpp"
 #include "presieve.hpp"
 #include "segment_sieve.hpp"
 #include "sinks.hpp"
+#include "sqlite_prime_store.hpp"
 #include "wheel.hpp"
 
 namespace fs = std::filesystem;
+
+// Dispatches -o/--output on its extension: ".db" (case-insensitive) means
+// the SQLite + zstd gap-encoded format (gap_block_sink.hpp,
+// sqlite_prime_store.hpp); anything else keeps the original one-prime-per-
+// line text format.
+static bool is_db_output(const std::string& path) {
+    fs::path p(path);
+    std::string ext = p.extension().string();
+    for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return ext == ".db";
+}
+
+// Writes a (small, already-known) list of primes straight into a .db store,
+// with no threading -- used by the tiny-N early-return paths below, where
+// N is too small for the parallel wheel machinery to apply at all.
+static void write_tiny_db(const std::string& path, const std::vector<uint64_t>& primes,
+                           uint64_t limit, uint64_t block_size, int zstd_level) {
+    SqlitePrimeStore store(path);
+    {
+        GapBlockSink sink(0, block_size, zstd_level,
+                           [&store](PendingBlock b) { store.push(std::move(b)); });
+        for (uint64_t p : primes) sink.write_uint64(p);
+        sink.flush();
+    }
+    store.finish(primes.size(), limit, WHEEL_MOD, block_size, zstd_level);
+}
 
 // Text for the wheel's own primes (e.g. "2\n3\n5\n" for a mod-30 wheel),
 // built once from WHEEL_PRIMES so it never needs to be kept in sync by hand.
@@ -166,6 +195,31 @@ static void emit_worker(int idx, ChunkRange range, uint64_t seg_k_width, uint64_
     out.flush();
 }
 
+// .db write pass: re-sieves the same chunk and feeds a GapBlockSink, which
+// gap-encodes/compresses in BLOCK_SIZE-prime blocks and pushes each one to
+// 'store' (thread-safe, see SqlitePrimeStore::push) as it completes -- no
+// disjoint-region bookkeeping needed here, unlike DirectWriter/pwrite,
+// since blocks carry their own start_index and SQLite doesn't care what
+// order rows are inserted in.
+static void emit_db_worker(int idx, ChunkRange range, uint64_t seg_k_width, uint64_t base_prime_max,
+                            const std::vector<WheelBasePrime>& wheel_base_primes,
+                            const std::vector<uint64_t>& sparse_primes,
+                            const Presieve& presieve,
+                            SqlitePrimeStore& store, uint64_t start_index,
+                            uint64_t block_size, int zstd_level,
+                            std::atomic<uint64_t>& progress) {
+    GapBlockSink sink(start_index, block_size, zstd_level,
+                       [&store](PendingBlock b) { store.push(std::move(b)); });
+    uint64_t local_count = 0;
+
+    if (idx == 0) {
+        for (uint64_t p : WHEEL_PRIMES) sink.write_uint64(p);
+    }
+
+    sieve_chunk(range, seg_k_width, base_prime_max, wheel_base_primes, sparse_primes, presieve, sink, local_count, progress);
+    sink.flush();
+}
+
 static void print_progress(const Colors& C, const char* label, std::atomic<uint64_t>& progress,
                             uint64_t total, std::atomic<bool>& done) {
     using namespace std::chrono_literals;
@@ -237,6 +291,9 @@ int main(int argc, char** argv) {
         if (opt.count_only) {
             std::fprintf(stderr, "Listo. 0 primos encontrados hasta %llu.\n",
                          static_cast<unsigned long long>(opt.limit));
+        } else if (is_db_output(opt.output)) {
+            write_tiny_db(opt.output, {}, opt.limit, opt.db_block_size, opt.zstd_level);
+            std::fprintf(stderr, "N < 2: no hay primos. Fichero .db vacio creado en %s\n", opt.output.c_str());
         } else {
             std::ofstream(opt.output, std::ios::binary | std::ios::trunc);
             std::fprintf(stderr, "N < 2: no hay primos. Fichero vacio creado en %s\n", opt.output.c_str());
@@ -247,15 +304,18 @@ int main(int argc, char** argv) {
         // The wheel's own primes fall outside its numbering; for limits
         // this small there is no wheel range to sieve at all, so this is
         // resolved directly, without the parallel machinery.
-        unsigned n = 0;
-        for (uint64_t p : WHEEL_PRIMES) if (opt.limit >= p) ++n;
+        std::vector<uint64_t> small;
+        for (uint64_t p : WHEEL_PRIMES) if (opt.limit >= p) small.push_back(p);
         if (opt.count_only) {
-            std::fprintf(stderr, "Listo. %u primo(s) encontrado(s) hasta %llu.\n",
-                         n, static_cast<unsigned long long>(opt.limit));
+            std::fprintf(stderr, "Listo. %zu primo(s) encontrado(s) hasta %llu.\n",
+                         small.size(), static_cast<unsigned long long>(opt.limit));
+        } else if (is_db_output(opt.output)) {
+            write_tiny_db(opt.output, small, opt.limit, opt.db_block_size, opt.zstd_level);
+            std::fprintf(stderr, "Listo. %zu primo(s) escrito(s) en %s\n", small.size(), opt.output.c_str());
         } else {
             std::ofstream ofs(opt.output, std::ios::binary | std::ios::trunc);
-            for (uint64_t p : WHEEL_PRIMES) if (opt.limit >= p) ofs << p << "\n";
-            std::fprintf(stderr, "Listo. %u primo(s) escrito(s) en %s\n", n, opt.output.c_str());
+            for (uint64_t p : small) ofs << p << "\n";
+            std::fprintf(stderr, "Listo. %zu primo(s) escrito(s) en %s\n", small.size(), opt.output.c_str());
         }
         return 0;
     }
@@ -347,6 +407,73 @@ int main(int argc, char** argv) {
                 C.headline, C.reset,
                 C.bold, format_thousands(total_primes).c_str(), C.reset,
                 format_thousands(opt.limit).c_str(),
+                C.headline, C.reset, C.time, total_s, C.reset, C.headline, total_mprimes, C.reset);
+
+            return 0;
+        }
+
+        if (is_db_output(opt.output)) {
+            // --- Pass 1: prime counting (NullSink -- cheaper than the text
+            // path's ByteCounter, since block sizing only needs how many
+            // primes each thread finds, not their text width) ---
+            std::vector<uint64_t> prime_counts(actual_threads, 0);
+            {
+                std::atomic<uint64_t> progress{0};
+                std::atomic<bool> done{false};
+                std::thread prog(print_progress, std::cref(C), "contando", std::ref(progress), total_span, std::ref(done));
+                ProgressGuard guard{done, prog};
+
+                run_parallel(actual_threads, [&](unsigned i) {
+                    count_only_worker(ranges[i], seg_k_width, base_limit, wheel_base_primes,
+                                       sparse_primes, presieve, prime_counts[i], progress);
+                });
+            }
+
+            prime_counts[0] += SMALL_PRIMES_COUNT;
+
+            std::vector<uint64_t> prime_offset(actual_threads, 0);
+            for (unsigned i = 1; i < actual_threads; ++i) prime_offset[i] = prime_offset[i - 1] + prime_counts[i - 1];
+            uint64_t total_primes = prime_offset.back() + prime_counts.back();
+
+            auto t_count_done = std::chrono::steady_clock::now();
+
+            // --- Pass 2: parallel sieve + gap-encode + zstd, one dedicated
+            // writer thread draining into SQLite (see SqlitePrimeStore) ---
+            SqlitePrimeStore store(opt.output);
+            {
+                std::atomic<uint64_t> progress{0};
+                std::atomic<bool> done{false};
+                std::thread prog(print_progress, std::cref(C), "escribiendo", std::ref(progress), total_span, std::ref(done));
+                ProgressGuard guard{done, prog};
+
+                run_parallel(actual_threads, [&](unsigned i) {
+                    emit_db_worker(static_cast<int>(i), ranges[i], seg_k_width, base_limit,
+                                    wheel_base_primes, sparse_primes, presieve,
+                                    store, prime_offset[i], opt.db_block_size, opt.zstd_level, progress);
+                });
+            }
+            store.finish(total_primes, opt.limit, WHEEL_MOD, opt.db_block_size, opt.zstd_level);
+
+            auto t_end = std::chrono::steady_clock::now();
+            double count_s = std::chrono::duration<double>(t_count_done - t_start).count();
+            double write_s = std::chrono::duration<double>(t_end - t_count_done).count();
+            double total_s = std::chrono::duration<double>(t_end - t_start).count();
+            double count_mprimes = count_s > 0 ? (total_primes / 1e6 / count_s) : 0.0;
+            double total_mprimes = total_s > 0 ? (total_primes / 1e6 / total_s) : 0.0;
+            uint64_t db_bytes = fs::file_size(opt.output);
+            double bytes_per_prime = total_primes ? static_cast<double>(db_bytes) / total_primes : 0.0;
+
+            std::fprintf(stderr,
+                "%sListo.%s %s%s%s primos encontrados hasta %s %s(%.2f GB, %.3f B/primo)%s.\n"
+                "  %sconteo:%s     %s%6.2fs%s  (%s%.1f M primos/s%s)\n"
+                "  %sescritura:%s  %s%6.2fs%s\n"
+                "  %stotal:%s      %s%6.2fs%s  (%s%.1f M primos/s%s)\n",
+                C.headline, C.reset,
+                C.bold, format_thousands(total_primes).c_str(), C.reset,
+                format_thousands(opt.limit).c_str(),
+                C.dim, db_bytes / 1e9, bytes_per_prime, C.reset,
+                C.label, C.reset, C.time, count_s, C.reset, C.rate, count_mprimes, C.reset,
+                C.label, C.reset, C.time, write_s, C.reset,
                 C.headline, C.reset, C.time, total_s, C.reset, C.headline, total_mprimes, C.reset);
 
             return 0;

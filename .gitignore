@@ -1,6 +1,8 @@
 eratostenes
 eratostenes_debug
+nth_prime
 *.txt
+*.db
 *.o
 /obj/
 /output/

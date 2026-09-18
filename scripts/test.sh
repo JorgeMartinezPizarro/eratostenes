@@ -1,15 +1,18 @@
 #!/bin/bash
 # Prueba de regresion: compara pi(N) contra el valor de referencia conocido
-# para N = 1e8 .. 1e11, usando --count-only (sin E/S a disco). Pensado para
-# `make test`, pero tambien se puede correr suelto (./test.sh) siempre que
-# el binario ya este compilado.
+# para N = 1e8 .. 1e11, usando --count-only (sin E/S a disco); y, aparte,
+# construye un .db real en N=1e10 y comprueba unos cuantos primos conocidos
+# por posicion via nth_prime (ver README, seccion ".db output"). Pensado
+# para `make test`, pero tambien se puede correr suelto (./test.sh) siempre
+# que los binarios ya esten compilados.
 set -u
 
 BIN=./eratostenes
+NTH_BIN=./nth_prime
 THREADS=${THREADS:-$(nproc 2>/dev/null || echo 4)}
 
-if [ ! -x "$BIN" ]; then
-    echo "Error: no se encuentra $BIN compilado. Ejecuta 'make' primero." >&2
+if [ ! -x "$BIN" ] || [ ! -x "$NTH_BIN" ]; then
+    echo "Error: no se encuentra $BIN o $NTH_BIN compilados. Ejecuta 'make' primero." >&2
     exit 1
 fi
 
@@ -39,6 +42,44 @@ for i in "${!NS[@]}"; do
         fail=1
     fi
 done
+
+
+# --- .db: construye una vez en N=1e10 y comprueba primos conocidos por
+# posicion (el primero, dos valores de referencia bien conocidos -- el
+# primo 1000 y el 10000 -- el primo 200 millones, y el ultimo) via
+# nth_prime, el lector de .db. ---
+DB=$(mktemp --suffix=.db)
+trap 'rm -f "$DB"' EXIT
+
+"$BIN" -n 10000000000 -t "$THREADS" -o "$DB" >/dev/null 2>&1
+
+# posicion (1-indexada, N=1 -> 2) -> primo N-esimo conocido
+POS=(1 1000 10000 200000000 455052511)
+PRIMES=(2 7919 104729 4222234741 9999999967)
+
+for i in "${!POS[@]}"; do
+    pos="${POS[$i]}"
+    expected="${PRIMES[$i]}"
+    actual=$("$NTH_BIN" "$DB" "$pos" 2>&1)
+
+    if [ "$actual" == "$expected" ]; then
+        printf "OK   .db N=1e10 pos=%-12s primo=%s\n" "$pos" "$actual"
+    else
+        printf "FAIL .db N=1e10 pos=%-12s esperado=%-12s obtenido=%s\n" "$pos" "$expected" "${actual:-<sin salida>}"
+        fail=1
+    fi
+done
+
+count=$("$NTH_BIN" "$DB" --count 2>&1)
+if [ "$count" == "455052511" ]; then
+    printf "OK   .db N=1e10 --count=%s\n" "$count"
+else
+    printf "FAIL .db N=1e10 --count esperado=455052511 obtenido=%s\n" "${count:-<sin salida>}"
+    fail=1
+fi
+
+rm -f "$DB"
+trap - EXIT
 
 if [ "$fail" -eq 0 ]; then
     echo "Todas las pruebas OK."

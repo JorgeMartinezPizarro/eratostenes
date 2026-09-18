@@ -24,6 +24,16 @@ struct Options {
     uint64_t segment_width = 1u << 22;
     bool count_only = false;             // skip the write pass entirely
     bool show_help = false;
+
+    // Only used when --output ends in ".db" (SQLite + zstd gap encoding,
+    // see gap_block_sink.hpp / sqlite_prime_store.hpp). Ignored for plain
+    // text output.
+    uint64_t db_block_size = 65536;      // primes per compressed block
+    int zstd_level = 3;                  // low: entropy coding (most of the
+                                          // ratio, on this near-random byte
+                                          // stream) barely depends on level,
+                                          // so higher levels mostly buy
+                                          // slower builds, not smaller files
 };
 
 // Interprets suffixes: k=1e3 m=1e6 b=1e9 (short scale billion) t=1e12
@@ -71,15 +81,24 @@ inline void print_usage(const char* prog) {
         "Uso: %s --limit N [opciones]\n"
         "\n"
         "Criba de Eratostenes segmentada y paralela. Escribe todos los primos\n"
-        "hasta N (inclusive) en un fichero de texto, uno por linea.\n"
+        "hasta N (inclusive) en un fichero de texto, uno por linea -- o, si\n"
+        "--output termina en .db, en un fichero SQLite compacto (gaps entre\n"
+        "primos consecutivos, codificados a 1 byte y comprimidos con zstd por\n"
+        "bloques), consultable por posicion con el binario nth_prime.\n"
         "\n"
         "Opciones:\n"
         "  -n, --limit N          Limite superior. Acepta sufijos k/m/b/t\n"
         "                         (b = billon ingles = 1e9). Ej: 100b = 1e11\n"
-        "  -o, --output PATH      Fichero de salida (default: primes.txt)\n"
+        "  -o, --output PATH      Fichero de salida (default: primes.txt).\n"
+        "                         Si PATH termina en .db, escribe SQLite en\n"
+        "                         vez de texto plano (ver arriba).\n"
         "  -t, --threads N        Numero de hilos (default: nucleos disponibles)\n"
         "  -s, --segment-width N  Ancho numerico de cada segmento (default: 4194304)\n"
         "  -c, --count-only       Solo cuenta los primos, sin escribir el fichero\n"
+        "      --db-block-size N  Primos por bloque comprimido en modo .db\n"
+        "                         (default: 65536)\n"
+        "      --zstd-level N     Nivel de compresion zstd en modo .db\n"
+        "                         (default: 3)\n"
         "  -h, --help             Muestra esta ayuda\n"
         "\n"
         "La rueda (que primos se descartan de entrada) se fija en tiempo de\n"
@@ -89,8 +108,9 @@ inline void print_usage(const char* prog) {
         "Ejemplos:\n"
         "  %s --limit 1000000 -o primos_1M.txt\n"
         "  %s --limit 100b -o primos_100b.txt -t 12\n"
-        "  %s --limit 100b -t 12 --count-only\n",
-        prog, prog, prog, prog);
+        "  %s --limit 100b -t 12 --count-only\n"
+        "  %s --limit 100b -o primos_100b.db -t 12\n",
+        prog, prog, prog, prog, prog);
 }
 
 inline Options parse_args(int argc, char** argv) {
@@ -116,6 +136,10 @@ inline Options parse_args(int argc, char** argv) {
             opt.segment_width = parse_size(need_value(i, a.c_str()));
         } else if (a == "-c" || a == "--count-only") {
             opt.count_only = true;
+        } else if (a == "--db-block-size") {
+            opt.db_block_size = parse_size(need_value(i, a.c_str()));
+        } else if (a == "--zstd-level") {
+            opt.zstd_level = std::stoi(need_value(i, a.c_str()));
         } else {
             throw std::runtime_error("argumento desconocido: " + a);
         }

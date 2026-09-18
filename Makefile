@@ -6,8 +6,13 @@ CXXFLAGS_DEBUG    := $(CXXFLAGS_COMMON) -O0 -g -fsanitize=address,undefined
 
 BIN     := eratostenes
 SRC_DIR := src
-SRCS    := $(wildcard $(SRC_DIR)/*.cpp)
+# nth_prime.cpp has its own main() (the .db reader) -- built as its own
+# binary below, not linked into $(BIN).
+SRCS    := $(filter-out $(SRC_DIR)/nth_prime.cpp,$(wildcard $(SRC_DIR)/*.cpp))
 HEADERS := $(wildcard $(SRC_DIR)/*.hpp)
+
+# Both eratostenes (.db output mode) and nth_prime (.db reader) link these.
+LDLIBS := -lsqlite3 -lzstd
 
 # Un obj/<perfil>/ por perfil de compilacion (release/portable/debug): cada
 # uno usa flags distintos, asi que sus .o no pueden compartirse -- si
@@ -21,30 +26,38 @@ OBJS_RELEASE  := $(SRCS:$(SRC_DIR)/%.cpp=$(OBJ_DIR_RELEASE)/%.o)
 OBJS_PORTABLE := $(SRCS:$(SRC_DIR)/%.cpp=$(OBJ_DIR_PORTABLE)/%.o)
 OBJS_DEBUG    := $(SRCS:$(SRC_DIR)/%.cpp=$(OBJ_DIR_DEBUG)/%.o)
 
+# nth_prime (the .db reader): its own binary, release profile only -- it's
+# not a hot loop, so -march=native/portable/debug variants aren't needed.
+NTH_BIN := nth_prime
+NTH_OBJ := $(OBJ_DIR_RELEASE)/nth_prime.o
+
 OUT_DIR := $(CURDIR)/output
 COMPOSE := docker compose -f docker/docker-compose.yml
 
-.PHONY: all portable debug clean fclean re docker run test
+.PHONY: all portable debug clean fclean re docker run test verify-db
 
 # --- release (default) ---
-all: $(BIN)
+all: $(BIN) $(NTH_BIN)
 
 $(BIN): $(OBJS_RELEASE)
-	$(CXX) $(CXXFLAGS_RELEASE) -o $@ $(OBJS_RELEASE)
+	$(CXX) $(CXXFLAGS_RELEASE) -o $@ $(OBJS_RELEASE) $(LDLIBS)
+
+$(NTH_BIN): $(NTH_OBJ)
+	$(CXX) $(CXXFLAGS_RELEASE) -o $@ $(NTH_OBJ) $(LDLIBS)
 
 $(OBJ_DIR_RELEASE)/%.o: $(SRC_DIR)/%.cpp $(HEADERS) | $(OBJ_DIR_RELEASE)
 	$(CXX) $(CXXFLAGS_RELEASE) -c $< -o $@
 
 # --- portable: no -march=native, for a binary you'll copy to another machine ---
 portable: $(OBJS_PORTABLE)
-	$(CXX) $(CXXFLAGS_PORTABLE) -o $(BIN) $(OBJS_PORTABLE)
+	$(CXX) $(CXXFLAGS_PORTABLE) -o $(BIN) $(OBJS_PORTABLE) $(LDLIBS)
 
 $(OBJ_DIR_PORTABLE)/%.o: $(SRC_DIR)/%.cpp $(HEADERS) | $(OBJ_DIR_PORTABLE)
 	$(CXX) $(CXXFLAGS_PORTABLE) -c $< -o $@
 
 # --- debug: ASan/UBSan ---
 debug: $(OBJS_DEBUG)
-	$(CXX) $(CXXFLAGS_DEBUG) -o $(BIN)_debug $(OBJS_DEBUG)
+	$(CXX) $(CXXFLAGS_DEBUG) -o $(BIN)_debug $(OBJS_DEBUG) $(LDLIBS)
 
 $(OBJ_DIR_DEBUG)/%.o: $(SRC_DIR)/%.cpp $(HEADERS) | $(OBJ_DIR_DEBUG)
 	$(CXX) $(CXXFLAGS_DEBUG) -c $< -o $@
@@ -56,7 +69,7 @@ clean:
 	rm -rf obj
 
 fclean: clean
-	rm -f $(BIN) $(BIN)_debug
+	rm -f $(BIN) $(BIN)_debug $(NTH_BIN)
 
 re: fclean all
 
@@ -76,9 +89,16 @@ run:
 	$(COMPOSE) run --rm eratostenes $(ARGS)
 
 # Compara pi(N) contra el valor conocido para N=1e8..1e11 (--count-only,
-# sin E/S). THREADS=N make test para fijar el numero de hilos.
-test: $(BIN)
+# sin E/S), y unos cuantos primos conocidos por posicion en un .db real de
+# N=1e10 via nth_prime. THREADS=N make test para fijar el numero de hilos.
+test: $(BIN) $(NTH_BIN)
 	./scripts/test.sh
+
+# Round-trips small N through both text and .db output and checks the .db
+# (SQLite + zstd gap encoding) against the text baseline, position by
+# position (see scripts/verify_db.sh).
+verify-db: $(BIN) $(NTH_BIN)
+	./scripts/verify_db.sh
 
 benchmark:
 	./scripts/benchmark.sh

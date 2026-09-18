@@ -5,15 +5,28 @@ counting large prime lists.
 
 ## Build
 
-Requires a C++20 compiler and POSIX `pwrite`/`ftruncate` (Linux or WSL;
-does not build as-is with MSVC/native Windows).
+Requires a C++20 compiler, POSIX `pwrite`/`ftruncate` (Linux or WSL; does
+not build as-is with MSVC/native Windows), and the SQLite3 and zstd
+development libraries (for `.db` output -- see below):
 
 ```
-make            # release build: -O3 -march=native -flto
+sudo apt-get install libsqlite3-dev libzstd-dev   # Debian/Ubuntu/WSL
+```
+
+```
+make            # release build: -O3 -march=native -flto, plus nth_prime
 make portable   # no -march=native, for a binary you'll copy to another machine
 make debug      # ASan/UBSan, for debugging
-make test       # checks pi(N) against known values for N=1e8..1e11
+make test       # checks pi(N) for N=1e8..1e11, plus known primes by
+                # position in a real .db (N=1e10, via nth_prime)
+make verify-db  # round-trips small N through .db output and checks it
+                # against the text output, position by position
 ```
+
+`make` also builds `nth_prime`, the reader for `.db` output (see below).
+It's release-profile only (not a hot loop, so no portable/debug variants);
+`make portable nth_prime` builds both explicitly if you need the portable
+`eratostenes` alongside it.
 
 If you're working on Windows with the project under `/mnt/c/...`, build and
 run **inside WSL**, pointing output at a native Linux directory (e.g.
@@ -38,10 +51,14 @@ outside the container. With no `ARGS`, it runs `--help`.
   -n, --limit N          Upper bound (inclusive). Accepts suffixes:
                           k=1e3  m=1e6  b=1e9 (short-scale billion)  t=1e12
                           e.g. 100b = 10^11
-  -o, --output PATH      Output file (default: primes.txt)
+  -o, --output PATH      Output file (default: primes.txt). If PATH ends
+                          in .db, writes SQLite instead of plain text --
+                          see ".db output" below.
   -t, --threads N        Thread count (default: available cores)
   -s, --segment-width N  Numeric width per segment (default: 4194304)
   -c, --count-only       Only count primes, skip writing the file
+      --db-block-size N  Primes per compressed block in .db mode (default: 65536)
+      --zstd-level N     zstd compression level in .db mode (default: 3)
   -h, --help             Help
 ```
 
@@ -54,12 +71,48 @@ Examples:
 ./eratostenes -n 1000000 -o primes_1M.txt
 ./eratostenes -n 100b -o ~/primes_100b.txt -t 12
 ./eratostenes -n 100b -t 12 --count-only
+./eratostenes -n 100b -o ~/primes_100b.db -t 12
 ```
 
 `--count-only` skips the write pass entirely: no file is created, nothing
 is converted to text. Use it to get pi(N) or to measure raw sieve speed
 without disk I/O -- essential from around 10^11 up, where the equivalent
 text file already weighs tens of GB.
+
+## .db output (compact, indexable)
+
+Plain text costs ~9-13 bytes/prime and grows every decade (pi(10^12) as
+text is already ~450GB). `-o out.db` writes a SQLite3 file instead,
+directly from the sieve (the text intermediate is never created), using
+gap encoding + zstd:
+
+- Primes are stored as the **gaps** between consecutive primes, not their
+  absolute values: 1 byte per gap in the common case (`byte = gap/2`,
+  since every gap above 2 is even), with an escape byte + 4-byte value for
+  the rare larger gaps and the one odd gap (2->3). See `src/gap_encoding.hpp`.
+- Gaps are grouped into fixed-size blocks (`--db-block-size`, default
+  65536 primes/block) and each block is zstd-compressed
+  (`--zstd-level`, default 3 -- entropy coding, where zstd gets most of
+  its ratio on this near-random byte stream, barely depends on level, so
+  a low level keeps builds fast without giving up much size) and stored
+  as one row in a `blocks` table, indexed by its starting position.
+- Measured: ~0.57-0.59 bytes/prime, flat from 10^7 to 10^9 (prime gap
+  entropy grows only as log(log N)) -- roughly **18-20x smaller** than
+  the text output, with the same file remaining randomly indexable.
+
+Read a `.db` file with the paired reader binary (also built by `make`):
+
+```
+./nth_prime out.db 1000000     # the 1,000,000th prime (1-indexed: N=1 -> 2)
+./nth_prime out.db --count     # pi(limit): how many primes are stored
+```
+
+It looks up the one block containing the requested position (indexed by
+`start_index`, not a table scan) and decodes just that block -- lookups
+stay fast regardless of how large the `.db` file is.
+
+`make verify-db` round-trips small N through both output modes and checks
+every (or, at larger N, a random sample of) position between them.
 
 ## Tuning for your machine
 
@@ -172,6 +225,19 @@ write pass (each thread re-sieves the same chunk and writes with
 output file, in parallel with the others). This means every output byte is
 written exactly once, at the cost of sieving each chunk twice.
 
+**`.db` output** (see [above](#db-output-compact-indexable) for the
+format) reuses the same two-pass shape, but the count pass only needs
+prime counts (`NullSink`, cheaper than the text path's byte counting), and
+the write pass has no fixed byte offsets to land on: each thread's
+`GapBlockSink` (`src/gap_block_sink.hpp`) gap-encodes and zstd-compresses
+its own primes into fixed-size, self-describing blocks (each carries its
+own starting position and count) and pushes them to a thread-safe queue.
+A single dedicated writer thread (`SqlitePrimeStore`,
+`src/sqlite_prime_store.hpp`) drains that queue into SQLite with batched
+transactions -- this keeps SQLite's single-writer constraint off the
+sieve/compress hot path, which stays fully parallel; only the
+already-compressed insert step is serialized.
+
 ## Limitations
 
 - Well past 10^12 (e.g. 10^14), even the `2,3,5` wheel's table may stop
@@ -184,9 +250,16 @@ written exactly once, at the cost of sieving each chunk twice.
 
 ## Verification
 
-`make test` checks pi(N) against the known value for N=1e8..1e11. Output
-has also been checked to be byte-for-byte identical (same hash) across
-thread counts, segment widths, and wheels for the same N.
+`make test` checks pi(N) against the known value for N=1e8..1e11, plus a
+handful of known primes by position (the 1st, 1000th, 10000th, 200
+millionth, and last) in a real `.db` built at N=1e10, read back with
+`nth_prime`. Output has also been checked to be byte-for-byte identical
+(same hash) across thread counts, segment widths, and wheels for the
+same N.
+
+`make verify-db` checks the `.db` output mode against that same text
+output: matching pi(N), and every (or, past a few hundred thousand
+primes, a random sample of) position agreeing between the two.
 
 ## Benchmarks
 
