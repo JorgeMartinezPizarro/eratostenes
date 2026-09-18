@@ -70,7 +70,7 @@ docker:
 run:
 	mkdir -p $(OUT_DIR)
 	@if [ -t 1 ]; then tty_flag=-t; else tty_flag=; fi; \
-	docker run --rm $$tty_flag -e DISPLAY=$$DISPLAY -v $(OUT_DIR):/output $(IMAGE) $(ARGS)
+	docker run --rm $$tty_flag -v $(OUT_DIR):/output $(IMAGE) $(ARGS)
 
 # Compara pi(N) contra el valor conocido para N=1e8..1e11 (--count-only,
 # sin E/S). THREADS=N make test para fijar el numero de hilos.

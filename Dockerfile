@@ -10,7 +10,6 @@ RUN make portable
 
 FROM debian:bookworm-slim
 COPY --from=builder /src/eratostenes /usr/local/bin/eratostenes
-ENV TERM=xterm-256color 
 WORKDIR /output
 ENTRYPOINT ["/usr/local/bin/eratostenes"]
 CMD ["--help"]
