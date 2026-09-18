@@ -16,6 +16,18 @@
 // single monotonically-advancing pointer into wheel_base_primes (sorted by
 // p) -- each prime is activated exactly once per thread chunk.
 //
+// Dense vs. sparse base primes: a prime p's average gap between hits, in
+// wheel-index terms, is ~p (each wheel-coprime multiplier step advances
+// the value by ~p*WHEEL_MOD/WHEEL_SIZE, which converts back to a k-gap of
+// ~p). So once p exceeds the segment width, it hits at most ~once per
+// segment -- the per-phase delta[] table (WHEEL_SIZE entries/prime, the
+// dominant cost in table_bytes, see wheel.hpp/README) buys nothing there,
+// since it only pays off across *repeated* marks within one segment.
+// wheel_base_primes (dense, below that threshold) keeps the table;
+// sparse_primes (at or above it) stores just p and recomputes each next
+// hit on activation/reschedule -- one division, but only once per segment
+// at most, same cost class as every prime already pays once at activation.
+//
 // Extraction (turning the finished bit array into actual prime values):
 // invert each word, decompose into (q, r) = (k / WHEEL_SIZE, k %
 // WHEEL_SIZE) once per word, then walk set bits with ctz + clear-lowest-bit.
@@ -25,6 +37,7 @@
 #include <algorithm>
 #include <stdexcept>
 
+#include "presieve.hpp"
 #include "wheel.hpp"
 
 class SegmentSieve {
@@ -35,9 +48,13 @@ public:
     // base_prime_max: the largest base prime this sieve will ever be given
     // (i.e. isqrt(limit)) -- used to size the bucket ring generously
     // enough that no prime's skip between hits can ever wrap around it.
-    SegmentSieve(uint64_t seg_k_width, uint64_t base_prime_max)
+    // presieve: shared, read-only pre-sieve pattern (see presieve.hpp) used
+    // to fill each segment instead of zeroing it; its primes must already
+    // be excluded from wheel_base_primes by the caller.
+    SegmentSieve(uint64_t seg_k_width, uint64_t base_prime_max, const Presieve& presieve)
         : words_((seg_k_width + 63) / 64, 0),
-          seg_k_width_(seg_k_width) {
+          seg_k_width_(seg_k_width),
+          presieve_(presieve) {
         uint64_t max_gap = 0;
         for (uint64_t g : WHEEL_GAP) max_gap = std::max(max_gap, g);
         // Upper bound on delta[] (see compute_wheel_deltas in wheel.hpp):
@@ -60,18 +77,20 @@ public:
     void begin_chunk() {
         cur_segment_ = 0;
         next_prime_idx_ = 0;
+        next_sparse_idx_ = 0;
         for (auto& b : buckets_) b.clear();
     }
 
     template <typename Writer>
     void sieve_and_emit(uint64_t k_low, uint64_t k_high,
                          const std::vector<WheelBasePrime>& wheel_base_primes,
+                         const std::vector<uint64_t>& sparse_primes,
                          Writer& out, uint64_t& prime_count) {
         uint64_t count = (k_high > k_low) ? (k_high - k_low) : 0;
         if (count == 0) return;
 
         size_t words_needed = (count + 63) / 64;
-        std::fill(words_.begin(), words_.begin() + words_needed, 0ULL);
+        presieve_.fill(words_.data(), k_low, count);
 
         uint64_t high_n = wheel_number(k_high); // exclusive numeric bound, valid for the p*p cutoff
 
@@ -102,25 +121,80 @@ public:
             }
         }
 
+        // Same activation, for sparse primes (own monotonic pointer: every
+        // sparse prime is larger than every dense one by construction, so
+        // this doesn't need to interleave with the loop above). prime_idx
+        // is offset by wheel_base_primes.size() so bucket entries can tell
+        // the two prime lists apart without an extra field.
+        if (next_sparse_idx_ < sparse_primes.size()) {
+            uint64_t low_n = wheel_number(k_low);
+            while (next_sparse_idx_ < sparse_primes.size()) {
+                uint64_t p = sparse_primes[next_sparse_idx_];
+                if (p * p >= high_n) break;
+
+                uint64_t start_val = std::max(p * p, low_n);
+                uint64_t m = (start_val + p - 1) / p;
+                uint64_t r = m % WHEEL_MOD;
+                uint64_t step = STEP_TO_COPRIME[r];
+                m += step;
+                uint64_t k = wheel_index(p * m);
+
+                schedule(k, 0, static_cast<uint32_t>(wheel_base_primes.size() + next_sparse_idx_), k_high);
+                ++next_sparse_idx_;
+            }
+        }
+
         // Process exactly the entries due this segment: mark, advance,
         // reschedule into whichever future bucket the next hit lands in.
         Bucket& bucket = buckets_[cur_segment_ & (num_buckets_ - 1)];
+        size_t dense_count = wheel_base_primes.size();
         for (const Entry& e : bucket) {
-            const auto& delta = wheel_base_primes[e.prime_idx].delta;
-            uint64_t k = e.k;
-            int j = e.j;
-            while (k < k_high) {
-                uint64_t idx = k - k_low;
-                words_[idx >> 6] |= (1ULL << (idx & 63));
-                k += delta[j];
-                if constexpr (WHEEL_SIZE_IS_POW2) {
-                    j = (j + 1) & (WHEEL_SIZE - 1); // branchless wraparound
-                } else {
-                    ++j;
-                    if (j == WHEEL_SIZE) j = 0;
+            if (e.prime_idx < dense_count) {
+                // Dense: repeated stepping through the precomputed
+                // per-phase delta table (the hot path, no branch inside).
+                const auto& delta = wheel_base_primes[e.prime_idx].delta;
+                uint64_t k = e.k;
+                int j = e.j;
+                while (k < k_high) {
+                    uint64_t idx = k - k_low;
+                    words_[idx >> 6] |= (1ULL << (idx & 63));
+                    k += delta[j];
+                    if constexpr (WHEEL_SIZE_IS_POW2) {
+                        j = (j + 1) & (WHEEL_SIZE - 1); // branchless wraparound
+                    } else {
+                        ++j;
+                        if (j == WHEEL_SIZE) j = 0;
+                    }
                 }
+                schedule(k, j, e.prime_idx, k_high);
+            } else {
+                // Sparse: no stored table and no stored multiplier either
+                // -- Entry stays the same size as the dense case (it's the
+                // hot per-segment iteration cost, unlike this division,
+                // which only runs once per sparse activation/reschedule).
+                // m is recovered from k on entry: k encodes a value
+                // v=wheel_number(k) that's an exact multiple of p (it's
+                // where the previous mark landed), so v/p divides evenly.
+                uint64_t p = sparse_primes[e.prime_idx - dense_count];
+                uint64_t k = e.k;
+                uint64_t m = wheel_number(k) / p;
+                while (k < k_high) {
+                    uint64_t idx = k - k_low;
+                    words_[idx >> 6] |= (1ULL << (idx & 63));
+                    // m is already coprime with WHEEL_MOD (it's the
+                    // multiplier of the hit just marked), so
+                    // STEP_TO_COPRIME[m % WHEEL_MOD] alone is 0 -- that
+                    // table answers "distance to the *nearest* coprime
+                    // residue", which is where you already are. Step past
+                    // it first so it finds the *next* one instead of
+                    // stalling on this one forever.
+                    ++m;
+                    uint64_t step = STEP_TO_COPRIME[m % WHEEL_MOD];
+                    m += step;
+                    k = wheel_index(p * m);
+                }
+                schedule(k, 0, e.prime_idx, k_high);
             }
-            schedule(k, j, e.prime_idx, k_high);
         }
         bucket.clear();
         ++cur_segment_;
@@ -164,13 +238,14 @@ public:
 private:
     struct Entry {
         uint64_t k;
-        int j;
-        uint32_t prime_idx; // index into wheel_base_primes
+        int j;          // dense: phase into delta[]. sparse: unused (0).
+        uint32_t prime_idx; // < wheel_base_primes.size() => dense index;
+                            // else sparse index, offset by that size.
     };
     using Bucket = std::vector<Entry>;
 
-    // Schedules (k, j, prime_idx) into the bucket for whichever segment k
-    // falls into, given that the segment currently being processed ends at
+    // Schedules an entry into the bucket for whichever segment k falls
+    // into, given that the segment currently being processed ends at
     // k_high. k < k_high means "due right now" (this segment's bucket);
     // asserts rather than silently corrupting results if the ring ever
     // turns out too small for the actual data (see constructor).
@@ -186,8 +261,10 @@ private:
 
     std::vector<uint64_t> words_;
     uint64_t seg_k_width_;
+    const Presieve& presieve_;
     uint64_t num_buckets_ = 1;
     std::vector<Bucket> buckets_;
     uint64_t cur_segment_ = 0;
     size_t next_prime_idx_ = 0;
+    size_t next_sparse_idx_ = 0;
 };

@@ -30,6 +30,7 @@
 // they don't take part in the wheel numbering, so they're just emitted
 // directly instead of being found by sieving.
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdint>
 #include <vector>
@@ -46,6 +47,7 @@
 #include "arg_parser.hpp"
 #include "base_sieve.hpp"
 #include "colors.hpp"
+#include "presieve.hpp"
 #include "segment_sieve.hpp"
 #include "sinks.hpp"
 #include "wheel.hpp"
@@ -104,13 +106,15 @@ static std::vector<ChunkRange> split_ranges(uint64_t limit, unsigned threads) {
 template <typename Writer>
 static void sieve_chunk(ChunkRange range, uint64_t seg_k_width, uint64_t base_prime_max,
                          const std::vector<WheelBasePrime>& wheel_base_primes,
+                         const std::vector<uint64_t>& sparse_primes,
+                         const Presieve& presieve,
                          Writer& out, uint64_t& local_count,
                          std::atomic<uint64_t>& progress) {
-    SegmentSieve sieve(seg_k_width, base_prime_max);
+    SegmentSieve sieve(seg_k_width, base_prime_max, presieve);
     sieve.begin_chunk();
     for (uint64_t k_low = range.low; k_low < range.high; k_low += seg_k_width) {
         uint64_t k_high = std::min(k_low + seg_k_width, range.high);
-        sieve.sieve_and_emit(k_low, k_high, wheel_base_primes, out, local_count);
+        sieve.sieve_and_emit(k_low, k_high, wheel_base_primes, sparse_primes, out, local_count);
         progress.fetch_add(k_high - k_low, std::memory_order_relaxed);
     }
 }
@@ -118,10 +122,12 @@ static void sieve_chunk(ChunkRange range, uint64_t seg_k_width, uint64_t base_pr
 // Count-only pass: no I/O, no byte accounting, just the prime count.
 static void count_only_worker(ChunkRange range, uint64_t seg_k_width, uint64_t base_prime_max,
                                const std::vector<WheelBasePrime>& wheel_base_primes,
+                               const std::vector<uint64_t>& sparse_primes,
+                               const Presieve& presieve,
                                uint64_t& out_count, std::atomic<uint64_t>& progress) {
     NullSink sink;
     uint64_t local_count = 0;
-    sieve_chunk(range, seg_k_width, base_prime_max, wheel_base_primes, sink, local_count, progress);
+    sieve_chunk(range, seg_k_width, base_prime_max, wheel_base_primes, sparse_primes, presieve, sink, local_count, progress);
     out_count = local_count;
 }
 
@@ -129,11 +135,13 @@ static void count_only_worker(ChunkRange range, uint64_t seg_k_width, uint64_t b
 // thread's primes will take.
 static void count_worker(ChunkRange range, uint64_t seg_k_width, uint64_t base_prime_max,
                           const std::vector<WheelBasePrime>& wheel_base_primes,
+                          const std::vector<uint64_t>& sparse_primes,
+                          const Presieve& presieve,
                           uint64_t& out_bytes, uint64_t& out_count,
                           std::atomic<uint64_t>& progress) {
     ByteCounter counter;
     uint64_t local_count = 0;
-    sieve_chunk(range, seg_k_width, base_prime_max, wheel_base_primes, counter, local_count, progress);
+    sieve_chunk(range, seg_k_width, base_prime_max, wheel_base_primes, sparse_primes, presieve, counter, local_count, progress);
     out_bytes = counter.total_bytes;
     out_count = local_count;
 }
@@ -142,6 +150,8 @@ static void count_worker(ChunkRange range, uint64_t seg_k_width, uint64_t base_p
 // into its (disjoint) region of the final file.
 static void emit_worker(int idx, ChunkRange range, uint64_t seg_k_width, uint64_t base_prime_max,
                          const std::vector<WheelBasePrime>& wheel_base_primes,
+                         const std::vector<uint64_t>& sparse_primes,
+                         const Presieve& presieve,
                          int fd, uint64_t base_offset,
                          std::atomic<uint64_t>& progress) {
     DirectWriter out(fd, base_offset);
@@ -151,7 +161,7 @@ static void emit_worker(int idx, ChunkRange range, uint64_t seg_k_width, uint64_
         out.write_raw(SMALL_PRIMES_TEXT.data(), SMALL_PRIMES_BYTES);
     }
 
-    sieve_chunk(range, seg_k_width, base_prime_max, wheel_base_primes, out, local_count, progress);
+    sieve_chunk(range, seg_k_width, base_prime_max, wheel_base_primes, sparse_primes, presieve, out, local_count, progress);
     out.flush();
 }
 
@@ -220,13 +230,37 @@ int main(int argc, char** argv) {
     std::vector<uint64_t> base_primes = sieve_base_primes(base_limit);
     std::fprintf(stderr, "  %zu primos base encontrados.\n", base_primes.size());
 
+    // --segment-width is a numeric width (so the option keeps meaning the
+    // same thing to the user); it's converted to a width in wheel indices
+    // (WHEEL_SIZE useful numbers out of every WHEEL_MOD).
+    uint64_t seg_k_width = std::max<uint64_t>(64, opt.segment_width * WHEEL_SIZE / WHEEL_MOD);
+
     // Per-prime wheel jump table (the wheel's own primes don't need one:
     // they are special-cased). Computed once here, not once per segment.
+    // Primes also covered by the pre-sieve pattern (see presieve.hpp) are
+    // skipped here: they're never scheduled as active markers, their
+    // multiples come pre-marked from the pattern buffer instead. They
+    // still come out as output/count -- nothing marks the primes
+    // themselves composite either way, so they survive extraction exactly
+    // as before.
+    //
+    // The rest split dense/sparse (see segment_sieve.hpp): a prime's
+    // average hit-gap in wheel-index terms is ~p itself, so p >=
+    // seg_k_width means at most ~1 hit per segment -- not enough repeats
+    // within a segment for the per-phase delta table to earn its keep.
+    // Those primes skip the table (sparse_primes, just the plain uint64_t)
+    // instead of paying wheel.hpp's `8 + 4*phi(wheel)` bytes each.
     std::vector<WheelBasePrime> wheel_base_primes;
+    std::vector<uint64_t> sparse_primes;
     wheel_base_primes.reserve(base_primes.size());
     for (uint64_t p : base_primes) {
         if (p < FIRST_WHEEL_PRIME) continue;
-        wheel_base_primes.push_back({p, compute_wheel_deltas(p)});
+        if (std::find(PRESIEVE_PRIMES.begin(), PRESIEVE_PRIMES.end(), p) != PRESIEVE_PRIMES.end()) continue;
+        if (p < seg_k_width) {
+            wheel_base_primes.push_back({p, compute_wheel_deltas(p)});
+        } else {
+            sparse_primes.push_back(p);
+        }
     }
 
     auto ranges = split_ranges(opt.limit, opt.threads);
@@ -234,17 +268,16 @@ int main(int argc, char** argv) {
 
     uint64_t total_span = ranges.back().high - ranges.front().low;
 
-    // --segment-width is a numeric width (so the option keeps meaning the
-    // same thing to the user); it's converted to a width in wheel indices
-    // (WHEEL_SIZE useful numbers out of every WHEEL_MOD).
-    uint64_t seg_k_width = std::max<uint64_t>(64, opt.segment_width * WHEEL_SIZE / WHEEL_MOD);
+    Presieve presieve = build_presieve(PRESIEVE_PRIMES, seg_k_width);
 
-    std::fprintf(stderr, "Iniciando %u hilos, limite=%llu, segmento=%llu, rueda mod %llu (%zu primos)...\n",
+    std::fprintf(stderr, "Iniciando %u hilos, limite=%llu, segmento=%llu, rueda mod %llu (%zu primos), "
+                 "%zu primos base densos, %zu dispersos...\n",
                  actual_threads,
                  static_cast<unsigned long long>(opt.limit),
                  static_cast<unsigned long long>(opt.segment_width),
                  static_cast<unsigned long long>(WHEEL_MOD),
-                 WHEEL_PRIMES.size());
+                 WHEEL_PRIMES.size(),
+                 wheel_base_primes.size(), sparse_primes.size());
 
     if (opt.count_only) {
         // Single pass, no I/O of any kind: NullSink skips even the
@@ -258,7 +291,7 @@ int main(int argc, char** argv) {
         std::vector<std::thread> pool;
         for (unsigned i = 0; i < actual_threads; ++i) {
             pool.emplace_back(count_only_worker, ranges[i], seg_k_width, base_limit, std::cref(wheel_base_primes),
-                               std::ref(prime_counts[i]), std::ref(progress));
+                               std::cref(sparse_primes), std::cref(presieve), std::ref(prime_counts[i]), std::ref(progress));
         }
         for (auto& th : pool) th.join();
         done = true;
@@ -293,7 +326,7 @@ int main(int argc, char** argv) {
         std::vector<std::thread> pool;
         for (unsigned i = 0; i < actual_threads; ++i) {
             pool.emplace_back(count_worker, ranges[i], seg_k_width, base_limit, std::cref(wheel_base_primes),
-                               std::ref(byte_counts[i]), std::ref(prime_counts[i]), std::ref(progress));
+                               std::cref(sparse_primes), std::cref(presieve), std::ref(byte_counts[i]), std::ref(prime_counts[i]), std::ref(progress));
         }
         for (auto& th : pool) th.join();
         done = true;
@@ -332,7 +365,8 @@ int main(int argc, char** argv) {
         std::vector<std::thread> pool;
         for (unsigned i = 0; i < actual_threads; ++i) {
             pool.emplace_back(emit_worker, static_cast<int>(i), ranges[i], seg_k_width, base_limit,
-                               std::cref(wheel_base_primes), fd, offsets[i], std::ref(progress));
+                               std::cref(wheel_base_primes), std::cref(sparse_primes), std::cref(presieve),
+                               fd, offsets[i], std::ref(progress));
         }
         for (auto& th : pool) th.join();
         done = true;
