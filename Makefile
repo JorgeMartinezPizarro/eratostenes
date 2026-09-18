@@ -79,3 +79,6 @@ run:
 # sin E/S). THREADS=N make test para fijar el numero de hilos.
 test: $(BIN)
 	./scripts/test.sh
+
+benchmark:
+	./scripts/benchmark.sh

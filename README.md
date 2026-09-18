@@ -196,11 +196,12 @@ runs with each wheel active. See [Tuning for your
 machine](#tuning-for-your-machine) above for how the jump-table size scales
 with wheel and N.
 
-| N | mod 6 | mod 30 | mod 210 | winner |
-|---|---:|---:|---:|---|
-| 10^10 | 1.00s | 1.01s | 1.01s | tie |
-| 10^11 | 10.51s | 8.01s | **7.02s** | mod 210 |
-| 10^12 | 123.58s | **89.54s** | 142.60s | mod 30 |
+| N | mod 6 | mod 30 | mod 210 |
+|---|---:|---:|---:|
+| 1e9 | 0.50s | 0.50s | 0.50s |
+| 1e10 | 1.00s | 0.50s | 0.50s |
+| 1e11 | 8.01s | 6.51s | 5.51s |
+| 1e12 | 94.07s | 75.06s | 136.10s |
 
 `pi(N)` matched the known value at every N (455,052,511 / 4,118,054,813 /
 37,607,912,018). The repo ships with mod 30 active, since 10^12 and up is
