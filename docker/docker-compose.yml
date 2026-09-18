@@ -1,0 +1,8 @@
+services:
+  eratostenes:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: eratostenes:latest
+    volumes:
+      - ../output:/output

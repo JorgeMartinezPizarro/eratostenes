@@ -141,8 +141,8 @@ Bigger wheels remove more candidates per number checked, but the jump
 table needed to do that grows faster than the benefit: adding prime p
 multiplies the table by `(p-1)` but only cuts marking work by `(p-1)/p`.
 Past a certain size that table stops fitting L3 and the bottleneck shifts
-from CPU to memory bandwidth -- see [BENCHMARK.md](BENCHMARK.md) for
-measured table sizes and timings across wheels and N. The wheel is a
+from CPU to memory bandwidth -- see [Benchmarks](#benchmarks) below for
+measured timings across wheels and N. The wheel is a
 compile-time choice (not a runtime flag) because the compiler can turn a
 division by a compile-time-constant modulus into a cheap multiply-shift,
 which it can't do for a runtime value.
@@ -190,7 +190,21 @@ thread counts, segment widths, and wheels for the same N.
 
 ## Benchmarks
 
-See [BENCHMARK.md](BENCHMARK.md).
+Measured on an Intel Core i5-11400F (6 cores / 12 threads, L3 = 12 MB) with
+`--count-only` (isolates CPU/cache work from disk I/O), rebuilding between
+runs with each wheel active. See [Tuning for your
+machine](#tuning-for-your-machine) above for how the jump-table size scales
+with wheel and N.
+
+| N | mod 6 | mod 30 | mod 210 | winner |
+|---|---:|---:|---:|---|
+| 10^10 | 1.00s | 1.01s | 1.01s | tie |
+| 10^11 | 10.51s | 8.01s | **7.02s** | mod 210 |
+| 10^12 | 123.58s | **89.54s** | 142.60s | mod 30 |
+
+`pi(N)` matched the known value at every N (455,052,511 / 4,118,054,813 /
+37,607,912,018). The repo ships with mod 30 active, since 10^12 and up is
+this project's main target range.
 
 ## Free memory of WSL desde windows
 

@@ -21,8 +21,8 @@ OBJS_RELEASE  := $(SRCS:$(SRC_DIR)/%.cpp=$(OBJ_DIR_RELEASE)/%.o)
 OBJS_PORTABLE := $(SRCS:$(SRC_DIR)/%.cpp=$(OBJ_DIR_PORTABLE)/%.o)
 OBJS_DEBUG    := $(SRCS:$(SRC_DIR)/%.cpp=$(OBJ_DIR_DEBUG)/%.o)
 
-IMAGE   := eratostenes:latest
 OUT_DIR := $(CURDIR)/output
+COMPOSE := docker compose -f docker/docker-compose.yml
 
 .PHONY: all portable debug clean fclean re docker run test
 
@@ -61,18 +61,21 @@ fclean: clean
 re: fclean all
 
 docker:
-	docker build -t $(IMAGE) .
+	$(COMPOSE) build
 
 # Ejecuta el binario dentro de la imagen. El directorio ./output del host
-# se monta en /output dentro del contenedor: usa -o /output/<fichero> para
-# que el resultado quede accesible fuera del contenedor.
+# se monta en /output dentro del contenedor (definido en
+# docker/docker-compose.yml): usa -o /output/<fichero> en ARGS para que el
+# resultado quede accesible fuera del contenedor.
+# `docker compose run` asigna TTY automaticamente cuando la terminal que
+# invoca es interactiva (ver -T/--no-TTY en `docker compose run --help`),
+# a diferencia de `docker run`, que no lo hace salvo que se le pida -t.
 # Ejemplo: make run ARGS="--limit 1e9 -o /output/primos.txt -t 8"
 run:
 	mkdir -p $(OUT_DIR)
-	@if [ -t 1 ]; then tty_flag=-t; else tty_flag=; fi; \
-	docker run --rm $$tty_flag -v $(OUT_DIR):/output $(IMAGE) $(ARGS)
+	$(COMPOSE) run --rm eratostenes $(ARGS)
 
 # Compara pi(N) contra el valor conocido para N=1e8..1e11 (--count-only,
 # sin E/S). THREADS=N make test para fijar el numero de hilos.
 test: $(BIN)
-	./test.sh
+	./scripts/test.sh
