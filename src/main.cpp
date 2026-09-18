@@ -45,6 +45,7 @@
 
 #include "arg_parser.hpp"
 #include "base_sieve.hpp"
+#include "colors.hpp"
 #include "segment_sieve.hpp"
 #include "sinks.hpp"
 #include "wheel.hpp"
@@ -154,7 +155,7 @@ static void emit_worker(int idx, ChunkRange range, uint64_t seg_k_width, uint64_
     out.flush();
 }
 
-static void print_progress(const char* label, std::atomic<uint64_t>& progress,
+static void print_progress(const Colors& C, const char* label, std::atomic<uint64_t>& progress,
                             uint64_t total, std::atomic<bool>& done) {
     using namespace std::chrono_literals;
     while (!done.load()) {
@@ -162,10 +163,10 @@ static void print_progress(const char* label, std::atomic<uint64_t>& progress,
         if (done.load()) break;
         uint64_t d = progress.load(std::memory_order_relaxed);
         double pct = total ? std::min(100.0, 100.0 * d / total) : 100.0;
-        std::fprintf(stderr, "\r  %s: %5.1f%%   ", label, pct);
+        std::fprintf(stderr, "\r  %s%s:%s %s%5.1f%%%s   ", C.label, label, C.reset, C.time, pct, C.reset);
         std::fflush(stderr);
     }
-    std::fprintf(stderr, "\r  %s: 100.0%%   \n", label);
+    std::fprintf(stderr, "\r  %s%s:%s %s100.0%%%s   \n", C.label, label, C.reset, C.time, C.reset);
 }
 
 int main(int argc, char** argv) {
@@ -181,6 +182,8 @@ int main(int argc, char** argv) {
         print_usage(argv[0]);
         return 0;
     }
+
+    const Colors C(stderr_supports_color());
 
     auto t_start = std::chrono::steady_clock::now();
 
@@ -250,7 +253,7 @@ int main(int argc, char** argv) {
         std::vector<uint64_t> prime_counts(actual_threads, 0);
         std::atomic<uint64_t> progress{0};
         std::atomic<bool> done{false};
-        std::thread prog(print_progress, "contando", std::ref(progress), total_span, std::ref(done));
+        std::thread prog(print_progress, std::cref(C), "contando", std::ref(progress), total_span, std::ref(done));
 
         std::vector<std::thread> pool;
         for (unsigned i = 0; i < actual_threads; ++i) {
@@ -266,14 +269,15 @@ int main(int argc, char** argv) {
 
         auto t_end = std::chrono::steady_clock::now();
         double total_s = std::chrono::duration<double>(t_end - t_start).count();
+        double total_mprimes = total_s > 0 ? (total_primes / 1e6 / total_s) : 0.0;
 
         std::fprintf(stderr,
-            "Listo. %llu primos encontrados hasta %llu.\n"
-            "  total:      %.2fs (%.1f millones de primos/seg)\n",
-            static_cast<unsigned long long>(total_primes),
-            static_cast<unsigned long long>(opt.limit),
-            total_s,
-            total_s > 0 ? (total_primes / 1e6 / total_s) : 0.0);
+            "%sListo.%s %s%s%s primos encontrados hasta %s.\n"
+            "  %stotal:%s      %s%.2fs%s (%s%.1f M primos/s%s)\n",
+            C.headline, C.reset,
+            C.bold, format_thousands(total_primes).c_str(), C.reset,
+            format_thousands(opt.limit).c_str(),
+            C.headline, C.reset, C.time, total_s, C.reset, C.headline, total_mprimes, C.reset);
 
         return 0;
     }
@@ -284,7 +288,7 @@ int main(int argc, char** argv) {
     {
         std::atomic<uint64_t> progress{0};
         std::atomic<bool> done{false};
-        std::thread prog(print_progress, "contando", std::ref(progress), total_span, std::ref(done));
+        std::thread prog(print_progress, std::cref(C), "contando", std::ref(progress), total_span, std::ref(done));
 
         std::vector<std::thread> pool;
         for (unsigned i = 0; i < actual_threads; ++i) {
@@ -323,7 +327,7 @@ int main(int argc, char** argv) {
     {
         std::atomic<uint64_t> progress{0};
         std::atomic<bool> done{false};
-        std::thread prog(print_progress, "escribiendo", std::ref(progress), total_span, std::ref(done));
+        std::thread prog(print_progress, std::cref(C), "escribiendo", std::ref(progress), total_span, std::ref(done));
 
         std::vector<std::thread> pool;
         for (unsigned i = 0; i < actual_threads; ++i) {
@@ -340,17 +344,22 @@ int main(int argc, char** argv) {
     double count_s = std::chrono::duration<double>(t_count_done - t_start).count();
     double write_s = std::chrono::duration<double>(t_end - t_count_done).count();
     double total_s = std::chrono::duration<double>(t_end - t_start).count();
+    double count_mprimes = count_s > 0 ? (total_primes / 1e6 / count_s) : 0.0;
+    double write_gbps = write_s > 0 ? (total_bytes / 1e9 / write_s) : 0.0;
+    double total_mprimes = total_s > 0 ? (total_primes / 1e6 / total_s) : 0.0;
 
     std::fprintf(stderr,
-        "Listo. %llu primos encontrados hasta %llu (%.2f GB).\n"
-        "  conteo:     %.2fs\n"
-        "  escritura:  %.2fs\n"
-        "  total:      %.2fs (%.1f millones de primos/seg)\n",
-        static_cast<unsigned long long>(total_primes),
-        static_cast<unsigned long long>(opt.limit),
-        total_bytes / 1e9,
-        count_s, write_s, total_s,
-        total_s > 0 ? (total_primes / 1e6 / total_s) : 0.0);
+        "%sListo.%s %s%s%s primos encontrados hasta %s %s(%.2f GB)%s.\n"
+        "  %sconteo:%s     %s%6.2fs%s  (%s%.1f M primos/s%s)\n"
+        "  %sescritura:%s  %s%6.2fs%s  (%s%.2f GB/s%s)\n"
+        "  %stotal:%s      %s%6.2fs%s  (%s%.1f M primos/s%s)\n",
+        C.headline, C.reset,
+        C.bold, format_thousands(total_primes).c_str(), C.reset,
+        format_thousands(opt.limit).c_str(),
+        C.dim, total_bytes / 1e9, C.reset,
+        C.label, C.reset, C.time, count_s, C.reset, C.rate, count_mprimes, C.reset,
+        C.label, C.reset, C.time, write_s, C.reset, C.io, write_gbps, C.reset,
+        C.headline, C.reset, C.time, total_s, C.reset, C.headline, total_mprimes, C.reset);
 
     return 0;
 }

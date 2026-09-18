@@ -27,7 +27,7 @@ for i in "${!NS[@]}"; do
     end=$(date +%s.%N)
     elapsed=$(awk -v a="$start" -v b="$end" 'BEGIN { printf "%.2f", b - a }')
 
-    actual=$(echo "$output" | sed -nE 's/Listo\. ([0-9]+) primos.*/\1/p')
+    actual=$(echo "$output" | sed -nE 's/Listo\. ([0-9,]+) primos.*/\1/p' | tr -d ',')
 
     if [ "$actual" == "$expected" ]; then
         printf "OK   N=%-15s pi(N)=%-12s (%ss)\n" "$n" "$actual" "$elapsed"

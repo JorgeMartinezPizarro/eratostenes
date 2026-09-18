@@ -191,3 +191,20 @@ thread counts, segment widths, and wheels for the same N.
 ## Benchmarks
 
 See [BENCHMARK.md](BENCHMARK.md).
+
+## Free memory of WSL desde windows
+
+In the terminal, run:
+
+```powershell
+diskpart
+```
+
+and then write:
+
+```powershell
+select vdisk file="C:\ruta\completa\a\ext4.vhdx" 
+compact vdisk
+```
+
+

@@ -27,7 +27,10 @@
 #include <cstdint>
 #include <array>
 
-constexpr std::array<uint64_t, 3> WHEEL_PRIMES = {2, 3, 5}; // <-- active config: mod 30 (best at N~1e12 on 12MB L3)
+//     constexpr std::array<uint64_t, 2> WHEEL_PRIMES = {2, 3};             // mod 6
+     constexpr std::array<uint64_t, 3> WHEEL_PRIMES = {2, 3, 5};          // mod 30
+//     constexpr std::array<uint64_t, 4> WHEEL_PRIMES = {2, 3, 5, 7};       // mod 210
+//     constexpr std::array<uint64_t, 5> WHEEL_PRIMES = {2, 3, 5, 7, 11};   // mod 2310
 
 constexpr uint64_t wheel_gcd(uint64_t a, uint64_t b) {
     while (b != 0) {
