@@ -199,9 +199,9 @@ with wheel and N.
 | N | mod 6 | mod 30 | mod 210 |
 |---|---:|---:|---:|
 | 1e9 | 0.50s | 0.50s | 0.50s |
-| 1e10 | 1.00s | 0.50s | 0.50s |
-| 1e11 | 8.01s | 6.51s | 5.51s |
-| 1e12 | 94.07s | 75.06s | 136.10s |
+| 1e10 | 1.00s | 1.00s | 0.50s |
+| 1e11 | 8.00s | 5.51s | 5.51s |
+| 1e12 | 91.04s | 73.55s | 137.63s |
 
 `pi(N)` matched the known value at every N (455,052,511 / 4,118,054,813 /
 37,607,912,018). The repo ships with mod 30 active, since 10^12 and up is
