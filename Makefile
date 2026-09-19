@@ -34,7 +34,7 @@ NTH_OBJ := $(OBJ_DIR_RELEASE)/nth_prime.o
 OUT_DIR := $(CURDIR)/output
 COMPOSE := docker compose -f docker/docker-compose.yml
 
-.PHONY: all portable debug clean fclean re docker run test verify-db
+.PHONY: all portable debug clean fclean re docker run test verify-db test-io
 
 # --- release (default) ---
 all: $(BIN) $(NTH_BIN)
@@ -102,3 +102,13 @@ verify-db: $(BIN) $(NTH_BIN)
 
 benchmark:
 	./scripts/benchmark.sh
+
+# Barrido de E/S real: construye un .db por cada N en 1k..1t y muestra una
+# tabla con tamano de fichero, bytes/bits por primo y los tiempos de
+# escritura/total que reporta el propio binario (ver scripts/test_io.sh).
+# WRITE_PATH/THREADS/SEGMENT/KEEP_DB se pueden pasar como variables de
+# entorno. WRITE_PATH debe apuntar al filesystem nativo de Linux (no a un
+# /mnt/c... montado, mucho mas lento) -- default: $HOME/eratostenes-io-bench.
+# P.ej. KEEP_DB=0 make test-io para no conservar los .db tras medir.
+test-io: $(BIN)
+	./scripts/test_io.sh
