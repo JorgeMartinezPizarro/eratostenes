@@ -31,11 +31,13 @@
 
 // Primes to fold into the pre-sieve pattern (must be coprime with
 // WHEEL_MOD; any that happen to already be wheel primes for the active
-// WHEEL_PRIMES config are skipped automatically in build_presieve).
-// product(7,11,13,17) = 17017 -> pattern period = WHEEL_SIZE*17017 bits
-// (~17KB for mod 30); comfortably cache-resident and shared read-only
-// across all threads.
-inline const std::vector<uint64_t> PRESIEVE_PRIMES = {7, 11, 13, 17};
+// WHEEL_PRIMES config are skipped automatically in build_presieve -- e.g.
+// 5 is only actually used for mod 6, where it's the smallest base prime;
+// for mod 30/210 it's already a wheel prime and gets dropped).
+// product(7,11,13,17,19,23) = 7436429 -> pattern period = WHEEL_SIZE*7436429
+// bits (~7.1MB for mod 30); near the edge of L3, shared read-only across
+// all threads.
+inline const std::vector<uint64_t> PRESIEVE_PRIMES = {5, 7, 11, 13, 17, 19, 23};
 
 struct Presieve {
     std::vector<uint64_t> primes;  // subset of PRESIEVE_PRIMES actually used
