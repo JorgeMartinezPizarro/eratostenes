@@ -61,6 +61,7 @@ public:
         if (writer_.joinable()) {
             { std::lock_guard<std::mutex> lk(mu_); done_ = true; }
             cv_.notify_all();
+            cv_not_full_.notify_all();
             writer_.join();
         }
         if (insert_stmt_) sqlite3_finalize(insert_stmt_);
@@ -68,8 +69,15 @@ public:
     }
 
     // Called from sieve threads -- many concurrent callers, must stay safe.
+    // Blocks (backpressure) once the queue holds too many not-yet-written
+    // blocks: sieve+zstd across many threads can outrun the single
+    // serialized SQLite writer, and an unbounded queue here means
+    // compressed blocks pile up in RAM without limit -- for large N (e.g.
+    // 1e12, hundreds of thousands of blocks) that's enough to OOM the
+    // process before disk ever fills up.
     void push(PendingBlock blk) {
-        std::lock_guard<std::mutex> lk(mu_);
+        std::unique_lock<std::mutex> lk(mu_);
+        cv_not_full_.wait(lk, [&] { return queue_.size() < MAX_QUEUED_BLOCKS || done_; });
         queue_.push(std::move(blk));
         cv_.notify_one();
     }
@@ -85,6 +93,7 @@ public:
             done_ = true;
         }
         cv_.notify_all();
+        cv_not_full_.notify_all();
         writer_.join();
         if (writer_error_) std::rethrow_exception(writer_error_);
 
@@ -146,6 +155,7 @@ private:
                     if (queue_.empty() && done_) break;
                     blk = std::move(queue_.front());
                     queue_.pop();
+                    cv_not_full_.notify_one();
                 }
                 if (!txn_open) { exec("BEGIN;"); txn_open = true; in_txn = 0; }
                 insert_block(blk);
@@ -172,8 +182,17 @@ private:
     sqlite3* db_ = nullptr;
     sqlite3_stmt* insert_stmt_ = nullptr;
 
+    // Caps how many compressed-but-not-yet-inserted blocks can queue up.
+    // Generous enough to smooth out scheduling jitter between producer
+    // threads and the single writer, but bounded so a writer that's
+    // slower than the sieve+compress side (large N, slow disk, many
+    // threads) applies backpressure instead of growing the queue --
+    // and process memory -- without limit.
+    static constexpr size_t MAX_QUEUED_BLOCKS = 512;
+
     std::mutex mu_;
     std::condition_variable cv_;
+    std::condition_variable cv_not_full_;
     std::queue<PendingBlock> queue_;
     bool done_ = false;
 
