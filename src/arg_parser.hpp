@@ -11,9 +11,50 @@
 #include <cctype>
 #include <cmath>
 #include <thread>
+#include <fstream>
+#include <algorithm>
 
 #include "base_sieve.hpp"
 #include "wheel.hpp"
+
+// Best-effort L2 cache size (bytes), Linux sysfs (also visible inside a
+// Docker container, since containers share the host kernel's /sys).
+// Returns 0 on any failure (non-Linux, sysfs unavailable, unexpected
+// format) -- callers must fall back to a sane default rather than divide
+// by it directly. Scans /sys/devices/system/cpu/cpu0/cache/index*/ for the
+// entry with level==2 (index numbering isn't standardized -- e.g. index0
+// is L1d, index2 is L2 on this project's own dev machine, but that's not
+// guaranteed elsewhere).
+inline uint64_t detect_l2_cache_bytes() {
+    for (int idx = 0; idx < 8; ++idx) {
+        std::string base = "/sys/devices/system/cpu/cpu0/cache/index" + std::to_string(idx);
+        std::ifstream level_f(base + "/level");
+        if (!level_f) break; // no more indices to check
+        int level = 0;
+        level_f >> level;
+        if (level != 2) continue;
+
+        std::ifstream size_f(base + "/size");
+        std::string size_str;
+        if (!(size_f >> size_str) || size_str.empty()) continue;
+
+        uint64_t mult = 1;
+        char suffix = size_str.back();
+        if (suffix == 'K' || suffix == 'k') { mult = 1024; size_str.pop_back(); }
+        else if (suffix == 'M' || suffix == 'm') { mult = 1024 * 1024; size_str.pop_back(); }
+        if (size_str.empty()) continue;
+
+        try {
+            size_t pos = 0;
+            uint64_t value = std::stoull(size_str, &pos);
+            if (pos != size_str.size()) continue;
+            return value * mult;
+        } catch (const std::exception&) {
+            continue;
+        }
+    }
+    return 0;
+}
 
 struct Options {
     uint64_t limit = 0;                 // N: sieve up to N (inclusive)
@@ -174,7 +215,32 @@ inline Options parse_args(int argc, char** argv) {
         // boundary slip into the sparse tier. Measured ~16% faster than a
         // fixed default at 1e12 on an i5-11400F -- see README.
         constexpr uint64_t MARGIN_MULT = (WHEEL_MOD + WHEEL_SIZE - 1) / WHEEL_SIZE;
-        opt.segment_width = isqrt(opt.limit) * MARGIN_MULT;
+        uint64_t sqrt_based = isqrt(opt.limit) * MARGIN_MULT;
+
+        // This grows with sqrt(limit), same as the "no sparse primes at
+        // all" goal above -- fine up to a point, but the per-thread bit
+        // array (segment_width/WHEEL_MOD*WHEEL_SIZE bytes) grows right
+        // along with it, and past some N that array stops fitting L2 (or,
+        // multiplied by thread count, even L3) regardless of how good
+        // "zero sparse primes" sounds -- exactly the cache-pressure
+        // problem this project spent a whole prior round chasing, just
+        // caused by the opposite extreme. Capping the width at a fraction
+        // of the machine's actual L2 (detected, not guessed) accepts some
+        // sparse primes past that point in exchange for a cache-resident
+        // array -- the sparse tier's own bucket ring is pool-allocated
+        // (see SegmentSieve), so that tradeoff is cheap once it's needed.
+        // 1/2 of L2 leaves room for a hyperthread sibling sharing the same
+        // L2 (typical topology) plus whatever else is running; falls back
+        // to a conservative 256KiB if L2 can't be detected (see
+        // detect_l2_cache_bytes).
+        uint64_t l2_bytes = detect_l2_cache_bytes();
+        if (l2_bytes == 0) l2_bytes = 256 * 1024;
+        uint64_t l2_target_bytes = l2_bytes / 2;
+        // Inverse of array_bytes = segment_width * WHEEL_SIZE / WHEEL_MOD / 8
+        // (see README#tuning-for-your-machine).
+        uint64_t l2_based_width = l2_target_bytes * 8 * WHEEL_MOD / WHEEL_SIZE;
+
+        opt.segment_width = std::min(sqrt_based, l2_based_width);
     }
     if (opt.segment_width < 64) opt.segment_width = 64;
     if (opt.segment_width % 2 != 0) opt.segment_width += 1; // must be even

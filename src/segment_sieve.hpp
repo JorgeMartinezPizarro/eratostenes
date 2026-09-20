@@ -79,7 +79,7 @@ public:
         uint64_t segments_ahead_max = delta_max / seg_k_width_ + 2;
         num_buckets_ = 1;
         while (num_buckets_ < (segments_ahead_max + 1) * 4) num_buckets_ <<= 1; // power of 2, 4x margin
-        buckets_.resize(num_buckets_);
+        bucket_head_.assign(num_buckets_, NPOS);
     }
 
     // Must be called once before the first sieve_and_emit call for a new,
@@ -96,7 +96,9 @@ public:
         dense_j_.clear();
         onfly_k_.clear();
         onfly_j_.clear();
-        for (auto& b : buckets_) b.clear();
+        sparse_k_.clear();
+        sparse_next_.clear();
+        std::fill(bucket_head_.begin(), bucket_head_.end(), NPOS);
     }
 
     template <typename Writer>
@@ -170,7 +172,12 @@ public:
             m += step;
             uint64_t k = wheel_index(p * m);
 
-            schedule_sparse(k, static_cast<uint32_t>(next_sparse_idx_), k_high);
+            // sparse_k_/sparse_next_ grow in lockstep with next_sparse_idx_
+            // (see the pool comment near their declaration), so this index
+            // is exactly where this prime's permanent slot lives.
+            sparse_k_.push_back(0);
+            sparse_next_.push_back(NPOS);
+            schedule_sparse(static_cast<uint32_t>(next_sparse_idx_), k, k_high);
             ++next_sparse_idx_;
         }
 
@@ -221,33 +228,45 @@ public:
 
         // Sparse tier: bucketed -- process exactly the entries due this
         // segment, mark, advance, reschedule into whichever future bucket
-        // the next hit lands in.
-        Bucket& bucket = buckets_[cur_segment_ & (num_buckets_ - 1)];
-        for (const SparseEntry& e : bucket) {
-            // Sparse: no stored table and no stored multiplier either --
-            // m is recovered from k on entry: k encodes a value
-            // v=wheel_number(k) that's an exact multiple of p (it's where
-            // the previous mark landed), so v/p divides evenly.
-            uint64_t p = sparse_primes[e.prime_idx];
-            uint64_t k = e.k;
-            uint64_t m = wheel_number(k) / p;
-            while (k < k_high) {
-                uint64_t idx = k - k_low;
-                words_[idx >> 6] |= (1ULL << (idx & 63));
-                // m is already coprime with WHEEL_MOD (it's the multiplier
-                // of the hit just marked), so STEP_TO_COPRIME[m % WHEEL_MOD]
-                // alone is 0 -- that table answers "distance to the
-                // *nearest* coprime residue", which is where you already
-                // are. Step past it first so it finds the *next* one
-                // instead of stalling on this one forever.
-                ++m;
-                uint64_t step = STEP_TO_COPRIME[m % WHEEL_MOD];
-                m += step;
-                k = wheel_index(p * m);
+        // the next hit lands in. Each activated sparse prime owns exactly
+        // one permanent slot in sparse_k_/sparse_next_ for the rest of the
+        // chunk (see the pool comment near their declaration) -- "the
+        // bucket" is just that slot's index appearing in this ring
+        // position's intrusive list, relinked into a new position by
+        // schedule_sparse below, never allocated or freed again after
+        // activation.
+        {
+            uint32_t slot = static_cast<uint32_t>(cur_segment_ & (num_buckets_ - 1));
+            uint32_t idx = bucket_head_[slot];
+            bucket_head_[slot] = NPOS;
+            while (idx != NPOS) {
+                uint32_t next_idx = sparse_next_[idx]; // save: schedule_sparse below overwrites it
+                // Sparse: no stored table and no stored multiplier either --
+                // m is recovered from k on entry: k encodes a value
+                // v=wheel_number(k) that's an exact multiple of p (it's
+                // where the previous mark landed), so v/p divides evenly.
+                uint64_t p = sparse_primes[idx];
+                uint64_t k = sparse_k_[idx];
+                uint64_t m = wheel_number(k) / p;
+                while (k < k_high) {
+                    uint64_t widx = k - k_low;
+                    words_[widx >> 6] |= (1ULL << (widx & 63));
+                    // m is already coprime with WHEEL_MOD (it's the
+                    // multiplier of the hit just marked), so
+                    // STEP_TO_COPRIME[m % WHEEL_MOD] alone is 0 -- that
+                    // table answers "distance to the *nearest* coprime
+                    // residue", which is where you already are. Step past
+                    // it first so it finds the *next* one instead of
+                    // stalling on this one forever.
+                    ++m;
+                    uint64_t step = STEP_TO_COPRIME[m % WHEEL_MOD];
+                    m += step;
+                    k = wheel_index(p * m);
+                }
+                schedule_sparse(idx, k, k_high);
+                idx = next_idx;
             }
-            schedule_sparse(k, e.prime_idx, k_high);
         }
-        bucket.clear();
         ++cur_segment_;
 
         // Extraction: bit=0 => prime candidate.
@@ -295,25 +314,33 @@ public:
     }
 
 private:
-    struct SparseEntry {
-        uint64_t k;
-        uint32_t prime_idx; // index into sparse_primes
-    };
-    using Bucket = std::vector<SparseEntry>;
+    static constexpr uint32_t NPOS = static_cast<uint32_t>(-1);
 
-    // Schedules a sparse prime into the bucket for whichever segment k
-    // falls into, given that the segment currently being processed ends at
-    // k_high. k < k_high means "due right now" (this segment's bucket);
-    // asserts rather than silently corrupting results if the ring ever
-    // turns out too small for the actual data (see constructor).
-    void schedule_sparse(uint64_t k, uint32_t prime_idx, uint64_t k_high) {
+    // Schedules (or reschedules) sparse prime `idx` into the bucket ring
+    // slot for whichever segment k falls into, given that the segment
+    // currently being processed ends at k_high. k < k_high means "due
+    // right now" (this segment's bucket); asserts rather than silently
+    // corrupting results if the ring ever turns out too small for the
+    // actual data (see constructor).
+    //
+    // No allocation here, ever, after activation: idx's slot in sparse_k_/
+    // sparse_next_ already exists (see the pool comment near their
+    // declaration) -- this just overwrites it and relinks it onto the
+    // target ring slot's list. That's the actual memory-pool win over a
+    // std::vector<Entry> per bucket: no per-bucket heap allocation to
+    // begin with, and no reallocation on reschedule either, since a prime
+    // never needs more than the one slot it was given at activation.
+    void schedule_sparse(uint32_t idx, uint64_t k, uint64_t k_high) {
         uint64_t segments_ahead = (k < k_high) ? 0 : (k - k_high) / seg_k_width_ + 1;
         if (segments_ahead >= num_buckets_) {
             throw std::runtime_error(
                 "bucket sieve: salto de un primo disperso mayor que el margen del anillo de "
                 "cubos (bug de dimensionamiento en el constructor de SegmentSieve)");
         }
-        buckets_[(cur_segment_ + segments_ahead) & (num_buckets_ - 1)].push_back({k, prime_idx});
+        uint32_t slot = static_cast<uint32_t>((cur_segment_ + segments_ahead) & (num_buckets_ - 1));
+        sparse_k_[idx] = k;
+        sparse_next_[idx] = bucket_head_[slot];
+        bucket_head_[slot] = idx;
     }
 
     std::vector<uint64_t> words_;
@@ -329,9 +356,20 @@ private:
     std::vector<uint64_t> onfly_k_;
     std::vector<int> onfly_j_;
 
-    // Sparse tier's bucket ring.
+    // Sparse tier's bucket ring, as an intrusive linked list over a flat
+    // pool instead of one std::vector<Entry> per ring slot: sparse_k_/
+    // sparse_next_ grow in lockstep with next_sparse_idx_ as primes
+    // activate (mirroring dense_k_/onfly_k_ above), so sparse_k_[i] is
+    // always prime i's current k and sparse_next_[i] chains it into
+    // whichever ring slot's list it's currently scheduled on.
+    // bucket_head_[slot] is that list's head index, or NPOS if empty. A
+    // prime is relinked (schedule_sparse) every time it's processed, but
+    // its slot in sparse_k_/sparse_next_ is allocated exactly once, at
+    // activation -- no heap allocation on the hot path at all.
     uint64_t num_buckets_ = 1;
-    std::vector<Bucket> buckets_;
+    std::vector<uint32_t> bucket_head_;
+    std::vector<uint64_t> sparse_k_;
+    std::vector<uint32_t> sparse_next_;
     uint64_t cur_segment_ = 0;
 
     size_t next_prime_idx_ = 0;
