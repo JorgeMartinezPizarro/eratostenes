@@ -1,26 +1,34 @@
 #!/bin/bash
-# Sweeps WHEEL_PRIMES (mod 6 / 30 / 210) x N (1e9..1e11), rebuilding
-# between each, and prints a timing table. Restores whatever wheel was
-# active before running and leaves the binary rebuilt with it.
+# Sweeps WHEEL_PRIMES (mod 30) x N (1e9..1e13), rebuilding between each,
+# and prints a timing table. Restores whatever wheel was active before
+# running and leaves the binary rebuilt with it.
+#
+# mod 6 and mod 210 were tried against mod 30 up to 1e13 (see the
+# i5-11400F section of README#benchmarks): mod 6 avoids mod 30's L3-cliff
+# ratio jump but isn't actually faster (less wheel-filtering costs about
+# as much as the cache cliff saves), and mod 210's table grows too fast to
+# be worth it past 1e10. mod 30 stays the one worth tracking here; add
+# wheels back to MODS below if that ever changes.
 #
 # Usage: ./scripts/benchmark.sh
-# Env overrides: THREADS (default: nproc), SEGMENT (default: 4194304,
-# numeric -s width), REPS (default: 1, keeps the fastest of REPS runs
-# per N/wheel -- there's real run-to-run noise on this kind of box, see
-# BENCHMARK section of the README/commit history).
+# Env overrides: THREADS (default: nproc), SEGMENT (default: 10000000 --
+# the width the L3-cliff comparison in the README used; the tool's own CLI
+# default is smaller, 4194304), REPS (default: 1, keeps the fastest of
+# REPS runs per N/wheel -- there's real run-to-run noise on this kind of
+# box, see BENCHMARK section of the README/commit history).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 THREADS="${THREADS:-$(nproc)}"
-SEGMENT="${SEGMENT:-4194304}"
+SEGMENT="${SEGMENT:-10000000}"
 REPS="${REPS:-1}"
 
-MODS=(6 30 210)
-NS=(1e9 1e10 1e11 1e12)
+MODS=(30)
+NS=(1e9 1e10 1e11 1e12 1e13)
 # pi(N) for each N above, in the same order -- known values, used to catch
 # a silently-wrong build instead of just reporting a (meaningless) time for
 # one. See scripts/test.sh for the same values at other N.
-EXPECTED=(50847534 455052511 4118054813 37607912018)
+EXPECTED=(50847534 455052511 4118054813 37607912018 346065536839)
 
 WHEEL_FILE=src/wheel.hpp
 

@@ -155,6 +155,63 @@ alongside it for reference, same machine, same thread count:
 | 1e12 | 76.59s | 27.422s | 2.8x |
 | 1e13 | 1387.66s | 391.311s | 3.6x |
 
+### 1e13 on the i5-11400F: from ~1500s to 1131s
+
+An early `-t 20` sweep on this CPU (only 6 cores / 12 hardware threads)
+oversubscribed by 8 threads, and split the range into one static
+contiguous chunk per thread -- both inflated 1e13 to ~1350-1500s. Matching
+`-t` to real hardware threads (12) and switching to a dynamic chunk queue
+(`run_parallel_chunks` in `main.cpp`) brought it down to:
+
+| N | mod 30, `-s 10000000`, `-t 12` |
+|---|---:|
+| 1e12 | 65.08s |
+| 1e13 | 1131.65s |
+| ratio | 17.4x |
+
+The remaining ~17x ratio (vs. the ~11-14x/decade this project sees
+elsewhere -- see the i5-13500 ladder below, a machine with double this
+one's L3) is a real cache effect, not oversubscription or load imbalance:
+the dense/sparse split's shared jump table caps out at ~7.8MiB right
+around this N with `-s 10000000` (see [Tuning](#tuning-for-your-machine)),
+and that's most of this CPU's 12MiB L3.
+
+`-s 10000000` here is carried over from the original sweep on this box,
+not independently tuned for it -- the CLI's own default is `-s 4194304`
+(sized for L2, see [Tuning](#tuning-for-your-machine)), and the one
+apples-to-apples comparison run so far (same N, same wheel, same thread
+count) actually favors 10M: 1353.69s vs 1131.65s. That's a real, measured
+result on this machine, not an assumption borrowed from the bigger-cache
+server above -- but it's only two points on the `-s` axis, not a proper
+sweep, so "10M" here means "beat the CLI default once," not "is this
+CPU's optimum." The L2-sizing table alone would have picked 4M and gotten
+it backwards: `-s` also sets the dense/sparse cutoff (`seg_k_width`), and
+a smaller `-s` pushes far more primes into the per-hit-division sparse
+path (140,578 vs 33,247 at 1e13) -- that cost outweighed the L2 fit here.
+A smaller wheel (mod 6) sidesteps the table-size jump entirely but isn't
+actually faster either (1139.24s, a wash with mod 30's 1131.65s) -- so
+mod 30 stays the default on this box for lack of a reason to change it,
+not because either alternative has been ruled out by a real sweep.
+
+### i5-13500 (14 cores/20 threads, L3 24MiB): full ladder
+
+Same `--count-only`, mod 30, `-s 10000000`, `-t 20` (its native thread
+count -- no oversubscription there, unlike `-t 20` on the 11400F above).
+At 24MiB L3 the same table-size jump never gets close to filling the
+cache, so the ratio stays in the ~10-14x/decade band all the way to 1e15
+instead of spiking once around 1e13 the way the i5-11400F does:
+
+| N | tiempo | tasa | ratio |
+|---|---:|---:|---:|
+| 1e10 | 0.51s | 892.3 M/s | -- |
+| 1e11 | 5.02s | 821.1 M/s | 9.8x |
+| 1e12 | 58.54s | 642.5 M/s | 11.7x |
+| 1e13 | 669.77s | 516.7 M/s | 11.4x |
+| 1e14 | 8961.85s | 357.6 M/s | 13.4x |
+| 1e15 | 124984.47s | 238.8 M/s | 13.9x |
+
+pi(1e15) = 29,844,570,422,669.
+
 ## Verification
 
 `make test` checks pi(N) against the known value for N=1e8..1e11, plus a
