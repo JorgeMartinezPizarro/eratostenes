@@ -69,7 +69,7 @@ commas() {
     printf '%d' "$1" | sed -E ':a; s/([0-9])([0-9]{3})(,|$)/\1,\2\3/; ta'
 }
 
-declare -A SIZE_BYTES WRITE_S TOTAL_S COUNT
+declare -A SIZE_BYTES COUNT_S WRITE_S TOTAL_S COUNT
 
 fail=0
 for i in "${!SIZES[@]}"; do
@@ -86,6 +86,7 @@ for i in "${!SIZES[@]}"; do
     }
 
     count=$(echo "$out" | sed -nE 's/.*Listo\. ([0-9,]+) primos.*/\1/p' | tr -d ',')
+    count_s=$(echo "$out" | sed -nE 's/.*conteo: *([0-9.]+)s.*/\1/p')
     write_s=$(echo "$out" | sed -nE 's/.*escritura: *([0-9.]+)s.*/\1/p')
     total_s=$(echo "$out" | sed -nE 's/.*total: *([0-9.]+)s.*/\1/p')
 
@@ -95,8 +96,8 @@ for i in "${!SIZES[@]}"; do
         fail=1
         break
     fi
-    if [ -z "$write_s" ] || [ -z "$total_s" ]; then
-        echo "FAIL N=$n: no se pudo parsear el tiempo de escritura/total de la salida" >&2
+    if [ -z "$count_s" ] || [ -z "$write_s" ] || [ -z "$total_s" ]; then
+        echo "FAIL N=$n: no se pudo parsear el tiempo de conteo/escritura/total de la salida" >&2
         echo "$out" >&2
         fail=1
         break
@@ -105,11 +106,12 @@ for i in "${!SIZES[@]}"; do
     bytes=$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file")
 
     SIZE_BYTES[$n]="$bytes"
+    COUNT_S[$n]="$count_s"
     WRITE_S[$n]="$write_s"
     TOTAL_S[$n]="$total_s"
     COUNT[$n]="$count"
 
-    echo "  pi(N)=$count  tamano=$(human_size "$bytes")  escritura=${write_s}s  total=${total_s}s" >&2
+    echo "  pi(N)=$count  tamano=$(human_size "$bytes")  conteo=${count_s}s  escritura=${write_s}s  total=${total_s}s" >&2
 
     if [ "$KEEP_DB" = "0" ]; then
         rm -f "$file"
@@ -121,14 +123,20 @@ if [ "$fail" -ne 0 ]; then
     exit 1
 fi
 
+# Anchos ajustados al contenido real (N=1k..1t, ver arriba) en vez de
+# columnas sobredimensionadas -- con esas el ancho total de fila pasaba de
+# 120 columnas y se envolvia feo en una terminal normal. Cabecera, separador
+# y filas usan exactamente los mismos anchos por columna para que la tabla
+# quede alineada.
 echo
-printf "| %-6s | %-6s | %-16s | %-12s | %10s | %10s | %14s | %16s | %10s |\n" \
-    "N" "limite" "pi(N) primos" "tamano .db" "bytes/primo" "bits/primo" "escritura (s)" "escritura (MB/s)" "total (s)"
-printf "|--------|--------|------------------|--------------|-----------:|-----------:|---------------:|-----------------:|-----------:|\n"
+printf "| %-4s | %-6s | %14s | %-10s | %9s | %9s | %7s | %6s | %8s |\n" \
+    "N" "limite" "pi(N)" "tam .db" "bit/primo" "conteo(s)" "escr(s)" "MB/s" "total(s)"
+printf "|------|--------|---------------:|------------|----------:|----------:|--------:|-------:|---------:|\n"
 for i in "${!SIZES[@]}"; do
     n="${SIZES[$i]}"
     limit="${LIMITS[$i]}"
     bytes="${SIZE_BYTES[$n]}"
+    count_s="${COUNT_S[$n]}"
     write_s="${WRITE_S[$n]}"
     total_s="${TOTAL_S[$n]}"
     count="${COUNT[$n]}"
@@ -139,11 +147,10 @@ for i in "${!SIZES[@]}"; do
     # columna frente al resto de filas.
     limit_exp="1E$(( ${#limit} - 1 ))"
 
-    bpp=$(awk -v b="$bytes" -v c="$count" 'BEGIN{printf "%.4f", b/c}')
-    bitpp=$(awk -v b="$bpp" 'BEGIN{printf "%.2f", b*8}')
+    bitpp=$(awk -v b="$bytes" -v c="$count" 'BEGIN{printf "%.2f", b*8/c}')
     mbps=$(awk -v b="$bytes" -v s="$write_s" 'BEGIN{printf "%.1f", (s>0)?(b/1e6/s):0}')
 
-    printf "| %-6s | %-6s | %-16s | %-12s | %10s | %10s | %14s | %16s | %10s |\n" \
+    printf "| %-4s | %-6s | %14s | %-10s | %9s | %9s | %7s | %6s | %8s |\n" \
         "$n" "$limit_exp" "$(commas "$count")" \
-        "$(human_size "$bytes")" "$bpp" "$bitpp" "$write_s" "$mbps" "$total_s"
+        "$(human_size "$bytes")" "$bitpp" "$count_s" "$write_s" "$mbps" "$total_s"
 done

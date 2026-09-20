@@ -7,7 +7,9 @@
 //   1. Compute the base primes (<= sqrt(N)) with a simple sieve.
 //   2. The "wheel index" range [1, wheel_count_upto(N)) -- which enumerates
 //      the numbers coprime with WHEEL_MOD above the wheel's own primes, see
-//      wheel.hpp -- is split into T contiguous chunks, one per thread.
+//      wheel.hpp -- is split into many more contiguous chunks than threads;
+//      threads pull chunks from a shared queue instead of owning one each
+//      (see run_parallel_chunks for why: work isn't uniform across chunks).
 //   3. COUNT PASS: each thread sieves its chunk and counts how many bytes
 //      of text its primes will take (writes nothing to disk). From those
 //      totals, prefix sums give the exact offset where each thread must
@@ -244,24 +246,41 @@ struct ProgressGuard {
     ~ProgressGuard() { done = true; th.join(); }
 };
 
-// Spawns fn(i) for i in [0, count) each in its own thread and joins them
-// all, then rethrows the first exception any of them raised. Plain
-// std::thread has no way to propagate an exception back to the caller on
-// its own -- one escaping a thread's function calls std::terminate()
-// instead -- so every worker call is run under a try/catch that stashes it
-// here (a full disk during the write pass, or the bucket-sieve sizing
-// check in SegmentSieve::schedule, are the realistic ways this fires).
+// Spawns 'workers' OS threads that dynamically pull chunk indices in
+// [0, num_chunks) from a shared atomic counter and call fn(chunk_idx) for
+// each, then joins them all and rethrows the first exception any of them
+// raised. Plain std::thread has no way to propagate an exception back to
+// the caller on its own -- one escaping a thread's function calls
+// std::terminate() instead -- so every worker call is run under a
+// try/catch that stashes it here (a full disk during the write pass, or
+// the bucket-sieve sizing check in SegmentSieve::schedule, are the
+// realistic ways this fires).
+//
+// num_chunks > workers on purpose (see split_ranges): a base prime only
+// starts contributing hits to a segment once p*p is below that segment's
+// position, so equal-WIDTH chunks are not equal-WORK chunks -- chunks near
+// the end of the range have far more active base primes per segment than
+// chunks near the start. Static one-chunk-per-thread assignment leaves
+// early threads idle while the last one grinds through the most expensive
+// part of the range; pulling many narrow chunks from a shared counter lets
+// a thread that finishes an early, cheap chunk immediately pick up the
+// next available one instead of sitting idle.
 template <typename Fn>
-static void run_parallel(unsigned count, Fn&& fn) {
-    std::vector<std::exception_ptr> errors(count);
+static void run_parallel_chunks(unsigned workers, unsigned num_chunks, Fn&& fn) {
+    std::atomic<unsigned> next_chunk{0};
+    std::vector<std::exception_ptr> errors(workers);
     std::vector<std::thread> pool;
-    pool.reserve(count);
-    for (unsigned i = 0; i < count; ++i) {
-        pool.emplace_back([&fn, &errors, i]() {
+    pool.reserve(workers);
+    for (unsigned w = 0; w < workers; ++w) {
+        pool.emplace_back([&fn, &errors, &next_chunk, num_chunks, w]() {
             try {
-                fn(i);
+                for (;;) {
+                    unsigned idx = next_chunk.fetch_add(1, std::memory_order_relaxed);
+                    if (idx >= num_chunks) break;
+                    fn(idx);
+                }
             } catch (...) {
-                errors[i] = std::current_exception();
+                errors[w] = std::current_exception();
             }
         });
     }
@@ -356,8 +375,14 @@ int main(int argc, char** argv) {
         }
     }
 
-    auto ranges = split_ranges(opt.limit, opt.threads);
-    unsigned actual_threads = static_cast<unsigned>(ranges.size());
+    // Split into many more, narrower chunks than threads (see
+    // run_parallel_chunks for why: work per chunk isn't uniform across the
+    // range) and hand them out from a shared queue instead of one static
+    // chunk per thread.
+    constexpr unsigned CHUNKS_PER_THREAD = 16;
+    auto ranges = split_ranges(opt.limit, opt.threads * CHUNKS_PER_THREAD);
+    unsigned num_chunks = static_cast<unsigned>(ranges.size());
+    unsigned actual_threads = std::min<unsigned>(opt.threads, num_chunks);
 
     uint64_t total_span = ranges.back().high - ranges.front().low;
 
@@ -373,22 +398,22 @@ int main(int argc, char** argv) {
                  wheel_base_primes.size(), sparse_primes.size());
 
     // Every pass below runs worker threads that can throw (pwrite() on a
-    // full disk, or the bucket-sieve sizing check) -- see run_parallel for
-    // why that needs this try/catch rather than main()'s existing one
+    // full disk, or the bucket-sieve sizing check) -- see run_parallel_chunks
+    // for why that needs this try/catch rather than main()'s existing one
     // around parse_args.
     try {
         if (opt.count_only) {
             // Single pass, no I/O of any kind: NullSink skips even the
             // to_chars conversion, since we only need the running count that
             // sieve_and_emit already tracks internally.
-            std::vector<uint64_t> prime_counts(actual_threads, 0);
+            std::vector<uint64_t> prime_counts(num_chunks, 0);
             {
                 std::atomic<uint64_t> progress{0};
                 std::atomic<bool> done{false};
                 std::thread prog(print_progress, std::cref(C), "contando", std::ref(progress), total_span, std::ref(done));
                 ProgressGuard guard{done, prog};
 
-                run_parallel(actual_threads, [&](unsigned i) {
+                run_parallel_chunks(actual_threads, num_chunks, [&](unsigned i) {
                     count_only_worker(ranges[i], seg_k_width, base_limit, wheel_base_primes,
                                        sparse_primes, presieve, prime_counts[i], progress);
                 });
@@ -416,14 +441,14 @@ int main(int argc, char** argv) {
             // --- Pass 1: prime counting (NullSink -- cheaper than the text
             // path's ByteCounter, since block sizing only needs how many
             // primes each thread finds, not their text width) ---
-            std::vector<uint64_t> prime_counts(actual_threads, 0);
+            std::vector<uint64_t> prime_counts(num_chunks, 0);
             {
                 std::atomic<uint64_t> progress{0};
                 std::atomic<bool> done{false};
                 std::thread prog(print_progress, std::cref(C), "contando", std::ref(progress), total_span, std::ref(done));
                 ProgressGuard guard{done, prog};
 
-                run_parallel(actual_threads, [&](unsigned i) {
+                run_parallel_chunks(actual_threads, num_chunks, [&](unsigned i) {
                     count_only_worker(ranges[i], seg_k_width, base_limit, wheel_base_primes,
                                        sparse_primes, presieve, prime_counts[i], progress);
                 });
@@ -431,8 +456,8 @@ int main(int argc, char** argv) {
 
             prime_counts[0] += SMALL_PRIMES_COUNT;
 
-            std::vector<uint64_t> prime_offset(actual_threads, 0);
-            for (unsigned i = 1; i < actual_threads; ++i) prime_offset[i] = prime_offset[i - 1] + prime_counts[i - 1];
+            std::vector<uint64_t> prime_offset(num_chunks, 0);
+            for (unsigned i = 1; i < num_chunks; ++i) prime_offset[i] = prime_offset[i - 1] + prime_counts[i - 1];
             uint64_t total_primes = prime_offset.back() + prime_counts.back();
 
             auto t_count_done = std::chrono::steady_clock::now();
@@ -446,7 +471,7 @@ int main(int argc, char** argv) {
                 std::thread prog(print_progress, std::cref(C), "escribiendo", std::ref(progress), total_span, std::ref(done));
                 ProgressGuard guard{done, prog};
 
-                run_parallel(actual_threads, [&](unsigned i) {
+                run_parallel_chunks(actual_threads, num_chunks, [&](unsigned i) {
                     emit_db_worker(static_cast<int>(i), ranges[i], seg_k_width, base_limit,
                                     wheel_base_primes, sparse_primes, presieve,
                                     store, prime_offset[i], opt.db_block_size, opt.zstd_level, progress);
@@ -480,15 +505,15 @@ int main(int argc, char** argv) {
         }
 
         // --- Pass 1: byte counting (no I/O) ---
-        std::vector<uint64_t> byte_counts(actual_threads, 0);
-        std::vector<uint64_t> prime_counts(actual_threads, 0);
+        std::vector<uint64_t> byte_counts(num_chunks, 0);
+        std::vector<uint64_t> prime_counts(num_chunks, 0);
         {
             std::atomic<uint64_t> progress{0};
             std::atomic<bool> done{false};
             std::thread prog(print_progress, std::cref(C), "contando", std::ref(progress), total_span, std::ref(done));
             ProgressGuard guard{done, prog};
 
-            run_parallel(actual_threads, [&](unsigned i) {
+            run_parallel_chunks(actual_threads, num_chunks, [&](unsigned i) {
                 count_worker(ranges[i], seg_k_width, base_limit, wheel_base_primes,
                              sparse_primes, presieve, byte_counts[i], prime_counts[i], progress);
             });
@@ -497,8 +522,8 @@ int main(int argc, char** argv) {
         byte_counts[0] += SMALL_PRIMES_BYTES;
         prime_counts[0] += SMALL_PRIMES_COUNT;
 
-        std::vector<uint64_t> offsets(actual_threads, 0);
-        for (unsigned i = 1; i < actual_threads; ++i) offsets[i] = offsets[i - 1] + byte_counts[i - 1];
+        std::vector<uint64_t> offsets(num_chunks, 0);
+        for (unsigned i = 1; i < num_chunks; ++i) offsets[i] = offsets[i - 1] + byte_counts[i - 1];
         uint64_t total_bytes = offsets.back() + byte_counts.back();
         uint64_t total_primes = 0;
         for (auto c : prime_counts) total_primes += c;
@@ -525,7 +550,7 @@ int main(int argc, char** argv) {
             ProgressGuard guard{done, prog};
 
             try {
-                run_parallel(actual_threads, [&](unsigned i) {
+                run_parallel_chunks(actual_threads, num_chunks, [&](unsigned i) {
                     emit_worker(static_cast<int>(i), ranges[i], seg_k_width, base_limit,
                                 wheel_base_primes, sparse_primes, presieve, fd, offsets[i], progress);
                 });

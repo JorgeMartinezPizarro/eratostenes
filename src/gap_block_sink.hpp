@@ -6,12 +6,13 @@
 //
 // Same write_uint64(uint64_t) contract as NullSink/ByteCounter/DirectWriter
 // in sinks.hpp, so sieve_chunk<Writer> (main.cpp) works unchanged. One
-// GapBlockSink is owned per sieve thread; blocks from different threads are
-// NOT stitched together across chunk boundaries -- each is self-describing
-// (start_index, count), so only the last block of each thread's chunk may
-// come out shorter than block_size. That costs at most (thread count) short
-// blocks total out of what's otherwise hundreds of thousands -- negligible,
-// and it avoids any cross-thread coordination.
+// GapBlockSink is owned per work chunk (main.cpp splits the range into many
+// more chunks than threads -- see run_parallel_chunks); blocks from
+// different chunks are NOT stitched together across chunk boundaries --
+// each is self-describing (start_index, count), so only the last block of
+// each chunk may come out shorter than block_size. That costs at most
+// (chunk count) short blocks total out of what's otherwise hundreds of
+// thousands -- negligible, and it avoids any cross-chunk coordination.
 
 #include <cstdint>
 #include <functional>
