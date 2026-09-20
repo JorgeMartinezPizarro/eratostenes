@@ -92,7 +92,7 @@ concept itself rather than this project's specific spin on it:
 
 - [Segmented sieve](https://en.wikipedia.org/wiki/Sieve_of_Eratosthenes#Segmented_sieve)
 - [Wheel factorization](https://en.wikipedia.org/wiki/Wheel_factorization)
-- [Bucket sieve](https://en.wikipedia.org/wiki/Bucket_queue) (used only for the rare primes with at most ~1 hit/segment — see `src/segment_sieve.hpp`)
+- [Bucket sieve](https://en.wikipedia.org/wiki/Bucket_queue)
 - [Bit array](https://en.wikipedia.org/wiki/Bit_array)
 - [Hamming weight / popcount](https://en.wikipedia.org/wiki/Hamming_weight)
 - [Delta encoding](https://en.wikipedia.org/wiki/Delta_encoding) (gaps between consecutive primes, for `.db`)

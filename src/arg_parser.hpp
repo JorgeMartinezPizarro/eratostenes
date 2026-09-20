@@ -17,22 +17,25 @@
 #include "base_sieve.hpp"
 #include "wheel.hpp"
 
-// Best-effort L2 cache size (bytes), Linux sysfs (also visible inside a
-// Docker container, since containers share the host kernel's /sys).
-// Returns 0 on any failure (non-Linux, sysfs unavailable, unexpected
-// format) -- callers must fall back to a sane default rather than divide
-// by it directly. Scans /sys/devices/system/cpu/cpu0/cache/index*/ for the
-// entry with level==2 (index numbering isn't standardized -- e.g. index0
-// is L1d, index2 is L2 on this project's own dev machine, but that's not
-// guaranteed elsewhere).
-inline uint64_t detect_l2_cache_bytes() {
+// Best-effort cache size (bytes) for a given level (2 = L2, 3 = L3), Linux
+// sysfs (also visible inside a Docker container, since containers share
+// the host kernel's /sys). Returns 0 on any failure (non-Linux, sysfs
+// unavailable, unexpected format) -- callers must fall back to a sane
+// default rather than divide by it directly. Scans
+// /sys/devices/system/cpu/cpu0/cache/index*/ for the matching "level" file
+// (index numbering isn't standardized -- e.g. index2 is L2 and index3 is
+// L3 on this project's own dev machine, but that's not guaranteed
+// elsewhere). L3's "size" here is the cache's real total size (shared
+// across every core), not divided per-thread -- no adjustment needed for
+// that, unlike how a per-thread *budget* out of it might get divided.
+inline uint64_t detect_cache_bytes(int target_level) {
     for (int idx = 0; idx < 8; ++idx) {
         std::string base = "/sys/devices/system/cpu/cpu0/cache/index" + std::to_string(idx);
         std::ifstream level_f(base + "/level");
         if (!level_f) break; // no more indices to check
         int level = 0;
         level_f >> level;
-        if (level != 2) continue;
+        if (level != target_level) continue;
 
         std::ifstream size_f(base + "/size");
         std::string size_str;
@@ -55,6 +58,8 @@ inline uint64_t detect_l2_cache_bytes() {
     }
     return 0;
 }
+inline uint64_t detect_l2_cache_bytes() { return detect_cache_bytes(2); }
+inline uint64_t detect_l3_cache_bytes() { return detect_cache_bytes(3); }
 
 struct Options {
     uint64_t limit = 0;                 // N: sieve up to N (inclusive)

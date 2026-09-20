@@ -383,15 +383,23 @@ int main(int argc, char** argv) {
     //   - sparse_primes (p >= seg_k_width): at most ~1 hit/segment, plain
     //     uint64_t, recovers an absolute multiplier from k (unchanged).
     //
-    // TABLE_BYTES_BUDGET is deliberately small (comfortably inside L2, not
-    // just L3) and independent of N or -s: pushing the budget up doesn't
-    // reliably buy more speed once reuse per prime is already low, but
-    // undershooting it costs real hit rate for primes that do get reused a
-    // lot per segment -- see this project's own benchmarking (README) for
-    // where a naive "just recompute everything" version regressed badly on
-    // exactly those high-reuse primes.
-    constexpr size_t TABLE_BYTES_BUDGET = 2 * 1024 * 1024; // 2 MiB
-    constexpr size_t TABLE_PRIME_BUDGET = TABLE_BYTES_BUDGET / sizeof(WheelBasePrime);
+    // TABLE_BYTES_BUDGET scales with the machine's real L3 (detected, not
+    // guessed -- see detect_l3_cache_bytes in arg_parser.hpp): a fixed
+    // small budget (this used to be a flat 2MiB) looked fine up to ~1e12,
+    // where the *count* of dense primes past the budget was still small
+    // enough that the extra per-hit cost of onfly/sparse barely showed --
+    // but at 1e13+, pi(sqrt(N)) grows well past what 2MiB covers regardless
+    // of machine, so a fixed budget makes every machine behave like the
+    // smallest-L3 one: it's not that a bigger budget never helps, it's
+    // that N wasn't large enough yet to need one. Half of L3 leaves room
+    // for onfly/sparse's own (much smaller) per-prime arrays, presieve,
+    // and whatever else shares L3 (other threads' segment buffers, if
+    // -s wasn't capped small enough to stay in L2 -- see the auto -s
+    // default). Falls back to a conservative 4MiB if L3 can't be detected.
+    uint64_t l3_bytes = detect_l3_cache_bytes();
+    if (l3_bytes == 0) l3_bytes = 4 * 1024 * 1024;
+    size_t TABLE_BYTES_BUDGET = static_cast<size_t>(l3_bytes / 2);
+    size_t TABLE_PRIME_BUDGET = TABLE_BYTES_BUDGET / sizeof(WheelBasePrime);
     std::vector<uint64_t> presieve_primes_flat;
     for (const auto& group : PRESIEVE_GROUPS)
         presieve_primes_flat.insert(presieve_primes_flat.end(), group.begin(), group.end());
