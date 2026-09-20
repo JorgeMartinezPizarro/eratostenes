@@ -12,14 +12,8 @@ COPY src ./src
 RUN make portable nth_prime
 
 FROM debian:bookworm-slim
-# libstdc++6 is named explicitly (not just pulled in as a pre-existing base
-# image dependency) so apt-get actually fetches the current bookworm
-# version here -- an already-installed package isn't touched by "apt-get
-# install <other packages>", so a stale base image layer can otherwise
-# keep an older libstdc++6 than what the builder's GCC 13 linked against
-# (GLIBCXX_3.4.31), even though both stages nominally target "bookworm".
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libsqlite3-0 libzstd1 libstdc++6 \
+        libsqlite3-0 libzstd1 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /src/eratostenes /usr/local/bin/eratostenes
 COPY --from=builder /src/nth_prime /usr/local/bin/nth_prime

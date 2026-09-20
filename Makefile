@@ -1,7 +1,15 @@
 CXX ?= g++
 CXXFLAGS_COMMON   := -std=c++20 -Wall -Wextra -pthread
-CXXFLAGS_RELEASE  := $(CXXFLAGS_COMMON) -O3 -march=native -flto
-CXXFLAGS_PORTABLE := $(CXXFLAGS_COMMON) -O3
+# -static-libgcc/-static-libstdc++ on release and portable (not debug, to
+# leave ASan/UBSan's own runtime linking alone): a binary built against a
+# newer libstdc++ than the machine it runs on has (e.g. the Docker
+# multi-stage build here, where the builder stage's GCC is newer than the
+# runtime stage's own libstdc++6, both nominally "bookworm") fails at
+# startup with "version `GLIBCXX_3.4.31' not found" -- linking the C++
+# runtime into the binary removes that dependency entirely instead of
+# needing the two stages' library versions to happen to match.
+CXXFLAGS_RELEASE  := $(CXXFLAGS_COMMON) -O3 -march=native -flto -static-libgcc -static-libstdc++
+CXXFLAGS_PORTABLE := $(CXXFLAGS_COMMON) -O3 -static-libgcc -static-libstdc++
 CXXFLAGS_DEBUG    := $(CXXFLAGS_COMMON) -O0 -g -fsanitize=address,undefined
 
 BIN     := eratostenes
