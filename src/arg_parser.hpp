@@ -12,16 +12,22 @@
 #include <cmath>
 #include <thread>
 
+#include "base_sieve.hpp"
+#include "wheel.hpp"
+
 struct Options {
     uint64_t limit = 0;                 // N: sieve up to N (inclusive)
     unsigned threads = 0;                // 0 => auto (hardware_concurrency)
     std::string output = "primes.txt";   // final file
-    // Numeric width per segment (must be even). Wide enough that the
-    // roughly-fixed per-segment overhead (bucket lookup, activation check,
-    // extraction setup) stays a small fraction of total time, narrow
-    // enough that each thread's bit array still fits its cache -- see
-    // README.md#benchmarks for the sweep behind this default.
-    uint64_t segment_width = 1u << 22;
+    // Numeric width per segment (must be even). 0 means "auto": sized from
+    // N once it's known (see parse_args) so that no base prime ever
+    // falls below the dense/sparse cutoff into the (bucketed, costlier)
+    // sparse tier -- below that point, a *smaller* segment is strictly
+    // better (its bit array fits L1/L2 more easily), so the auto default
+    // is the smallest width that still keeps every base prime dense. An
+    // explicit -s overrides this and is used as given, no adjustment.
+    uint64_t segment_width = 0;
+    bool segment_width_set = false;      // true once -s/--segment-width is parsed
     bool count_only = false;             // skip the write pass entirely
     bool show_help = false;
 
@@ -78,7 +84,7 @@ inline uint64_t parse_size(const std::string& raw) {
 
 inline void print_usage(const char* prog) {
     std::fprintf(stderr,
-        "Uso: %s --limit N [opciones]\n"
+        "Uso: %s N [opciones]\n"
         "\n"
         "Criba de Eratostenes segmentada y paralela. Escribe todos los primos\n"
         "hasta N (inclusive) en un fichero de texto, uno por linea -- o, si\n"
@@ -87,13 +93,16 @@ inline void print_usage(const char* prog) {
         "bloques), consultable por posicion con el binario nth_prime.\n"
         "\n"
         "Opciones:\n"
-        "  -n, --limit N          Limite superior. Acepta sufijos k/m/b/t\n"
-        "                         (b = billon ingles = 1e9). Ej: 100b = 1e11\n"
+        "  N                      Limite superior (posicional, sin flag --\n"
+        "                         al estilo primesieve). Acepta sufijos\n"
+        "                         k/m/b/t (b = billon ingles = 1e9).\n"
+        "                         Ej: 100b = 1e11.\n"
         "  -o, --output PATH      Fichero de salida (default: primes.txt).\n"
         "                         Si PATH termina en .db, escribe SQLite en\n"
         "                         vez de texto plano (ver arriba).\n"
         "  -t, --threads N        Numero de hilos (default: nucleos disponibles)\n"
-        "  -s, --segment-width N  Ancho numerico de cada segmento (default: 4194304)\n"
+        "  -s, --segment-width N  Ancho numerico de cada segmento\n"
+        "                         (default: auto, calculado a partir de N)\n"
         "  -c, --count-only       Solo cuenta los primos, sin escribir el fichero\n"
         "      --db-block-size N  Primos por bloque comprimido en modo .db\n"
         "                         (default: 65536)\n"
@@ -106,10 +115,10 @@ inline void print_usage(const char* prog) {
         "las configuraciones ya preparadas y por que no es un flag de CLI.\n"
         "\n"
         "Ejemplos:\n"
-        "  %s --limit 1000000 -o primos_1M.txt\n"
-        "  %s --limit 100b -o primos_100b.txt -t 12\n"
-        "  %s --limit 100b -t 12 --count-only\n"
-        "  %s --limit 100b -o primos_100b.db -t 12\n",
+        "  %s 1000000 -o primos_1M.txt\n"
+        "  %s 100b -o primos_100b.txt -t 12\n"
+        "  %s 100b -t 12 -c\n"
+        "  %s 100b -o primos_100b.db -t 12\n",
         prog, prog, prog, prog, prog);
 }
 
@@ -125,21 +134,28 @@ inline Options parse_args(int argc, char** argv) {
         std::string a = argv[i];
         if (a == "-h" || a == "--help") {
             opt.show_help = true;
-        } else if (a == "-n" || a == "--limit") {
-            opt.limit = parse_size(need_value(i, a.c_str()));
-            has_limit = true;
         } else if (a == "-o" || a == "--output") {
             opt.output = need_value(i, a.c_str());
         } else if (a == "-t" || a == "--threads") {
             opt.threads = static_cast<unsigned>(std::stoul(need_value(i, a.c_str())));
         } else if (a == "-s" || a == "--segment-width") {
             opt.segment_width = parse_size(need_value(i, a.c_str()));
+            opt.segment_width_set = true;
         } else if (a == "-c" || a == "--count-only") {
             opt.count_only = true;
         } else if (a == "--db-block-size") {
             opt.db_block_size = parse_size(need_value(i, a.c_str()));
         } else if (a == "--zstd-level") {
             opt.zstd_level = std::stoi(need_value(i, a.c_str()));
+        } else if (!a.empty() && a[0] != '-' && !has_limit) {
+            // Bare positional limit (./eratostenes 1t -c), primesieve-style
+            // -- the only way to give it; there's no -n/--limit flag (one
+            // less thing to type, matches primesieve's own CLI). Only ever
+            // consumes the *first* such argument; a second one falls
+            // through to "unknown argument" below instead of silently
+            // overwriting the limit.
+            opt.limit = parse_size(a);
+            has_limit = true;
         } else {
             throw std::runtime_error("argumento desconocido: " + a);
         }
@@ -147,9 +163,19 @@ inline Options parse_args(int argc, char** argv) {
 
     if (opt.show_help) return opt;
 
-    if (!has_limit) throw std::runtime_error("--limit es obligatorio");
+    if (!has_limit) throw std::runtime_error("falta N (limite superior)");
     if (opt.threads == 0) {
         opt.threads = std::max(1u, std::thread::hardware_concurrency());
+    }
+    if (!opt.segment_width_set) {
+        // Smallest segment width whose k-width still covers isqrt(limit)
+        // (see the field comment): WHEEL_MOD/WHEEL_SIZE converts a k-width
+        // back to a numeric width, rounded up (ceiling of that ratio) as a
+        // margin so integer rounding never lets a prime right at the
+        // boundary slip into the sparse tier. Measured ~16% faster than a
+        // fixed default at 1e12 on an i5-11400F -- see README.
+        constexpr uint64_t MARGIN_MULT = (WHEEL_MOD + WHEEL_SIZE - 1) / WHEEL_SIZE;
+        opt.segment_width = isqrt(opt.limit) * MARGIN_MULT;
     }
     if (opt.segment_width < 64) opt.segment_width = 64;
     if (opt.segment_width % 2 != 0) opt.segment_width += 1; // must be even

@@ -78,7 +78,7 @@ for mod in "${MODS[@]}"; do
         expected="${EXPECTED[$i]}"
         best=""
         for ((r = 1; r <= REPS; r++)); do
-            out=$(./eratostenes -n "$n" -t "$THREADS" -s "$SEGMENT" --count-only 2>&1)
+            out=$(./eratostenes "$n" -t "$THREADS" -s "$SEGMENT" --count-only 2>&1)
             t=$(echo "$out" | sed -nE 's/.*total: *([0-9.]+)s.*/\1/p')
             count=$(echo "$out" | sed -nE 's/.*Listo\. ([0-9,]+) primos.*/\1/p' | tr -d ',')
             mark="ok"

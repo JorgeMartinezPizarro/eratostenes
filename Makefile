@@ -8,7 +8,7 @@ CXXFLAGS_COMMON   := -std=c++20 -Wall -Wextra -pthread
 # startup with "version `GLIBCXX_3.4.31' not found" -- linking the C++
 # runtime into the binary removes that dependency entirely instead of
 # needing the two stages' library versions to happen to match.
-CXXFLAGS_RELEASE  := $(CXXFLAGS_COMMON) -O3 -march=native -flto -static-libgcc -static-libstdc++
+CXXFLAGS_RELEASE  := $(CXXFLAGS_COMMON) -O3 -march=native -flto=auto -static-libgcc -static-libstdc++
 CXXFLAGS_PORTABLE := $(CXXFLAGS_COMMON) -O3 -static-libgcc -static-libstdc++
 CXXFLAGS_DEBUG    := $(CXXFLAGS_COMMON) -O0 -g -fsanitize=address,undefined
 
@@ -91,7 +91,7 @@ docker:
 # `docker compose run` asigna TTY automaticamente cuando la terminal que
 # invoca es interactiva (ver -T/--no-TTY en `docker compose run --help`),
 # a diferencia de `docker run`, que no lo hace salvo que se le pida -t.
-# Ejemplo: make run ARGS="--limit 1e9 -o /output/primos.txt -t 8"
+# Ejemplo: make run ARGS="1e9 -o /output/primos.txt -t 8"
 run:
 	mkdir -p $(OUT_DIR)
 	$(COMPOSE) run --rm eratostenes $(ARGS)

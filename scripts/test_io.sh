@@ -79,7 +79,7 @@ for i in "${!SIZES[@]}"; do
     file="$WRITE_PATH/primes-$n.db"
 
     echo "== N=$n (limite $limit) ==" >&2
-    out=$("$BIN" -n "$n" -t "$THREADS" -s "$SEGMENT" -o "$file" 2>&1) || {
+    out=$("$BIN" "$n" -t "$THREADS" -s "$SEGMENT" -o "$file" 2>&1) || {
         echo "$out" >&2
         echo "eratostenes fallo para N=$n" >&2
         exit 1

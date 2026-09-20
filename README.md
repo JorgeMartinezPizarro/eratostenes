@@ -3,7 +3,10 @@
 A segmented, parallel, wheel-based Sieve of Eratosthenes (C++20) for
 generating or counting primes up to very large N (10^12+), with a compact,
 randomly-indexable `.db` output format for storing dense prime tables at
-scale.
+scale. [primesieve](https://github.com/kimwalisch/primesieve) is this
+project's reference, both for performance (see [Benchmarks](#benchmarks))
+and for technique -- several of the ideas below come directly from reading
+its source.
 
 ## Build
 
@@ -29,7 +32,7 @@ make verify-db  # round-trips small N through .db output and checks it
 
 ```
 make docker                                              # build the image
-make run ARGS="--limit 100b -o /output/primes.txt -t 12" # run it
+make run ARGS="100b -o /output/primes.txt -t 12"          # run it
 ```
 
 `make run` mounts `./output` (host) at `/output` (container); use
@@ -39,14 +42,16 @@ outside the container.
 ## Usage
 
 ```sh
-./eratostenes --limit N [options]
+./eratostenes N [options]
 
-  -n, --limit N          Upper bound (inclusive). Accepts suffixes:
+  N                      Upper bound (inclusive), positional (no flag --
+                          primesieve-style). Accepts suffixes:
                           k=1e3  m=1e6  b=1e9 (short-scale billion)  t=1e12
   -o, --output PATH      Output file (default: primes.txt). .db suffix
                           switches to the compact SQLite format (see below).
   -t, --threads N        Thread count (default: available cores)
-  -s, --segment-width N  Numeric width per segment (default: 4194304)
+  -s, --segment-width N  Numeric width per segment
+                          (default: auto, sized from N)
   -c, --count-only       Only count primes, skip writing the file
       --db-block-size N  Primes per compressed block in .db mode (default: 65536)
       --zstd-level N     zstd compression level in .db mode (default: 3)
@@ -54,10 +59,10 @@ outside the container.
 ```
 
 ```sh
-./eratostenes -n 1000000 -o primes_1M.txt
-./eratostenes -n 100b -o ~/primes_100b.txt -t 12
-./eratostenes -n 100b -t 12 --count-only        # pi(N) or raw speed, no I/O
-./eratostenes -n 100b -o ~/primes_100b.db -t 12 # compact indexable output
+./eratostenes 1000000 -o primes_1M.txt
+./eratostenes 100b -o ~/primes_100b.txt -t 12
+./eratostenes 100b -t 12 --count-only        # pi(N) or raw speed, no I/O
+./eratostenes 100b -o ~/primes_100b.db -t 12 # compact indexable output
 ```
 
 ## .db output (compact, indexable)
@@ -80,137 +85,32 @@ staying randomly indexable.
 (indexed by `start_index`, not a table scan) and decodes just that block —
 lookups stay fast regardless of file size.
 
-## How it sieves
+## Techniques
 
-- **Wheel factorization** (`src/wheel.hpp`) — skip multiples of a small
-  fixed prime set (`WHEEL_PRIMES`, mod 30 by default) before sieving even
-  starts; everything else (modulus, residues, per-prime jump tables) is
-  derived at compile time via `constexpr`, so the compiler turns the wheel's
-  modulus into a cheap multiply-shift instead of a runtime division.
-- **Segmented scan** — base primes (<= sqrt(N)) are found once with a plain
-  sieve, then the range is walked in fixed-width segments (`-s`) sized to
-  fit cache, marking each base prime's multiples per segment.
-- **Bucket sieve** (Tomás Oliveira e Silva's scheme, `src/segment_sieve.hpp`)
-  — each base prime is scheduled into the bucket of the future segment
-  where its next multiple actually falls, so processing a segment only
-  touches the primes due that segment instead of checking all of them.
-- **Pre-sieve** (`src/presieve.hpp`) — the smallest base primes hit every
-  segment regardless of bucketing, so their periodic marking pattern is
-  precomputed once and each segment is filled with a bulk shifted-word copy
-  instead of a per-prime marking loop.
-- **Dense/sparse split** — base primes below the segment width keep their
-  full per-phase jump table (repeated hits per segment justify the table);
-  primes at or above it get at most one hit per segment, so they're stored
-  as just `p` and their next hit is recomputed on demand.
-- **Parallel, direct, two-pass write** — the range splits into one
-  contiguous chunk per thread (base primes are read-only, no locking
-  needed). A count pass sizes the output file exactly; a write pass
-  re-sieves and writes straight into each thread's disjoint region with
-  `pwrite()` — every output byte written exactly once, no merge step.
+What this project is built from, one term each — follow the link for the
+concept itself rather than this project's specific spin on it:
 
-Bigger wheels/deeper pre-sieves remove more candidates per number checked,
-but their tables grow faster than the benefit — past a certain size the
-table stops fitting L3 and the bottleneck shifts from CPU to memory
-bandwidth. See [Tuning](#tuning-for-your-machine) below.
-
-## Tuning for your machine
-
-The two knobs that matter — wheel (`WHEEL_PRIMES` in `src/wheel.hpp`) and
-`-s` (segment width) — both come down to fitting a per-thread structure
-into a specific cache level. Get your cache sizes with `lscpu` (Linux/WSL)
-or `Get-CimInstance Win32_CacheMemory` (native Windows PowerShell).
-
-**Wheel vs L3**: `table_bytes = pi(sqrt(N)) * (8 + 4 * phi(wheel))`, shared
-read-only across all threads. Pick the largest wheel whose table stays
-comfortably under your L3 for the largest N you plan to run:
-
-| N | pi(sqrt(N)) | `2,3` (mod 6) | `2,3,5` (mod 30) | `2,3,5,7` (mod 210) | `2,3,5,7,11` (mod 2310) |
-|---|---:|---:|---:|---:|---:|
-| 10^11 | 27,184 | 425 KiB | 1.0 MiB | 5.2 MiB | 50.0 MiB |
-| 10^12 | 78,498 | 1.2 MiB | 3.0 MiB | 15.0 MiB | 144.3 MiB |
-| 10^13 | ~224,000 | 3.4 MiB | 8.5 MiB | 42.7 MiB | 411.9 MiB |
-| 10^14 | 620,160 | 9.5 MiB | 23.7 MiB | 118.3 MiB | 1140.4 MiB |
-| 10^15 | ~1,955,000 | 29.8 MiB | 74.6 MiB | 372.9 MiB | 3593 MiB |
-
-**Segment width vs L2**: `array_bytes = segment_width * phi(wheel) / wheel_mod / 8`,
-replicated per thread:
-
-| `-s` | `2,3` (mod 6) | `2,3,5` (mod 30) | `2,3,5,7` (mod 210) | `2,3,5,7,11` (mod 2310) |
-|---|---:|---:|---:|---:|
-| 2^22 = 4,194,304 (default) | 171 KiB | 137 KiB | 117 KiB | 106 KiB |
-| 2^23 = 8,388,608 | 341 KiB | 273 KiB | 234 KiB | 213 KiB |
-| 2^24 = 16,777,216 | 683 KiB | 546 KiB | 468 KiB | 426 KiB |
+- [Segmented sieve](https://en.wikipedia.org/wiki/Sieve_of_Eratosthenes#Segmented_sieve)
+- [Wheel factorization](https://en.wikipedia.org/wiki/Wheel_factorization)
+- [Bucket sieve](https://en.wikipedia.org/wiki/Bucket_queue) (used only for the rare primes with at most ~1 hit/segment — see `src/segment_sieve.hpp`)
+- [Bit array](https://en.wikipedia.org/wiki/Bit_array)
+- [Hamming weight / popcount](https://en.wikipedia.org/wiki/Hamming_weight)
+- [Delta encoding](https://en.wikipedia.org/wiki/Delta_encoding) (gaps between consecutive primes, for `.db`)
+- [Zstandard](https://en.wikipedia.org/wiki/Zstd) (compresses the encoded gaps)
+- [SQLite](https://en.wikipedia.org/wiki/SQLite) (the `.db` container format)
 
 ## Benchmarks
 
-Measured on an Intel Core i5-11400F (6 cores/12 threads, L1d 48KiB/core, L2
-512KiB/core, L3 12MiB), `--count-only` (isolates CPU/cache work from disk
-I/O), mod 30 (the shipped default). [primesieve](https://github.com/kimwalisch/primesieve)
-alongside it for reference, same machine, same thread count:
+`--count-only` (isolates CPU/cache work from disk I/O), mod 30, auto `-s`,
+on an Intel Core i5-11400F (6 cores/12 threads, L1d 48KiB/core, L2
+512KiB/core, L3 12MiB), primesieve alongside it for reference, same
+machine, same thread count:
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
-| 1e10 | 0.53s | 0.192s | 2.8x |
-| 1e11 | 5.54s | 4.599s | 1.2x |
-| 1e12 | 76.59s | 27.422s | 2.8x |
-| 1e13 | 1387.66s | 391.311s | 3.6x |
-
-### 1e13 on the i5-11400F: from ~1500s to 1131s
-
-An early `-t 20` sweep on this CPU (only 6 cores / 12 hardware threads)
-oversubscribed by 8 threads, and split the range into one static
-contiguous chunk per thread -- both inflated 1e13 to ~1350-1500s. Matching
-`-t` to real hardware threads (12) and switching to a dynamic chunk queue
-(`run_parallel_chunks` in `main.cpp`) brought it down to:
-
-| N | mod 30, `-s 10000000`, `-t 12` |
-|---|---:|
-| 1e12 | 65.08s |
-| 1e13 | 1131.65s |
-| ratio | 17.4x |
-
-The remaining ~17x ratio (vs. the ~11-14x/decade this project sees
-elsewhere -- see the i5-13500 ladder below, a machine with double this
-one's L3) is a real cache effect, not oversubscription or load imbalance:
-the dense/sparse split's shared jump table caps out at ~7.8MiB right
-around this N with `-s 10000000` (see [Tuning](#tuning-for-your-machine)),
-and that's most of this CPU's 12MiB L3.
-
-`-s 10000000` here is carried over from the original sweep on this box,
-not independently tuned for it -- the CLI's own default is `-s 4194304`
-(sized for L2, see [Tuning](#tuning-for-your-machine)), and the one
-apples-to-apples comparison run so far (same N, same wheel, same thread
-count) actually favors 10M: 1353.69s vs 1131.65s. That's a real, measured
-result on this machine, not an assumption borrowed from the bigger-cache
-server above -- but it's only two points on the `-s` axis, not a proper
-sweep, so "10M" here means "beat the CLI default once," not "is this
-CPU's optimum." The L2-sizing table alone would have picked 4M and gotten
-it backwards: `-s` also sets the dense/sparse cutoff (`seg_k_width`), and
-a smaller `-s` pushes far more primes into the per-hit-division sparse
-path (140,578 vs 33,247 at 1e13) -- that cost outweighed the L2 fit here.
-A smaller wheel (mod 6) sidesteps the table-size jump entirely but isn't
-actually faster either (1139.24s, a wash with mod 30's 1131.65s) -- so
-mod 30 stays the default on this box for lack of a reason to change it,
-not because either alternative has been ruled out by a real sweep.
-
-### i5-13500 (14 cores/20 threads, L3 24MiB): full ladder
-
-Same `--count-only`, mod 30, `-s 10000000`, `-t 20` (its native thread
-count -- no oversubscription there, unlike `-t 20` on the 11400F above).
-At 24MiB L3 the same table-size jump never gets close to filling the
-cache, so the ratio stays in the ~10-14x/decade band all the way to 1e15
-instead of spiking once around 1e13 the way the i5-11400F does:
-
-| N | tiempo | tasa | ratio |
-|---|---:|---:|---:|
-| 1e10 | 0.51s | 892.3 M/s | -- |
-| 1e11 | 5.02s | 821.1 M/s | 9.8x |
-| 1e12 | 58.54s | 642.5 M/s | 11.7x |
-| 1e13 | 669.77s | 516.7 M/s | 11.4x |
-| 1e14 | 8961.85s | 357.6 M/s | 13.4x |
-| 1e15 | 124984.47s | 238.8 M/s | 13.9x |
-
-pi(1e15) = 29,844,570,422,669.
+| 1e10 | 0.50s | 0.193s | 2.6x |
+| 1e11 | 4.01s | 2.32s | 1.7x |
+| 1e12 | 48.03s | 27.51s | 1.7x |
 
 ## Verification
 

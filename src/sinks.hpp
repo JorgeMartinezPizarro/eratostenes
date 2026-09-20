@@ -22,10 +22,17 @@
 #include <unistd.h>
 
 struct NullSink {
+    // Tells SegmentSieve::sieve_and_emit's extraction loop it never needs
+    // an actual prime value out of a set bit -- --count-only (the only
+    // user of NullSink) only wants how many bits are set, so that loop can
+    // skip straight to a popcount per word instead of decoding each one
+    // (ctz + wheel-index-to-value math) just to hand it to this no-op.
+    static constexpr bool WANTS_VALUES = false;
     void write_uint64(uint64_t) {}
 };
 
 struct ByteCounter {
+    static constexpr bool WANTS_VALUES = true;
     uint64_t total_bytes = 0;
 
     void write_uint64(uint64_t v) {
@@ -37,6 +44,8 @@ struct ByteCounter {
 
 class DirectWriter {
 public:
+    static constexpr bool WANTS_VALUES = true;
+
     DirectWriter(int fd, uint64_t start_offset, size_t buffer_size = (1u << 22)) // 4 MiB
         : fd_(fd), offset_(start_offset), buf_(buffer_size) {}
 

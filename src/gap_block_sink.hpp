@@ -31,6 +31,7 @@ struct PendingBlock {
 
 class GapBlockSink {
 public:
+    static constexpr bool WANTS_VALUES = true;
     using PushFn = std::function<void(PendingBlock)>;
 
     GapBlockSink(uint64_t start_index, uint64_t block_size, int zstd_level, PushFn push)

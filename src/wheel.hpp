@@ -169,43 +169,65 @@ inline uint64_t wheel_count_upto(uint64_t limit) {
     return q * WHEEL_SIZE + partial;
 }
 
+// Same math as the delta[] table below: the wheel-index advance when a
+// multiplier of p moves from phase jj to phase jj+1 (n grows by
+// p*WHEEL_GAP[jj]). p_mod is p % WHEEL_MOD, precomputed once per prime
+// (invariant across every hit, so there's no reason to redo that division
+// per hit) rather than derived here.
+//
+// Reading this from a per-prime delta[] table (below) is cheap *if* the
+// prime is reused often enough per segment to amortize the table's own
+// memory cost -- but a prime just below the dense/sparse cutoff hits at
+// most ~once per segment, so it never gets that reuse, and there can be
+// hundreds of thousands of such primes: their tables, summed, are the
+// single biggest piece of read-only state every thread walks through per
+// segment, and can run into the tens of megabytes -- more than this
+// project's target CPUs' L3 (see README's L3-cliff section). This function
+// recomputes the same value instead: a handful of ALU ops and loads from
+// WHEEL_R/WHEEL_GAP/WHEEL_POS (each at most WHEEL_MOD entries, always
+// cache-resident) rather than one load from a table that might not be.
+// primesieve's medium/big-prime tiers make the same trade (see
+// EratMedium/EratBig in its source) for exactly this reason. It only pays
+// off where reuse is low, though -- see OnFlyPrime and SMALL_PRIME_LIMIT
+// in main.cpp for where SegmentSieve actually switches between this and
+// the table.
+inline uint64_t wheel_delta_at(uint64_t p, uint64_t p_mod, int jj) {
+    uint64_t rp = (p_mod * WHEEL_R[jj]) % WHEEL_MOD;
+    uint64_t d = p * WHEEL_GAP[jj];
+    uint64_t floor_term = (rp + d) / WHEEL_MOD;
+    int pos_before = WHEEL_POS[rp];
+    int pos_after = WHEEL_POS[(rp + d) % WHEEL_MOD];
+    // floor_term*WHEEL_SIZE always dominates (pos_after-pos_before)
+    // (range -(WHEEL_SIZE-1)..(WHEEL_SIZE-1)), so the result is always >= 0.
+    int64_t signed_delta = static_cast<int64_t>(floor_term) * WHEEL_SIZE
+                          + (pos_after - pos_before);
+    return static_cast<uint64_t>(signed_delta);
+}
+
 // A base prime (p >= FIRST_WHEEL_PRIME, i.e. not one of the wheel's own
-// primes) together with its wheel-index jump table.
-//
-// For a multiplier m coprime with WHEEL_MOD, the product n=p*m is also
-// coprime with WHEEL_MOD (gcd(p, WHEEL_MOD)=1), and every multiple of p
-// that survives the wheel is of that form. delta[j] = advance of the wheel
-// index of n when m moves from phase j to phase j+1 (n grows by
-// p*WHEEL_GAP[j]). This advance does NOT depend on the concrete value of m,
-// only on its phase j and on p, so it is computed once per prime (not per
-// segment) and reused across every segment.
-//
-// This table is the single biggest piece of read-only state every thread
-// walks through for every segment (WHEEL_SIZE entries per base prime), so
-// its footprint matters for cache/memory-bandwidth behavior under many
-// threads -- see the header comment. delta is stored as uint32_t (halving
-// the footprint vs uint64_t): its value is bounded by roughly p *
-// max(WHEEL_GAP) * WHEEL_SIZE / WHEEL_MOD, which stays well under 2^32 for
-// any base prime this tool will realistically be given.
+// primes) with p mod WHEEL_MOD precomputed (see wheel_delta_at): the
+// "many hits per segment" tier below SMALL_PRIME_LIMIT (main.cpp), where
+// the delta[] table's reuse pays for its own memory cost, but its own
+// prime count is small by construction, so the table stays tiny.
 struct WheelBasePrime {
     uint64_t p;
     std::array<uint32_t, WHEEL_SIZE> delta;
+};
+
+// The "few hits per segment" dense tier (SMALL_PRIME_LIMIT <= p <
+// seg_k_width, main.cpp): no table, wheel_delta_at recomputes each phase's
+// advance on demand instead. This is the tier that used to carry the
+// oversized table -- see wheel_delta_at's comment above.
+struct OnFlyPrime {
+    uint64_t p;
+    uint32_t pmod; // p % WHEEL_MOD
 };
 
 inline std::array<uint32_t, WHEEL_SIZE> compute_wheel_deltas(uint64_t p) {
     std::array<uint32_t, WHEEL_SIZE> delta{};
     uint64_t pmod = p % WHEEL_MOD;
     for (int jj = 0; jj < WHEEL_SIZE; ++jj) {
-        uint64_t rp = (pmod * WHEEL_R[jj]) % WHEEL_MOD;
-        uint64_t d = p * WHEEL_GAP[jj];
-        uint64_t floor_term = (rp + d) / WHEEL_MOD;
-        int pos_before = WHEEL_POS[rp];
-        int pos_after = WHEEL_POS[(rp + d) % WHEEL_MOD];
-        // floor_term*WHEEL_SIZE always dominates (pos_after-pos_before)
-        // (range -(WHEEL_SIZE-1)..(WHEEL_SIZE-1)), so the result is always >= 0.
-        int64_t signed_delta = static_cast<int64_t>(floor_term) * WHEEL_SIZE
-                              + (pos_after - pos_before);
-        delta[jj] = static_cast<uint32_t>(signed_delta);
+        delta[jj] = static_cast<uint32_t>(wheel_delta_at(p, pmod, jj));
     }
     return delta;
 }

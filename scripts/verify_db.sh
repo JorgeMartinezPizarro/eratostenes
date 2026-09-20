@@ -38,8 +38,8 @@ for i in "${!NS[@]}"; do
     txt="$WORKDIR/n$n.txt"
     db="$WORKDIR/n$n.db"
 
-    "$BIN" -n "$n" -t "$THREADS" -o "$txt" >/dev/null 2>&1
-    "$BIN" -n "$n" -t "$THREADS" -o "$db"  >/dev/null 2>&1
+    "$BIN" "$n" -t "$THREADS" -o "$txt" >/dev/null 2>&1
+    "$BIN" "$n" -t "$THREADS" -o "$db"  >/dev/null 2>&1
 
     mapfile -t lines < "$txt"
     expected_count=${#lines[@]}

@@ -26,7 +26,7 @@ for i in "${!NS[@]}"; do
     expected="${EXPECTED[$i]}"
 
     start=$(date +%s.%N)
-    output=$("$BIN" -n "$n" -t "$THREADS" --count-only 2>&1)
+    output=$("$BIN" "$n" -t "$THREADS" --count-only 2>&1)
     end=$(date +%s.%N)
     elapsed=$(awk -v a="$start" -v b="$end" 'BEGIN { printf "%.2f", b - a }')
 
@@ -51,7 +51,7 @@ done
 DB=$(mktemp --suffix=.db)
 trap 'rm -f "$DB"' EXIT
 
-"$BIN" -n 10000000000 -t "$THREADS" -o "$DB" >/dev/null 2>&1
+"$BIN" 10000000000 -t "$THREADS" -o "$DB" >/dev/null 2>&1
 
 # posicion (1-indexada, N=1 -> 2) -> primo N-esimo conocido
 POS=(1 1000 10000 200000000 455052511)
