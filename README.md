@@ -65,9 +65,9 @@ outside the container.
 ./eratostenes 1t -o ~/primes_100b.db
 ```
 
-## .db output (compact, indexable)
+## DB compression
 
-The `.db` format is a indexed sqlite file (max 256TB size), so it is suitable up to `e16`, around 200TB. To query for primes you can use the `nth_prime` companion:
+The `.db` format is a indexed sqlite file (max 256TB size), so it is suitable up to `e16`, around `200TB`. To query for primes you can use the `nth_prime` companion:
 
 ```
 ./nth_prime out.db 1000000     # the 1,000,000th prime (1-indexed: N=1 -> 2)
@@ -88,15 +88,12 @@ concept itself:
 - [Lookup table](https://en.wikipedia.org/wiki/Lookup_table) (precomputed bit patterns for the smallest primes, combined by bitwise OR at fill time instead of marking each one's multiples every segment -- `src/presieve.hpp`)
 - [Bucket sieve](https://en.wikipedia.org/wiki/Bucket_queue)
 - [Memory pool](https://en.wikipedia.org/wiki/Memory_pool) (the bucket sieve's ring: an intrusive linked list over a preallocated flat array, no per-segment heap allocation)
-- [Bit array](https://en.wikipedia.org/wiki/Bit_array)
 - [Hamming weight / popcount](https://en.wikipedia.org/wiki/Hamming_weight)
 - [CPU cache](https://en.wikipedia.org/wiki/CPU_cache) (segment width and the table/on-the-fly prime-tier cutoff are both auto-tuned from the machine's real, detected L2/L3 size, not a fixed guess -- see `--l2-bytes`/`--l3-bytes` for when detection itself can't be trusted, e.g. inside a container)
 - [Load balancing (computing)](https://en.wikipedia.org/wiki/Load_balancing_(computing)) (many more chunks than threads, pulled from a shared queue, since work per chunk isn't uniform across the range -- see `run_parallel_chunks`)
 - [Random access](https://en.wikipedia.org/wiki/Random_access) (`pwrite()` into disjoint, precomputed regions of a pre-sized file lets every thread write its own share of the output in parallel with no locking and no merge step)
 - [Delta encoding](https://en.wikipedia.org/wiki/Delta_encoding) (gaps between consecutive primes, for `.db`)
 - [Zstandard](https://en.wikipedia.org/wiki/Zstd) (compresses the encoded gaps)
-- [Database index](https://en.wikipedia.org/wiki/Database_index) (`.db` blocks are indexed by starting position, so `nth_prime` decodes the one block it needs instead of scanning)
-- [SQLite](https://en.wikipedia.org/wiki/SQLite) (the `.db` container format)
 
 ## Benchmarks
 
