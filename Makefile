@@ -42,7 +42,8 @@ NTH_OBJ := $(OBJ_DIR_RELEASE)/nth_prime.o
 OUT_DIR := $(CURDIR)/output
 COMPOSE := docker compose -f docker/docker-compose.yml
 
-.PHONY: all portable debug clean fclean re docker run test verify-db test-io
+.PHONY: all portable debug clean fclean re docker run test verify-db test-io \
+        docker-dev docker-test docker-verify-db docker-test-io docker-benchmark
 
 # --- release (default) ---
 all: $(BIN) $(NTH_BIN)
@@ -120,3 +121,25 @@ benchmark:
 # P.ej. KEEP_DB=0 make test-io para no conservar los .db tras medir.
 test-io: $(BIN)
 	./scripts/test_io.sh
+
+# --- run the same targets inside Docker (see docker/Dockerfile's `dev`
+# stage: gcc + libsqlite3-dev + libzstd-dev + primesieve). Each rebuilds
+# eratostenes/nth_prime with the container's own gcc against the
+# container's own CPU, so these work the same regardless of what's
+# installed/compiled on the host. THREADS/SEGMENT/WRITE_PATH/KEEP_DB/REPS
+# are forwarded from the host environment when set, same as running the
+# scripts directly (e.g. THREADS=8 make docker-test-io).
+docker-dev:
+	$(COMPOSE) build dev
+
+docker-test: docker-dev
+	$(COMPOSE) run --rm -e THREADS dev make test
+
+docker-verify-db: docker-dev
+	$(COMPOSE) run --rm -e THREADS dev make verify-db
+
+docker-test-io: docker-dev
+	$(COMPOSE) run --rm -e THREADS -e SEGMENT -e WRITE_PATH -e KEEP_DB dev make test-io
+
+docker-benchmark: docker-dev
+	$(COMPOSE) run --rm -e THREADS -e SEGMENT -e REPS dev make benchmark

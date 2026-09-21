@@ -6,3 +6,13 @@ services:
     image: eratostenes:latest
     volumes:
       - ../output:/output
+
+  # Full toolchain (gcc + primesieve): runs `make test`/`verify-db`/
+  # `test-io`/`benchmark` inside the container, see Makefile's docker-*
+  # targets below.
+  dev:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: dev
+    image: eratostenes:dev
