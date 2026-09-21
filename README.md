@@ -107,11 +107,7 @@ concept itself rather than this project's specific spin on it:
 
 ## Benchmarks
 
-`--count-only` (isolates CPU/cache work from disk I/O), mod 30, auto `-s`,
-on an Intel Core i5-11400F (6 cores/12 threads, L1d 48KiB/core, L2
-512KiB/core, L3 12MiB), primesieve alongside it for reference, same
-machine, same thread count. Best of 3 reps (2 for 1e13), fresh
-`wsl --shutdown` before the run:
+`--count-only` on an Intel Core i5-11400F (6 cores/12 threads, L1d 48KiB/core, L2 512KiB/core, L3 12MiB), primesieve alongside it for reference, same machine:
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
@@ -120,12 +116,19 @@ machine, same thread count. Best of 3 reps (2 for 1e13), fresh
 | 1e12 | 49.04s | 27.579s | 1.8x |
 | 1e13 | 910.31s | 362.276s | 2.5x |
 
-The 1e13 ratio jump comes from the auto segment width getting L2-capped
-below sqrt(1e13), pushing ~32% of base primes into the costlier
-`sparse_primes` tier instead of the cheap table tier (see
-`segment_sieve.hpp`'s tier comments and `arg_parser.hpp`'s auto `-s`
-logic for the full mechanics, and `presieve.hpp`/`segment_sieve.hpp` for
-what's been tried against it and why).
+Writting primes to a `.db` file results in the following ratios per prime:
+
+| N    | limite |          pi(N) | tam .db    | bit/primo | conteo(s) | escr(s) |   MB/s | total(s) |
+|------|--------|---------------:|------------|----------:|----------:|--------:|-------:|---------:|
+| 1k   | 1E3    |            168 | 20.00 KiB  |    975.24 |      0.54 |    0.53 |    0.0 |     1.07 |
+| 10k  | 1E4    |          1,229 | 28.00 KiB  |    186.64 |      0.51 |    0.53 |    0.1 |     1.04 |
+| 100k | 1E5    |          9,592 | 36.00 KiB  |     30.75 |      0.51 |    0.53 |    0.1 |     1.04 |
+| 1m   | 1E6    |         78,498 | 72.00 KiB  |      7.51 |      0.51 |    0.53 |    0.1 |     1.03 |
+| 10m  | 1E7    |        664,579 | 448.00 KiB |      5.52 |      0.51 |    0.52 |    0.9 |     1.03 |
+| 100m | 1E8    |      5,761,455 | 3.16 MiB   |      4.61 |      0.50 |    0.53 |    6.3 |     1.04 |
+| 1b   | 1E9    |     50,847,534 | 28.66 MiB  |      4.73 |      0.50 |    0.71 |   42.3 |     1.22 |
+| 10b  | 1E10   |    455,052,511 | 269.31 MiB |      4.96 |      0.51 |    2.55 |  110.7 |     3.06 |
+| 100b | 1E11   |  4,118,054,813 | 2.42 GiB   |      5.04 |      4.01 |   41.73 |   62.1 |    45.74 |
 
 ## Verification
 

@@ -129,11 +129,10 @@ fi
 # y filas usan exactamente los mismos anchos por columna para que la tabla
 # quede alineada.
 echo
-printf "| %-4s | %-6s | %14s | %-10s | %9s | %9s | %7s | %6s | %8s |\n" \
-    "N" "limite" "pi(N)" "tam .db" "bit/primo" "conteo(s)" "escr(s)" "MB/s" "total(s)"
-printf "|------|--------|---------------:|------------|----------:|----------:|--------:|-------:|---------:|\n"
+printf "| %-6s | %14s | %-10s | %9s | %9s | %7s | %6s | %8s |\n" \
+    "limite" "pi(N)" "tam .db" "bit/primo" "conteo(s)" "escr(s)" "MB/s" "total(s)"
+printf "|--------|---------------:|------------|----------:|----------:|--------:|-------:|---------:|\n"
 for i in "${!SIZES[@]}"; do
-    n="${SIZES[$i]}"
     limit="${LIMITS[$i]}"
     bytes="${SIZE_BYTES[$n]}"
     count_s="${COUNT_S[$n]}"
