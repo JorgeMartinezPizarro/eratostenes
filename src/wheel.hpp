@@ -214,13 +214,75 @@ struct WheelBasePrime {
     std::array<uint32_t, WHEEL_SIZE> delta;
 };
 
+// Shared (residue class of p mod WHEEL_MOD, phase j) correction table for
+// on-the-fly wheel stepping (OnFlyPrime below), replacing per-hit calls to
+// wheel_delta_at. Derivation: writing p = qp*WHEEL_MOD + p_mod (qp = p /
+// WHEEL_MOD), wheel_delta_at's own floor_term = floor((rp + p*WHEEL_GAP[j])
+// / WHEEL_MOD) splits as
+//
+//   floor_term = qp*WHEEL_GAP[j] + floor((rp + p_mod*WHEEL_GAP[j]) / WHEEL_MOD)
+//
+// because p*WHEEL_GAP[j] = qp*WHEEL_MOD*WHEEL_GAP[j] + p_mod*WHEEL_GAP[j],
+// and the first term is an exact multiple of WHEEL_MOD. The second term
+// above -- and likewise (rp + p*WHEEL_GAP[j]) mod WHEEL_MOD, which the
+// dropped multiple of WHEEL_MOD doesn't change either -- depend only on
+// (p_mod, j), not on qp (i.e. not on p's actual magnitude). So the whole
+// k-space delta reduces to
+//
+//   delta(p, j) = qp * GAP_K[j] + ONFLY_CORRECTION[pr][j]
+//
+// where pr = WHEEL_POS[p_mod] and GAP_K[j] = WHEEL_GAP[j]*WHEEL_SIZE (both
+// tiny, WHEEL_SIZE-sized tables). Per hit this is one multiply (by qp,
+// unavoidable -- consecutive hits of p are ~p apart no matter what) plus
+// one lookup into a WHEEL_SIZE x WHEEL_SIZE shared table (64 entries for
+// mod 30) plus one add -- no runtime mod, no div, no two dependent
+// WHEEL_POS lookups per hit like the old recompute-every-time version.
+// Measured ~3.25x faster for primes forced through this tier at N=1e11 on
+// an i5-11400F (README#benchmarks), because unlike a per-prime delta[]
+// table (WheelBasePrime above), this table's size never grows with how
+// many primes use it -- it stays L1-resident regardless of tier size, so
+// there's no memory-budget tradeoff being made here at all.
+// primesieve's own EratMedium/WheelFactorization does the same trick (a
+// small shared wheel table plus one multiply by the prime itself, see its
+// WheelElement/nextMultipleFactor) -- this is that same idea, re-derived
+// from this project's own wheel_delta_at rather than ported from there.
+inline std::array<std::array<uint32_t, WHEEL_SIZE>, WHEEL_SIZE> make_onfly_correction() {
+    std::array<std::array<uint32_t, WHEEL_SIZE>, WHEEL_SIZE> tbl{};
+    for (int pr = 0; pr < WHEEL_SIZE; ++pr) {
+        uint64_t p_mod = WHEEL_R[pr];
+        for (int j = 0; j < WHEEL_SIZE; ++j) {
+            uint64_t rp = (p_mod * WHEEL_R[j]) % WHEEL_MOD;
+            uint64_t d_mod = p_mod * WHEEL_GAP[j];
+            uint64_t c1 = (rp + d_mod) / WHEEL_MOD;
+            uint64_t rem = (rp + d_mod) % WHEEL_MOD;
+            int pos_before = WHEEL_POS[rp];
+            int pos_after = WHEEL_POS[rem];
+            // Same non-negativity argument as wheel_delta_at's
+            // signed_delta: c1*WHEEL_SIZE always dominates pos_after -
+            // pos_before (range -(WHEEL_SIZE-1)..(WHEEL_SIZE-1)).
+            int64_t corr = static_cast<int64_t>(c1) * WHEEL_SIZE + (pos_after - pos_before);
+            tbl[pr][j] = static_cast<uint32_t>(corr);
+        }
+    }
+    return tbl;
+}
+inline const std::array<std::array<uint32_t, WHEEL_SIZE>, WHEEL_SIZE> ONFLY_CORRECTION = make_onfly_correction();
+
+inline std::array<uint32_t, WHEEL_SIZE> make_gap_k() {
+    std::array<uint32_t, WHEEL_SIZE> g{};
+    for (int j = 0; j < WHEEL_SIZE; ++j) g[j] = static_cast<uint32_t>(WHEEL_GAP[j]) * WHEEL_SIZE;
+    return g;
+}
+inline const std::array<uint32_t, WHEEL_SIZE> GAP_K = make_gap_k();
+
 // The "few hits per segment" dense tier (SMALL_PRIME_LIMIT <= p <
-// seg_k_width, main.cpp): no table, wheel_delta_at recomputes each phase's
-// advance on demand instead. This is the tier that used to carry the
-// oversized table -- see wheel_delta_at's comment above.
+// seg_k_width, main.cpp): no per-prime table, ONFLY_CORRECTION (shared,
+// above) plus qp/pr drive each phase's advance instead. This is the tier
+// that used to carry the oversized table -- see WheelBasePrime above.
 struct OnFlyPrime {
-    uint64_t p;
-    uint32_t pmod; // p % WHEEL_MOD
+    uint64_t p;   // needed only at activation (p*p < high_n test, initial multiplier)
+    uint64_t qp;  // p / WHEEL_MOD -- the one per-hit multiply's operand
+    uint32_t pr;  // WHEEL_POS[p % WHEEL_MOD] -- index into ONFLY_CORRECTION
 };
 
 inline std::array<uint32_t, WHEEL_SIZE> compute_wheel_deltas(uint64_t p) {

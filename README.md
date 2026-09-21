@@ -104,13 +104,47 @@ concept itself rather than this project's specific spin on it:
 `--count-only` (isolates CPU/cache work from disk I/O), mod 30, auto `-s`,
 on an Intel Core i5-11400F (6 cores/12 threads, L1d 48KiB/core, L2
 512KiB/core, L3 12MiB), primesieve alongside it for reference, same
-machine, same thread count:
+machine, same thread count. Best of 3 reps, fresh `wsl --shutdown` before
+the run -- single-rep numbers on this machine turned out noisy enough
+(seen up to ~25% run-to-run on the same unmodified binary, worse under
+memory pressure from other running programs) to be misleading on their
+own; see the note below the table:
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
-| 1e10 | 0.50s | 0.193s | 2.6x |
-| 1e11 | 4.01s | 2.32s | 1.7x |
-| 1e12 | 48.03s | 27.51s | 1.7x |
+| 1e10 | 0.50s | 0.188s | 2.7x |
+| 1e11 | 4.01s | 2.321s | 1.7x |
+| 1e12 | 49.04s | 27.579s | 1.8x |
+| 1e13 | 910.31s | 362.276s | 2.5x |
+
+1e13 is best of 2 reps rather than 3 (it alone takes ~15 minutes a rep):
+945.14s/910.31s for eratostenes, 362.276s/362.921s for primesieve --
+primesieve's own spread stays tight even at this N (<1s), consistent with
+the rest of the table.
+
+A real cliff shows up there regardless of noise, though: at 1e13 the
+*auto segment width* gets L2-capped (see `arg_parser.hpp`) to a k-width of
+~2.1M, well below sqrt(1e13)'s ~3.16M -- so ~72k base primes (32% of the
+total) land in the `sparse_primes` tier instead of `dense_onfly_primes`.
+The `dense_onfly_primes` tier's own per-hit cost *was* real and fixed (see
+`wheel.hpp`'s `ONFLY_CORRECTION` table, ~2.4x faster in isolation, output
+verified byte-for-byte against the table tier) but that tier is empty at
+every N in this table, including 1e13, so it doesn't move these numbers.
+Two follow-up attempts at the sparse tier's own per-hit
+`wheel_number(k)/p` (a genuine runtime division) -- an `ONFLY_CORRECTION`-
+style fix, then an AoS relayout for better cache locality -- both measured
+*slower* when tried (both reverted; see `segment_sieve.hpp`'s sparse-tier
+comment). The second of those measurements is part of why the noise above
+got found: a supposedly-identical revert measured 103s then 128s on
+back-to-back runs of a `-s 500000`, N=1e12 sparse-heavy case, well past
+what run-to-run noise on the *dense*-tier numbers in this table (stable to
++-1s across the whole session) would predict -- the sparse tier's
+bucket-indirection access pattern seems to be the more noise-sensitive
+one specifically, plausibly from its larger, more scattered per-thread
+memory footprint interacting with whatever else is using RAM on the host
+at the time. The 1e13 cliff itself is still open; the two reverted
+attempts and why they didn't work are documented in
+`segment_sieve.hpp`'s sparse-tier comment for whoever picks this up next.
 
 ## Verification
 

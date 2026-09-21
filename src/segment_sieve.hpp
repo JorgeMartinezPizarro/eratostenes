@@ -21,9 +21,11 @@
 //     for no benefit. wheel_base_primes tracks phase j into a per-prime
 //     delta[] table (wheel.hpp) -- cheap reuse, and few enough of these
 //     primes that the table stays tiny (see TABLE_BYTES_BUDGET). Once a
-//     prime needs recomputing the same phase's advance on the fly instead
-//     (wheel_delta_at) -- multiplies and mod-by-compile-time-constant
-//     only, no division by p itself.
+//     prime needs recomputing the same phase's advance on the fly instead,
+//     it reads it from ONFLY_CORRECTION (wheel.hpp) -- a small table
+//     *shared* across every such prime (one multiply by the prime's own
+//     qp=p/WHEEL_MOD, one lookup, one add; no division by p, no per-prime
+//     memory cost either).
 //   - sparse_primes (p >= segment width, at most ~1 hit/segment): BUCKET.
 //     This is where a bucket earns its keep -- most segments have nothing
 //     to do for most of these primes, so scheduling each one into the
@@ -33,7 +35,18 @@
 //     absolute multiplier m from k and steps that forward -- one division
 //     *by p* (not a compile-time constant, so an actual runtime divide)
 //     per hit, but only once per segment at most, same cost class as
-//     every prime already pays once at activation.
+//     every prime already pays once at activation. A shared-table stepping
+//     scheme (like ONFLY_CORRECTION above, reusing OnFlyPrime for
+//     sparse_primes) was tried here too, but measured *slower* in
+//     practice (~2x at N=1e12 with a third of base primes forced sparse):
+//     this tier is bucket-indirection- and cache-miss-bound already (the
+//     ring's access pattern is essentially random relative to memory
+//     layout), so the division's latency was mostly hidden under that,
+//     and the swap only added more scattered per-prime state (an extra
+//     phase array, a bigger per-prime struct) to touch per hit -- the
+//     opposite of the intended win. Left as plain uint64_t + division on
+//     purpose; see wheel_delta_at's history in wheel.hpp for context on
+//     why the *dense_onfly* tier's version of this same idea did pay off.
 //
 // Extraction (turning the finished bit array into actual prime values):
 // invert each word, decompose into (q, r) = (k / WHEEL_SIZE, k %
@@ -207,14 +220,14 @@ public:
 
         size_t onfly_activated = onfly_k_.size();
         for (size_t i = 0; i < onfly_activated; ++i) {
-            uint64_t p = dense_onfly_primes[i].p;
-            uint64_t pmod = dense_onfly_primes[i].pmod;
+            uint64_t qp = dense_onfly_primes[i].qp;
+            uint32_t pr = dense_onfly_primes[i].pr;
             uint64_t k = onfly_k_[i];
             int j = onfly_j_[i];
             while (k < k_high) {
                 uint64_t idx = k - k_low;
                 words_[idx >> 6] |= (1ULL << (idx & 63));
-                k += wheel_delta_at(p, pmod, j);
+                k += qp * GAP_K[j] + ONFLY_CORRECTION[pr][j];
                 if constexpr (WHEEL_SIZE_IS_POW2) {
                     j = (j + 1) & (WHEEL_SIZE - 1);
                 } else {
@@ -366,6 +379,16 @@ private:
     // prime is relinked (schedule_sparse) every time it's processed, but
     // its slot in sparse_k_/sparse_next_ is allocated exactly once, at
     // activation -- no heap allocation on the hot path at all.
+    //
+    // An AoS layout (one {k, p, next} struct per prime, instead of these
+    // three parallel arrays) was tried here on the theory that it would
+    // turn up to 3 likely cache misses per hit into 1 -- measured *worse*
+    // (~2.25x slower at N=1e12 with a third of base primes forced sparse,
+    // on top of the plain-division baseline, which was already ~2x
+    // primesieve's own class of cost there). Second regression in a row
+    // from a locality-motivated change to this tier (see the division
+    // removal attempt above it in git history) -- the actual bottleneck
+    // here still isn't understood; see main.cpp's comment on this tier.
     uint64_t num_buckets_ = 1;
     std::vector<uint32_t> bucket_head_;
     std::vector<uint64_t> sparse_k_;

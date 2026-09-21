@@ -375,13 +375,21 @@ int main(int argc, char** argv) {
     //     determines whether a table lookup or recomputing wins -- and
     //     which primes end up in this tier at any given N falls out of
     //     that count on its own, no threshold on p needed.
-    //   - dense_onfly_primes (remaining p < seg_k_width): recomputes each
-    //     phase's advance instead of storing it (wheel_delta_at,
-    //     wheel.hpp) -- this is the bulk of what used to be "dense" once N
-    //     is large, and exactly the tier whose table, summed across all its
-    //     primes, stopped fitting L3 (see README's L3-cliff section).
+    //   - dense_onfly_primes (remaining p < seg_k_width): no per-prime
+    //     table -- each phase's advance comes from a tiny SHARED table
+    //     instead (ONFLY_CORRECTION, wheel.hpp), so this tier's per-hit
+    //     cost stays cheap (one multiply, one lookup, one add) no matter
+    //     how many primes end up here; this is the tier whose per-prime
+    //     table, summed across all its primes, used to stop fitting L3
+    //     before that table was dropped in favor of the shared one.
     //   - sparse_primes (p >= seg_k_width): at most ~1 hit/segment, plain
-    //     uint64_t, recovers an absolute multiplier from k (unchanged).
+    //     uint64_t, recovers an absolute multiplier from k (unchanged --
+    //     see segment_sieve.hpp for why an ONFLY_CORRECTION-style shared
+    //     table was tried here too and reverted, measured slower).
+    //     Once the auto segment width gets L2-capped below sqrt(N), a
+    //     growing fraction of base primes land here instead of
+    //     dense_onfly_primes above -- the real driver of the 1e13 cliff
+    //     (README#benchmarks), still open.
     //
     // TABLE_BYTES_BUDGET scales with the machine's real L3 (detected, not
     // guessed -- see detect_l3_cache_bytes in arg_parser.hpp): a fixed
@@ -415,7 +423,7 @@ int main(int argc, char** argv) {
             if (wheel_base_primes.size() < TABLE_PRIME_BUDGET) {
                 wheel_base_primes.push_back({p, compute_wheel_deltas(p)});
             } else {
-                dense_onfly_primes.push_back({p, static_cast<uint32_t>(p % WHEEL_MOD)});
+                dense_onfly_primes.push_back({p, p / WHEEL_MOD, static_cast<uint32_t>(WHEEL_POS[p % WHEEL_MOD])});
             }
         } else {
             sparse_primes.push_back(p);
