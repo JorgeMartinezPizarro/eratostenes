@@ -384,12 +384,12 @@ int main(int argc, char** argv) {
     //     before that table was dropped in favor of the shared one.
     //   - sparse_primes (p >= seg_k_width): at most ~1 hit/segment, plain
     //     uint64_t, recovers an absolute multiplier from k (unchanged --
-    //     see segment_sieve.hpp for why an ONFLY_CORRECTION-style shared
-    //     table was tried here too and reverted, measured slower).
-    //     Once the auto segment width gets L2-capped below sqrt(N), a
-    //     growing fraction of base primes land here instead of
-    //     dense_onfly_primes above -- the real driver of the 1e13 cliff
-    //     (README#benchmarks), still open.
+    //     see segment_sieve.hpp for the two stepping-math changes tried
+    //     and reverted here, and process_sparse_bucket for the one that
+    //     actually helped -- register allocation, not the math). Once the
+    //     auto segment width gets L2-capped below sqrt(N), a growing
+    //     fraction of base primes land here instead of dense_onfly_primes
+    //     above -- the real driver of the 1e13 cliff (README#benchmarks).
     //
     // TABLE_BYTES_BUDGET scales with the machine's real L3 (detected, not
     // guessed -- see detect_l3_cache_bytes in arg_parser.hpp): a fixed

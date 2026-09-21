@@ -142,9 +142,37 @@ what run-to-run noise on the *dense*-tier numbers in this table (stable to
 bucket-indirection access pattern seems to be the more noise-sensitive
 one specifically, plausibly from its larger, more scattered per-thread
 memory footprint interacting with whatever else is using RAM on the host
-at the time. The 1e13 cliff itself is still open; the two reverted
-attempts and why they didn't work are documented in
-`segment_sieve.hpp`'s sparse-tier comment for whoever picks this up next.
+at the time.
+
+Both of those attempts were guesses from wall-clock deltas, and both
+guessed wrong -- so the next round used `perf stat`/`perf annotate`
+instead. That found the division was never the real cost (~2.6% of this
+tier's cycles) and the cache-miss *rate* was fine; the actual cost was
+register spilling, from `sieve_and_emit` fully inlining all three tiers
+(dense/onfly/sparse) into one function large enough that the compiler ran
+out of registers -- `perf annotate` pinned a single stack-spilled reload
+of a loop-invariant member (`num_buckets_`) at ~21% of all sampled cycles
+in the sparse path. Pulling the sparse tier's processing loop out into its
+own `__attribute__((noinline))` function (`process_sparse_bucket` in
+`segment_sieve.hpp`) gives it a separate register allocation scope instead
+of fighting the other two tiers for the same one -- confirmed with `perf
+stat` at N=1e12 with a third of base primes forced sparse (`-s 500000`):
+cycles down ~5-9%, IPC up from 1.07 to 1.14-1.19, consistent across
+repeated runs, with the dense-only case (the common one, every N in this
+table) unchanged, since the call is skipped entirely whenever the sparse
+tier has nothing to do for the whole run. This is the first sparse-tier
+change this project has tried that actually helped rather than regressed
+-- see `segment_sieve.hpp` for the full account of what didn't work first
+and why perf, not wall-clock, is what finally found this.
+
+The 1e13 cliff itself is a separate, still-open question: this fix makes
+the sparse tier itself cheaper per prime, it doesn't reduce how many
+primes land there (still driven by the L2-capped segment width vs
+sqrt(N), above). It should still show up as a real win at any N where the
+sparse tier is actually populated -- e.g. 1e13+ here, or 1e14 on a
+bigger machine (300k+ sparse primes there in this project's own staged
+validation runs) -- just not in this table's numbers, since re-timing
+1e13 here costs ~15 minutes a rep and wasn't re-run this round.
 
 ## Verification
 

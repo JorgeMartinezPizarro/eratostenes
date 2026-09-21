@@ -35,18 +35,23 @@
 //     absolute multiplier m from k and steps that forward -- one division
 //     *by p* (not a compile-time constant, so an actual runtime divide)
 //     per hit, but only once per segment at most, same cost class as
-//     every prime already pays once at activation. A shared-table stepping
-//     scheme (like ONFLY_CORRECTION above, reusing OnFlyPrime for
-//     sparse_primes) was tried here too, but measured *slower* in
-//     practice (~2x at N=1e12 with a third of base primes forced sparse):
-//     this tier is bucket-indirection- and cache-miss-bound already (the
-//     ring's access pattern is essentially random relative to memory
-//     layout), so the division's latency was mostly hidden under that,
-//     and the swap only added more scattered per-prime state (an extra
-//     phase array, a bigger per-prime struct) to touch per hit -- the
-//     opposite of the intended win. Left as plain uint64_t + division on
-//     purpose; see wheel_delta_at's history in wheel.hpp for context on
-//     why the *dense_onfly* tier's version of this same idea did pay off.
+//     every prime already pays once at activation.
+//
+//     Two changes to this tier's *stepping math* were tried and reverted
+//     as net regressions: a shared-table scheme like ONFLY_CORRECTION
+//     above (~2x slower at N=1e12 with a third of base primes forced
+//     sparse), and an AoS relayout of its per-prime state for locality
+//     (~2.25x slower). Both were guesses from wall-clock deltas alone.
+//     perf (cycles/instructions/cache-references, not just time) later
+//     showed why: the division these were chasing is ~2.6% of this tier's
+//     cycles, and cache-miss *rate* here is actually fine -- the real
+//     cost was register spilling, from this whole function (dense +
+//     onfly + sparse, fully inlined together at -O3/-flto) running out
+//     of registers. process_sparse_bucket (below) is pulled out into its
+//     own noinline function for exactly that reason, and *that* one
+//     measured a real win (see its own comment) -- the fix was giving
+//     this tier's hot loop its own register allocation scope, not
+//     touching its math or data layout at all.
 //
 // Extraction (turning the finished bit array into actual prime values):
 // invert each word, decompose into (q, r) = (k / WHEEL_SIZE, k %
@@ -239,47 +244,14 @@ public:
             onfly_j_[i] = j;
         }
 
-        // Sparse tier: bucketed -- process exactly the entries due this
-        // segment, mark, advance, reschedule into whichever future bucket
-        // the next hit lands in. Each activated sparse prime owns exactly
-        // one permanent slot in sparse_k_/sparse_next_ for the rest of the
-        // chunk (see the pool comment near their declaration) -- "the
-        // bucket" is just that slot's index appearing in this ring
-        // position's intrusive list, relinked into a new position by
-        // schedule_sparse below, never allocated or freed again after
-        // activation.
-        {
-            uint32_t slot = static_cast<uint32_t>(cur_segment_ & (num_buckets_ - 1));
-            uint32_t idx = bucket_head_[slot];
-            bucket_head_[slot] = NPOS;
-            while (idx != NPOS) {
-                uint32_t next_idx = sparse_next_[idx]; // save: schedule_sparse below overwrites it
-                // Sparse: no stored table and no stored multiplier either --
-                // m is recovered from k on entry: k encodes a value
-                // v=wheel_number(k) that's an exact multiple of p (it's
-                // where the previous mark landed), so v/p divides evenly.
-                uint64_t p = sparse_primes[idx];
-                uint64_t k = sparse_k_[idx];
-                uint64_t m = wheel_number(k) / p;
-                while (k < k_high) {
-                    uint64_t widx = k - k_low;
-                    words_[widx >> 6] |= (1ULL << (widx & 63));
-                    // m is already coprime with WHEEL_MOD (it's the
-                    // multiplier of the hit just marked), so
-                    // STEP_TO_COPRIME[m % WHEEL_MOD] alone is 0 -- that
-                    // table answers "distance to the *nearest* coprime
-                    // residue", which is where you already are. Step past
-                    // it first so it finds the *next* one instead of
-                    // stalling on this one forever.
-                    ++m;
-                    uint64_t step = STEP_TO_COPRIME[m % WHEEL_MOD];
-                    m += step;
-                    k = wheel_index(p * m);
-                }
-                schedule_sparse(idx, k, k_high);
-                idx = next_idx;
-            }
-        }
+        // Sparse tier: see process_sparse_bucket below (pulled out of this
+        // function on purpose -- see its own comment). sparse_primes is
+        // either empty for the whole run or not -- never changes segment
+        // to segment -- so skipping the call entirely when it's empty
+        // avoids paying a real (non-inlined) call's overhead every single
+        // segment for N where this tier never has anything to do (every N
+        // tested up to 1e12 on this machine, see README#benchmarks).
+        if (!sparse_primes.empty()) process_sparse_bucket(k_low, k_high, sparse_primes);
         ++cur_segment_;
 
         // Extraction: bit=0 => prime candidate.
@@ -328,6 +300,72 @@ public:
 
 private:
     static constexpr uint32_t NPOS = static_cast<uint32_t>(-1);
+
+    // Processes exactly the sparse-tier entries due this segment: mark,
+    // advance, reschedule into whichever future bucket the next hit lands
+    // in. Each activated sparse prime owns exactly one permanent slot in
+    // sparse_k_/sparse_next_ for the rest of the chunk (see the pool
+    // comment near their declaration) -- "the bucket" is just that slot's
+    // index appearing in this ring position's intrusive list, relinked
+    // into a new position by schedule_sparse, never allocated or freed
+    // again after activation.
+    //
+    // Pulled out of sieve_and_emit into its own function, and marked
+    // noinline to make sure it stays that way even under -O3/-flto: with
+    // dense/onfly/sparse all fully inlined into one function, perf showed
+    // real cycles going to a spilled-to-stack reload of a loop-invariant
+    // member (num_buckets_) inside what's now schedule_sparse -- the
+    // *number* of values simultaneously live across all three tiers was
+    // forcing spills, not a poor choice of which value to spill. Passing
+    // values in as explicit parameters instead of member reads didn't
+    // change anything measured (see git history) because that doesn't
+    // reduce how many values are live at once, only where they come from.
+    // Giving this tier its own function gives it its own register
+    // allocation scope instead, so its live ranges stop competing with
+    // the other two tiers' for the same register file. Confirmed with
+    // perf stat, not just wall-clock (which turned out noisy for this
+    // tier -- see README#benchmarks): at N=1e12 with a third of base
+    // primes forced sparse (-s 500000), cycles dropped ~5-9% and IPC rose
+    // from 1.07 to 1.14-1.19 across repeated runs, consistently. The
+    // flip side of a real function call is real call overhead, paid once
+    // per segment even when this tier has nothing due -- sieve_and_emit
+    // below skips the call entirely when sparse_primes is empty for the
+    // whole run (every N up to 1e12 tested on this machine), which is
+    // what keeps the dense-only case's numbers unchanged from before this
+    // split.
+    __attribute__((noinline))
+    void process_sparse_bucket(uint64_t k_low, uint64_t k_high, const std::vector<uint64_t>& sparse_primes) {
+        uint32_t slot = static_cast<uint32_t>(cur_segment_ & (num_buckets_ - 1));
+        uint32_t idx = bucket_head_[slot];
+        bucket_head_[slot] = NPOS;
+        while (idx != NPOS) {
+            uint32_t next_idx = sparse_next_[idx]; // save: schedule_sparse below overwrites it
+            // Sparse: no stored table and no stored multiplier either --
+            // m is recovered from k on entry: k encodes a value
+            // v=wheel_number(k) that's an exact multiple of p (it's
+            // where the previous mark landed), so v/p divides evenly.
+            uint64_t p = sparse_primes[idx];
+            uint64_t k = sparse_k_[idx];
+            uint64_t m = wheel_number(k) / p;
+            while (k < k_high) {
+                uint64_t widx = k - k_low;
+                words_[widx >> 6] |= (1ULL << (widx & 63));
+                // m is already coprime with WHEEL_MOD (it's the
+                // multiplier of the hit just marked), so
+                // STEP_TO_COPRIME[m % WHEEL_MOD] alone is 0 -- that
+                // table answers "distance to the *nearest* coprime
+                // residue", which is where you already are. Step past
+                // it first so it finds the *next* one instead of
+                // stalling on this one forever.
+                ++m;
+                uint64_t step = STEP_TO_COPRIME[m % WHEEL_MOD];
+                m += step;
+                k = wheel_index(p * m);
+            }
+            schedule_sparse(idx, k, k_high);
+            idx = next_idx;
+        }
+    }
 
     // Schedules (or reschedules) sparse prime `idx` into the bucket ring
     // slot for whichever segment k falls into, given that the segment

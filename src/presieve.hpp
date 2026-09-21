@@ -58,6 +58,28 @@
 // as primes grow -- naively grouping consecutive primes instead (7,11,13 /
 // 17,19,23 / ...) hits multi-megabyte tables by the time it reaches
 // primes past ~130. All 16 tables combined: ~123KB.
+// Extending coverage past 163 was tried twice and both measured a
+// regression, not a win. Presieve::fill() does one shift-and-OR pass per
+// *group* over the whole segment every single segment, a cost that's
+// fixed per group regardless of that group's table size or which primes
+// are in it -- so the real cost of adding N more groups is proportional
+// to N, not to how well-sized their tables are:
+//   - attempt 1: paired 167+173 and 179+181 with *each other* (wrong --
+//     see below) into 2 new groups. Cycles +1.6-1.8%, IPC 1.57->1.52,
+//     wall-clock flat, at N=1e12.
+//   - attempt 2: paired each of 167/173/179/181 with a small partner
+//     reused from an existing group instead (41*167=6847, 43*173=7439,
+//     47*179=8413, 53*181=9593 -- correctly sized, matching the ~7-10KB
+//     the rest of this list targets) into 4 new groups. Worse, not
+//     better: cycles +4.3%, IPC 1.57->1.49, wall-clock +3.7%. Properly-
+//     sized tables didn't help because table size was never the driver
+//     of fill()'s per-group cost -- group *count* was, and this version
+//     added twice as many groups as attempt 1.
+// Both reverted. A real win here would need fewer new groups (e.g. one
+// group covering all four new primes at once, at the cost of a much
+// bigger table -- untested) or restructuring fill() so a group's cost
+// scales with how often its primes actually hit rather than a fixed
+// full-segment pass -- out of scope for what's been tried so far.
 inline const std::vector<std::vector<uint64_t>> PRESIEVE_GROUPS = {
     {7, 23, 37},
     {11, 19, 31},
