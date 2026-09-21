@@ -92,11 +92,17 @@ concept itself rather than this project's specific spin on it:
 
 - [Segmented sieve](https://en.wikipedia.org/wiki/Sieve_of_Eratosthenes#Segmented_sieve)
 - [Wheel factorization](https://en.wikipedia.org/wiki/Wheel_factorization)
+- [Lookup table](https://en.wikipedia.org/wiki/Lookup_table) (precomputed bit patterns for the smallest primes, combined by bitwise OR at fill time instead of marking each one's multiples every segment -- `src/presieve.hpp`)
 - [Bucket sieve](https://en.wikipedia.org/wiki/Bucket_queue)
+- [Memory pool](https://en.wikipedia.org/wiki/Memory_pool) (the bucket sieve's ring: an intrusive linked list over a preallocated flat array, no per-segment heap allocation)
 - [Bit array](https://en.wikipedia.org/wiki/Bit_array)
 - [Hamming weight / popcount](https://en.wikipedia.org/wiki/Hamming_weight)
+- [CPU cache](https://en.wikipedia.org/wiki/CPU_cache) (segment width and the table/on-the-fly prime-tier cutoff are both auto-tuned from the machine's real, detected L2/L3 size, not a fixed guess -- see `--l2-bytes`/`--l3-bytes` for when detection itself can't be trusted, e.g. inside a container)
+- [Load balancing (computing)](https://en.wikipedia.org/wiki/Load_balancing_(computing)) (many more chunks than threads, pulled from a shared queue, since work per chunk isn't uniform across the range -- see `run_parallel_chunks`)
+- [Random access](https://en.wikipedia.org/wiki/Random_access) (`pwrite()` into disjoint, precomputed regions of a pre-sized file lets every thread write its own share of the output in parallel with no locking and no merge step)
 - [Delta encoding](https://en.wikipedia.org/wiki/Delta_encoding) (gaps between consecutive primes, for `.db`)
 - [Zstandard](https://en.wikipedia.org/wiki/Zstd) (compresses the encoded gaps)
+- [Database index](https://en.wikipedia.org/wiki/Database_index) (`.db` blocks are indexed by starting position, so `nth_prime` decodes the one block it needs instead of scanning)
 - [SQLite](https://en.wikipedia.org/wiki/SQLite) (the `.db` container format)
 
 ## Benchmarks
@@ -104,11 +110,8 @@ concept itself rather than this project's specific spin on it:
 `--count-only` (isolates CPU/cache work from disk I/O), mod 30, auto `-s`,
 on an Intel Core i5-11400F (6 cores/12 threads, L1d 48KiB/core, L2
 512KiB/core, L3 12MiB), primesieve alongside it for reference, same
-machine, same thread count. Best of 3 reps, fresh `wsl --shutdown` before
-the run -- single-rep numbers on this machine turned out noisy enough
-(seen up to ~25% run-to-run on the same unmodified binary, worse under
-memory pressure from other running programs) to be misleading on their
-own; see the note below the table:
+machine, same thread count. Best of 3 reps (2 for 1e13), fresh
+`wsl --shutdown` before the run:
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
@@ -117,62 +120,12 @@ own; see the note below the table:
 | 1e12 | 49.04s | 27.579s | 1.8x |
 | 1e13 | 910.31s | 362.276s | 2.5x |
 
-1e13 is best of 2 reps rather than 3 (it alone takes ~15 minutes a rep):
-945.14s/910.31s for eratostenes, 362.276s/362.921s for primesieve --
-primesieve's own spread stays tight even at this N (<1s), consistent with
-the rest of the table.
-
-A real cliff shows up there regardless of noise, though: at 1e13 the
-*auto segment width* gets L2-capped (see `arg_parser.hpp`) to a k-width of
-~2.1M, well below sqrt(1e13)'s ~3.16M -- so ~72k base primes (32% of the
-total) land in the `sparse_primes` tier instead of `dense_onfly_primes`.
-The `dense_onfly_primes` tier's own per-hit cost *was* real and fixed (see
-`wheel.hpp`'s `ONFLY_CORRECTION` table, ~2.4x faster in isolation, output
-verified byte-for-byte against the table tier) but that tier is empty at
-every N in this table, including 1e13, so it doesn't move these numbers.
-Two follow-up attempts at the sparse tier's own per-hit
-`wheel_number(k)/p` (a genuine runtime division) -- an `ONFLY_CORRECTION`-
-style fix, then an AoS relayout for better cache locality -- both measured
-*slower* when tried (both reverted; see `segment_sieve.hpp`'s sparse-tier
-comment). The second of those measurements is part of why the noise above
-got found: a supposedly-identical revert measured 103s then 128s on
-back-to-back runs of a `-s 500000`, N=1e12 sparse-heavy case, well past
-what run-to-run noise on the *dense*-tier numbers in this table (stable to
-+-1s across the whole session) would predict -- the sparse tier's
-bucket-indirection access pattern seems to be the more noise-sensitive
-one specifically, plausibly from its larger, more scattered per-thread
-memory footprint interacting with whatever else is using RAM on the host
-at the time.
-
-Both of those attempts were guesses from wall-clock deltas, and both
-guessed wrong -- so the next round used `perf stat`/`perf annotate`
-instead. That found the division was never the real cost (~2.6% of this
-tier's cycles) and the cache-miss *rate* was fine; the actual cost was
-register spilling, from `sieve_and_emit` fully inlining all three tiers
-(dense/onfly/sparse) into one function large enough that the compiler ran
-out of registers -- `perf annotate` pinned a single stack-spilled reload
-of a loop-invariant member (`num_buckets_`) at ~21% of all sampled cycles
-in the sparse path. Pulling the sparse tier's processing loop out into its
-own `__attribute__((noinline))` function (`process_sparse_bucket` in
-`segment_sieve.hpp`) gives it a separate register allocation scope instead
-of fighting the other two tiers for the same one -- confirmed with `perf
-stat` at N=1e12 with a third of base primes forced sparse (`-s 500000`):
-cycles down ~5-9%, IPC up from 1.07 to 1.14-1.19, consistent across
-repeated runs, with the dense-only case (the common one, every N in this
-table) unchanged, since the call is skipped entirely whenever the sparse
-tier has nothing to do for the whole run. This is the first sparse-tier
-change this project has tried that actually helped rather than regressed
--- see `segment_sieve.hpp` for the full account of what didn't work first
-and why perf, not wall-clock, is what finally found this.
-
-The 1e13 cliff itself is a separate, still-open question: this fix makes
-the sparse tier itself cheaper per prime, it doesn't reduce how many
-primes land there (still driven by the L2-capped segment width vs
-sqrt(N), above). It should still show up as a real win at any N where the
-sparse tier is actually populated -- e.g. 1e13+ here, or 1e14 on a
-bigger machine (300k+ sparse primes there in this project's own staged
-validation runs) -- just not in this table's numbers, since re-timing
-1e13 here costs ~15 minutes a rep and wasn't re-run this round.
+The 1e13 ratio jump comes from the auto segment width getting L2-capped
+below sqrt(1e13), pushing ~32% of base primes into the costlier
+`sparse_primes` tier instead of the cheap table tier (see
+`segment_sieve.hpp`'s tier comments and `arg_parser.hpp`'s auto `-s`
+logic for the full mechanics, and `presieve.hpp`/`segment_sieve.hpp` for
+what's been tried against it and why).
 
 ## Verification
 
