@@ -59,22 +59,15 @@ outside the container.
 ```
 
 ```sh
-./eratostenes 1000000 -o primes_1M.txt
-./eratostenes 100b -o ~/primes_100b.txt -t 12
-./eratostenes 100b -t 12 --count-only        # pi(N) or raw speed, no I/O
-./eratostenes 100b -o ~/primes_100b.db -t 12 # compact indexable output
+./eratostenes 10000 -o primes_1M.txt
+./eratostenes 100m -o ~/primes_100b.txt -t 12
+./eratostenes 10b -t 12 --count-only
+./eratostenes 1t -o ~/primes_100b.db
 ```
 
 ## .db output (compact, indexable)
 
-Plain text costs ~9-13 bytes/prime (pi(10^12) as text is ~450GB). `-o
-out.db` writes primes as **gaps** between consecutive primes instead
-(1 byte for the common case, escape byte + 4-byte value for rare larger
-gaps — see `src/gap_encoding.hpp`), grouped into fixed-size blocks
-(`--db-block-size`, default 65536 primes) and zstd-compressed
-(`--zstd-level`) into a SQLite `blocks` table indexed by starting
-position. Measured ~0.57-0.6 bytes/prime, ~18-20x smaller than text, while
-staying randomly indexable.
+The `.db` format is a indexed sqlite file (max 256TB size), so it is suitable up to `e16`, around 200TB. To query for primes you can use the `nth_prime` companion:
 
 ```
 ./nth_prime out.db 1000000     # the 1,000,000th prime (1-indexed: N=1 -> 2)
@@ -88,7 +81,7 @@ lookups stay fast regardless of file size.
 ## Techniques
 
 What this project is built from, one term each — follow the link for the
-concept itself rather than this project's specific spin on it:
+concept itself:
 
 - [Segmented sieve](https://en.wikipedia.org/wiki/Sieve_of_Eratosthenes#Segmented_sieve)
 - [Wheel factorization](https://en.wikipedia.org/wiki/Wheel_factorization)
@@ -107,14 +100,14 @@ concept itself rather than this project's specific spin on it:
 
 ## Benchmarks
 
-`--count-only` on an Intel Core i5-11400F (6 cores/12 threads, L1d 48KiB/core, L2 512KiB/core, L3 12MiB), primesieve alongside it for reference, same machine:
+`-c` on an Intel Core i5-13500, primesieve alongside it for reference, same machine:
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
-| 1e10 | 0.50s | 0.188s | 2.7x |
-| 1e11 | 4.01s | 2.321s | 1.7x |
-| 1e12 | 49.04s | 27.579s | 1.8x |
-| 1e13 | 910.31s | 362.276s | 2.5x |
+| 1e10 | 0.50s | 0.197s | 2.5x |
+| 1e11 | 3.00s | 1.704s | 1.8x |
+| 1e12 | 41.01s | 25.051s | 1.6x |
+| 1e13 | 500.13s | 292.342s | 1.7x |
 
 Writting primes to a `.db` file results in the following ratios per prime:
 
