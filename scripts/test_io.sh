@@ -48,6 +48,10 @@ esac
 mkdir -p "$WRITE_PATH"
 
 # N -> pi(N) conocido, misma escala x10 que el barrido manual (1k..1t).
+#SIZES=(1k 10k 100k 1m 10m 100m 1b 10b 100b)
+#LIMITS=(1000 10000 100000 1000000 10000000 100000000 1000000000 10000000000 100000000000)
+#EXPECTED=(168 1229 9592 78498 664579 5761455 50847534 455052511 4118054813)
+
 SIZES=(1k 10k 100k 1m 10m 100m 1b 10b 100b 1t)
 LIMITS=(1000 10000 100000 1000000 10000000 100000000 1000000000 10000000000 100000000000 1000000000000)
 EXPECTED=(168 1229 9592 78498 664579 5761455 50847534 455052511 4118054813 37607912018)
@@ -133,6 +137,7 @@ printf "| %-6s | %14s | %-10s | %9s | %9s | %7s | %6s | %8s |\n" \
     "limite" "pi(N)" "tam .db" "bit/primo" "conteo(s)" "escr(s)" "MB/s" "total(s)"
 printf "|--------|---------------:|------------|----------:|----------:|--------:|-------:|---------:|\n"
 for i in "${!SIZES[@]}"; do
+	n="${SIZES[$i]}"
     limit="${LIMITS[$i]}"
     bytes="${SIZE_BYTES[$n]}"
     count_s="${COUNT_S[$n]}"
@@ -149,7 +154,7 @@ for i in "${!SIZES[@]}"; do
     bitpp=$(awk -v b="$bytes" -v c="$count" 'BEGIN{printf "%.2f", b*8/c}')
     mbps=$(awk -v b="$bytes" -v s="$write_s" 'BEGIN{printf "%.1f", (s>0)?(b/1e6/s):0}')
 
-    printf "| %-4s | %-6s | %14s | %-10s | %9s | %9s | %7s | %6s | %8s |\n" \
-        "$n" "$limit_exp" "$(commas "$count")" \
+    printf "|%-6s | %14s | %-10s | %9s | %9s | %7s | %6s | %8s |\n" \
+        "$limit_exp" "$(commas "$count")" \
         "$(human_size "$bytes")" "$bitpp" "$count_s" "$write_s" "$mbps" "$total_s"
 done
