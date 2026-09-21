@@ -14,11 +14,11 @@ Requires a C++20 compiler, POSIX `pwrite`/`ftruncate` (Linux or WSL; does
 not build as-is with MSVC/native Windows), and the SQLite3 and zstd
 development libraries (for `.db` output):
 
-```
+```sh
 sudo apt-get install libsqlite3-dev libzstd-dev   # Debian/Ubuntu/WSL
 ```
 
-```
+```sh
 make            # release build: -O3 -march=native -flto, plus nth_prime
 make portable   # no -march=native, for a binary you'll copy to another machine
 make debug      # ASan/UBSan, for debugging
@@ -30,7 +30,7 @@ make verify-db  # round-trips small N through .db output and checks it
 
 ## Docker
 
-```
+```sh
 make docker                                              # build the image
 make run ARGS="100b -o /output/primes.txt -t 12"          # run it
 ```
@@ -69,31 +69,25 @@ outside the container.
 
 The `.db` format is a indexed sqlite file (max 256TB size), so it is suitable up to `e16`, around `200TB`. To query for primes you can use the `nth_prime` companion:
 
-```
+```sh
 ./nth_prime out.db 1000000     # the 1,000,000th prime (1-indexed: N=1 -> 2)
 ./nth_prime out.db --count     # pi(limit)
 ```
 
-`nth_prime` looks up the one block containing the requested position
-(indexed by `start_index`, not a table scan) and decodes just that block —
-lookups stay fast regardless of file size.
+`nth_prime` looks up the one block containing the requested position (indexed by `start_index`, not a table scan) and decodes just that block — lookups stay fast regardless of file size.
 
 ## Techniques
 
-What this project is built from, one term each — follow the link for the
-concept itself:
+What this project is built from, one term each — follow the link for the concept itself:
 
 - [Segmented sieve](https://en.wikipedia.org/wiki/Sieve_of_Eratosthenes#Segmented_sieve)
 - [Wheel factorization](https://en.wikipedia.org/wiki/Wheel_factorization)
-- [Lookup table](https://en.wikipedia.org/wiki/Lookup_table) (precomputed bit patterns for the smallest primes, combined by bitwise OR at fill time instead of marking each one's multiples every segment -- `src/presieve.hpp`)
 - [Bucket sieve](https://en.wikipedia.org/wiki/Bucket_queue)
 - [Memory pool](https://en.wikipedia.org/wiki/Memory_pool) (the bucket sieve's ring: an intrusive linked list over a preallocated flat array, no per-segment heap allocation)
-- [Hamming weight / popcount](https://en.wikipedia.org/wiki/Hamming_weight)
 - [CPU cache](https://en.wikipedia.org/wiki/CPU_cache) (segment width and the table/on-the-fly prime-tier cutoff are both auto-tuned from the machine's real, detected L2/L3 size, not a fixed guess -- see `--l2-bytes`/`--l3-bytes` for when detection itself can't be trusted, e.g. inside a container)
 - [Load balancing (computing)](https://en.wikipedia.org/wiki/Load_balancing_(computing)) (many more chunks than threads, pulled from a shared queue, since work per chunk isn't uniform across the range -- see `run_parallel_chunks`)
 - [Random access](https://en.wikipedia.org/wiki/Random_access) (`pwrite()` into disjoint, precomputed regions of a pre-sized file lets every thread write its own share of the output in parallel with no locking and no merge step)
 - [Delta encoding](https://en.wikipedia.org/wiki/Delta_encoding) (gaps between consecutive primes, for `.db`)
-- [Zstandard](https://en.wikipedia.org/wiki/Zstd) (compresses the encoded gaps)
 
 ## Benchmarks
 
