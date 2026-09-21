@@ -403,9 +403,17 @@ int main(int argc, char** argv) {
     // for onfly/sparse's own (much smaller) per-prime arrays, presieve,
     // and whatever else shares L3 (other threads' segment buffers, if
     // -s wasn't capped small enough to stay in L2 -- see the auto -s
-    // default). Falls back to a conservative 4MiB if L3 can't be detected.
-    uint64_t l3_bytes = detect_l3_cache_bytes();
-    if (l3_bytes == 0) l3_bytes = 4 * 1024 * 1024;
+    // default). Falls back to a conservative 4MiB if L3 can't be detected
+    // -- or use --l3-bytes if that fallback is wrong for this machine
+    // (e.g. a container that can't see the host's real /sys/.../cache;
+    // silently landing on 4MiB there costs real speed with no warning,
+    // see the Options field comment in arg_parser.hpp).
+    const char* l3_source = opt.l3_bytes_override ? "--l3-bytes" : "auto-detectado";
+    uint64_t l3_bytes = opt.l3_bytes_override ? opt.l3_bytes_override : detect_l3_cache_bytes();
+    if (l3_bytes == 0) {
+        l3_bytes = 4 * 1024 * 1024;
+        l3_source = "fallback, auto-deteccion fallo";
+    }
     size_t TABLE_BYTES_BUDGET = static_cast<size_t>(l3_bytes / 2);
     size_t TABLE_PRIME_BUDGET = TABLE_BYTES_BUDGET / sizeof(WheelBasePrime);
     std::vector<uint64_t> presieve_primes_flat;
@@ -443,6 +451,8 @@ int main(int argc, char** argv) {
 
     Presieve presieve = build_presieve(PRESIEVE_GROUPS, seg_k_width);
 
+    std::fprintf(stderr, "L3 usado para presupuesto de tabla: %.1f MiB (%s)\n",
+                 l3_bytes / 1024.0 / 1024.0, l3_source);
     std::fprintf(stderr, "Iniciando %u hilos, limite=%llu, segmento=%llu, rueda mod %llu (%zu primos), "
                  "%zu primos base densos (tabla), %zu densos (recalculo), %zu dispersos...\n",
                  actual_threads,

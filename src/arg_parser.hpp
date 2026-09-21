@@ -86,6 +86,20 @@ struct Options {
                                           // stream) barely depends on level,
                                           // so higher levels mostly buy
                                           // slower builds, not smaller files
+
+    // Manual overrides for detect_l2_cache_bytes()/detect_l3_cache_bytes()
+    // (this file, below): 0 means "keep auto-detecting". Auto-detection
+    // reads /sys/devices/system/cpu/cpu0/cache/index*/ and isn't
+    // guaranteed everywhere -- a container runtime, an unusual kernel, or
+    // a hybrid P-core/E-core topology can all make it fail silently and
+    // fall back to a conservative default sized for a small machine (see
+    // where these are used in main.cpp/parse_args below), which costs
+    // real speed on a bigger machine without saying so anywhere. These
+    // flags are the escape hatch when that happens: safe to try because
+    // neither touches anything on the per-segment hot path, only how
+    // TABLE_PRIME_BUDGET/the auto -s width get sized once at startup.
+    uint64_t l2_bytes_override = 0;
+    uint64_t l3_bytes_override = 0;
 };
 
 // Interprets suffixes: k=1e3 m=1e6 b=1e9 (short scale billion) t=1e12
@@ -153,6 +167,12 @@ inline void print_usage(const char* prog) {
         "                         (default: 65536)\n"
         "      --zstd-level N     Nivel de compresion zstd en modo .db\n"
         "                         (default: 3)\n"
+        "      --l2-bytes N       Fuerza el tamano de L2 usado para el ancho\n"
+        "                         de segmento automatico (default: auto-\n"
+        "                         detectado via /sys; usar si la deteccion\n"
+        "                         falla, p.ej. dentro de un contenedor)\n"
+        "      --l3-bytes N       Fuerza el tamano de L3 usado para\n"
+        "                         TABLE_PRIME_BUDGET (mismo caso que --l2-bytes)\n"
         "  -h, --help             Muestra esta ayuda\n"
         "\n"
         "La rueda (que primos se descartan de entrada) se fija en tiempo de\n"
@@ -192,6 +212,10 @@ inline Options parse_args(int argc, char** argv) {
             opt.db_block_size = parse_size(need_value(i, a.c_str()));
         } else if (a == "--zstd-level") {
             opt.zstd_level = std::stoi(need_value(i, a.c_str()));
+        } else if (a == "--l2-bytes") {
+            opt.l2_bytes_override = parse_size(need_value(i, a.c_str()));
+        } else if (a == "--l3-bytes") {
+            opt.l3_bytes_override = parse_size(need_value(i, a.c_str()));
         } else if (!a.empty() && a[0] != '-' && !has_limit) {
             // Bare positional limit (./eratostenes 1t -c), primesieve-style
             // -- the only way to give it; there's no -n/--limit flag (one
@@ -237,8 +261,9 @@ inline Options parse_args(int argc, char** argv) {
         // 1/2 of L2 leaves room for a hyperthread sibling sharing the same
         // L2 (typical topology) plus whatever else is running; falls back
         // to a conservative 256KiB if L2 can't be detected (see
-        // detect_l2_cache_bytes).
-        uint64_t l2_bytes = detect_l2_cache_bytes();
+        // detect_l2_cache_bytes) -- or use --l2-bytes if that fallback is
+        // wrong for this machine (see the Options field comment).
+        uint64_t l2_bytes = opt.l2_bytes_override ? opt.l2_bytes_override : detect_l2_cache_bytes();
         if (l2_bytes == 0) l2_bytes = 256 * 1024;
         uint64_t l2_target_bytes = l2_bytes / 2;
         // Inverse of array_bytes = segment_width * WHEEL_SIZE / WHEEL_MOD / 8
