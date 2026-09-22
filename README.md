@@ -95,10 +95,10 @@ What this project is built from, one term each — follow the link for the conce
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
-| 1e10 | 0.50s | 0.198s | 2.5x |
-| 1e11 | 3.00s | 1.731s | 1.7x |
-| 1e12 | 41.01s | 25.051s | 1.6x |
-| 1e13 | 473.61s | 290.832s | 1.6x |
+| 1e10 | 0.18s | 0.132s | 1.4x |
+| 1e11 | 2.18s | 1.664s | 1.3x |
+| 1e12 | 32.11s | 25.082s | 1.3x |
+| 1e13 | 379.97s | 291.917s | 1.3x |
 
 Under an i5-11400F (dev PC, two generations older) the best-of-3 times
 achieved for 1e11-1e13 are 2.95s, 40.34s, 591.09s -- kept as a baseline
@@ -109,11 +109,11 @@ Writting primes to a `.db` file results in the following ratios per prime:
 
 | limit  |          pi(N) | db size    | bit/prime |   MB/s | total(s) |
 |--------|---------------:|------------|----------:|-------:|---------:|
-|1E8    |      5,761,455 | 3.29 MiB   |      4.79 |    6.0 |     1.09 |
-|1E9    |     50,847,534 | 28.72 MiB  |      4.74 |   48.6 |     1.13 |
-|1E10   |    455,052,511 | 269.30 MiB |      4.96 |  263.9 |     1.58 |
-|1E11   |  4,118,054,813 | 2.42 GiB   |      5.04 |  317.1 |    11.19 |
-|1E12   | 37,607,912,018 | 22.46 GiB  |      5.13 |  279.0 |   127.46 |
+|1E8    |      5,761,455 | 3.30 MiB   |      4.81 |   34.7 |     0.11 |
+|1E9    |     50,847,534 | 28.75 MiB  |      4.74 |  143.6 |     0.28 |
+|1E10   |    455,052,511 | 269.30 MiB |      4.96 |  320.9 |     1.08 |
+|1E11   |  4,118,054,813 | 2.42 GiB   |      5.04 |  336.9 |    10.31 |
+|1E12   | 37,607,912,018 | 22.46 GiB  |      5.13 |  312.0 |   110.13 |
 
 ## Verification
 
