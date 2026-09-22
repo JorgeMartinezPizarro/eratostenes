@@ -1,18 +1,10 @@
 # Eratostenes
 
-A segmented, parallel, wheel-based Sieve of Eratosthenes (C++20) for
-generating or counting primes up to very large N (10^12+), with a compact,
-randomly-indexable `.db` output format for storing dense prime tables at
-scale. [primesieve](https://github.com/kimwalisch/primesieve) is this
-project's reference, both for performance (see [Benchmarks](#benchmarks))
-and for technique -- several of the ideas below come directly from reading
-its source.
+A segmented, parallel, wheel-based Sieve of Eratosthenes (C++20) for generating or counting primes up to very large N (10^12+), with a compact, randomly-indexable `.db` output format for storing dense prime tables at scale. [primesieve](https://github.com/kimwalisch/primesieve) is this project's reference, both for performance (see [Benchmarks](#benchmarks)) and for technique -- several of the ideas below come directly from reading its source.
 
 ## Build
 
-Requires a C++20 compiler, POSIX `pwrite`/`ftruncate` (Linux or WSL; does
-not build as-is with MSVC/native Windows), and the SQLite3 and zstd
-development libraries (for `.db` output):
+Requires a C++20 compiler, POSIX `pwrite`/`ftruncate` (Linux or WSL; does not build as-is with MSVC/native Windows), and the SQLite3 and zstd development libraries (for `.db` output):
 
 ```sh
 sudo apt-get install libsqlite3-dev libzstd-dev   # Debian/Ubuntu/WSL
@@ -100,10 +92,7 @@ What this project is built from, one term each — follow the link for the conce
 | 1e12 | 32.11s | 25.082s | 1.3x |
 | 1e13 | 379.97s | 291.917s | 1.3x |
 
-Under an i5-11400F (dev PC, two generations older) the best-of-3 times
-achieved for 1e11-1e13 are 2.95s, 40.34s, 591.09s -- kept as a baseline
-for this weaker machine, not a fair ratio comparison (no primesieve run
-alongside it here).
+Under an i5-11400F (dev PC, two generations older) the best-of-3 times achieved for 1e11-1e13 are 2.95s, 40.34s, 591.09s -- kept as a baseline for this weaker machine, not a fair ratio comparison (no primesieve run alongside it here).
 
 Writting primes to a `.db` file results in the following ratios per prime:
 
@@ -117,18 +106,11 @@ Writting primes to a `.db` file results in the following ratios per prime:
 
 ## Verification
 
-`make test` checks pi(N) against the known value for N=1e8..1e11, plus a
-handful of known primes by position in a real `.db` built at N=1e10, read
-back with `nth_prime`. It also checks the `.db` output mode against plain
-text output: matching pi(N), and every (or, past a few hundred thousand
-primes, a random sample of) position agreeing between the two. Output has
-also been checked to be byte-for-byte identical across thread counts,
-segment widths, and wheels for the same N.
+`make test` checks pi(N) against the known value for N=1e8..1e11, plus a handful of known primes by position in a real `.db` built at N=1e10, read back with `nth_prime`. It also checks the `.db` output mode against plain text output: matching pi(N), and every (or, past a few hundred thousand primes, a random sample of) position agreeing between the two. Output has also been checked to be byte-for-byte identical across thread counts, segment widths, and wheels for the same N.
 
 ## WSL disk reclaim
 
-WSL2's virtual disk doesn't shrink back automatically after deleting large
-files inside it. From PowerShell:
+WSL2's virtual disk doesn't shrink back automatically after deleting large files inside it. From PowerShell:
 
 ```powershell
 Get-ChildItem "$env:LOCALAPPDATA\Packages" -Filter *.vhdx -Recurse | Select-Object FullName, Length
