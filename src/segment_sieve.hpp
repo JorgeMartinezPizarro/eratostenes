@@ -232,6 +232,44 @@ public:
         // No reschedule bookkeeping, no bucket indirection.
         size_t dense_activated = dense_k_.size();
         for (size_t i = 0; i < dense_activated; ++i) {
+            // Software prefetch a few entries ahead: wheel_base_primes[i]
+            // is walked strictly sequentially (good for the hardware
+            // prefetcher on its own), but each iteration's while-loop below
+            // runs a variable, data-dependent number of times before
+            // moving to i+1 -- that variability can starve the hardware
+            // prefetcher's lookahead. Explicit here since it's a genuinely
+            // different access pattern from the sparse tier's bucket-ring
+            // prefetch attempt (pointer-chasing, reverted -- see
+            // process_sparse_bucket's comment): this one is sequential and
+            // predictable, the case software prefetch is actually meant
+            // for.
+            //
+            // Kept (dev PC, N=1e13, natural auto -s, on top of the
+            // division-free sparse tier above): cache-miss rate dropped
+            // 9.63%->5.67%, and wall-clock 1011.38s->901.61s (-10.85%) --
+            // but cycles:u went slightly *up* (+3.2%), the opposite of
+            // what decided every other change on this tier. Reconciled by
+            // average frequency (cycles:u/task-clock): 3.478GHz->3.982GHz.
+            // Fewer memory stalls let the core sustain a higher clock, so
+            // more cycles executed in less wall-time isn't a contradiction
+            // here -- but it did produce a genuine false alarm before
+            // landing on this number: a same-session "confirmation" rerun
+            // launched immediately after the first (no idle gap) came back
+            // at 1273.77s/48.74T cycles, matching this project's own
+            // documented PL1/Tau back-to-back-long-runs trap (see git
+            // history) almost exactly, with instructions:u identical
+            // across every run (~42.819e9) confirming it was the same code
+            // under different power/thermal states, not a different
+            // execution path. Settled only after a real cooldown (wsl
+            // --shutdown, fresh boot, machine otherwise idle) reproduced
+            // the fast number twice. Reproduced a third time (898.63s,
+            // 5.72% miss rate) after an unrelated editing slip briefly
+            // deleted this very prefetch line while only touching the
+            // comment above it -- caught because the "no-prefetch" number
+            // that slip produced (892.06s) didn't fit either cluster
+            // (901s with, 1011s without), which is what flagged it as
+            // wrong rather than a third data point.
+            if (i + 4 < dense_activated) __builtin_prefetch(&wheel_base_primes[i + 4], 0, 1);
             const auto& delta = wheel_base_primes[i].delta;
             uint64_t k = dense_k_[i];
             int j = dense_j_[i];

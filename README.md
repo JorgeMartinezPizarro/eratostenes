@@ -100,6 +100,10 @@ What this project is built from, one term each — follow the link for the conce
 | 1e12 | 41.01s | 25.051s | 1.6x |
 | 1e13 | 473.61s | 290.832s | 1.6x |
 
+Under an i5-11400F (dev PC, two generations older) the times achieved for
+1e11-1e13 are 4.01s, 47.03s, 898.63s -- kept as a baseline for this weaker
+machine, not a fair ratio comparison (no primesieve run alongside it here).
+
 Writting primes to a `.db` file results in the following ratios per prime:
 
 | limit  |          pi(N) | db size    | bit/prime |   MB/s | total(s) |
