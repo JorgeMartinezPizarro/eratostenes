@@ -434,6 +434,13 @@ int main(int argc, char** argv) {
                 dense_onfly_primes.push_back({p, p / WHEEL_MOD, static_cast<uint32_t>(WHEEL_POS[p % WHEEL_MOD])});
             }
         } else {
+            // Tried giving this tier the same OnFlyPrime shape as
+            // dense_onfly above (qp/pr, division-free stepping) -- reverted
+            // as a measured regression, see the "attempt 3" comment on
+            // SegmentSieve's sparse tier in segment_sieve.hpp: the fatter
+            // per-prime struct (24 bytes vs plain uint64_t's 8) cost more
+            // in cache pressure, on this tier's pseudo-random bucket-ring
+            // access pattern, than the division it removed was worth.
             sparse_primes.push_back(p);
         }
     }

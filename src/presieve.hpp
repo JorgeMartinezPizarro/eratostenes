@@ -77,9 +77,21 @@
 //     added twice as many groups as attempt 1.
 // Both reverted. A real win here would need fewer new groups (e.g. one
 // group covering all four new primes at once, at the cost of a much
-// bigger table -- untested) or restructuring fill() so a group's cost
-// scales with how often its primes actually hit rather than a fixed
-// full-segment pass -- out of scope for what's been tried so far.
+// bigger table) or restructuring fill() so a group's cost scales with how
+// often its primes actually hit rather than a fixed full-segment pass --
+// out of scope for what's been tried so far.
+//   - attempt 3: the "one big group" idea above, {167, 173, 179, 181} as a
+//     single 17th group (period_k ~935MB table -- fill()'s cost was shown
+//     to track group *count*, not table size, so this was meant to cost
+//     the same as any other single group despite the huge table). Tried
+//     on an i5-11400F: +1.4% wall-clock at N=1e12 (51.73s vs 51.03s,
+//     single rep, no sparse tier present at that N either way, so this
+//     isolates the presieve change alone). Still a regression -- group
+//     *count* wasn't the whole story after all (likely the table's own
+//     memory footprint/TLB pressure, streamed fresh every segment since
+//     935MB doesn't fit any cache level, costs more than the 2-4 wheel
+//     hits/segment it would have saved). Reverted without spending the
+//     ~15min needed to also check N=1e13.
 inline const std::vector<std::vector<uint64_t>> PRESIEVE_GROUPS = {
     {7, 23, 37},
     {11, 19, 31},
