@@ -133,14 +133,13 @@ fi
 # y filas usan exactamente los mismos anchos por columna para que la tabla
 # quede alineada.
 echo
-printf "| %-6s | %14s | %-10s | %9s | %9s | %7s | %6s | %8s |\n" \
-    "limite" "pi(N)" "tam .db" "bit/primo" "conteo(s)" "escr(s)" "MB/s" "total(s)"
-printf "|--------|---------------:|------------|----------:|----------:|--------:|-------:|---------:|\n"
+printf "| %-6s | %14s | %-10s | %9s | %6s | %8s |\n" \
+    "limit" "pi(N)" "db size" "bit/prime" "MB/s" "total(s)"
+printf "|--------|---------------:|------------|----------:|-------:|---------:|\n"
 for i in "${!SIZES[@]}"; do
 	n="${SIZES[$i]}"
     limit="${LIMITS[$i]}"
     bytes="${SIZE_BYTES[$n]}"
-    count_s="${COUNT_S[$n]}"
     write_s="${WRITE_S[$n]}"
     total_s="${TOTAL_S[$n]}"
     count="${COUNT[$n]}"
@@ -154,7 +153,7 @@ for i in "${!SIZES[@]}"; do
     bitpp=$(awk -v b="$bytes" -v c="$count" 'BEGIN{printf "%.2f", b*8/c}')
     mbps=$(awk -v b="$bytes" -v s="$write_s" 'BEGIN{printf "%.1f", (s>0)?(b/1e6/s):0}')
 
-    printf "|%-6s | %14s | %-10s | %9s | %9s | %7s | %6s | %8s |\n" \
+    printf "|%-6s | %14s | %-10s | %9s | %6s | %8s |\n" \
         "$limit_exp" "$(commas "$count")" \
-        "$(human_size "$bytes")" "$bitpp" "$count_s" "$write_s" "$mbps" "$total_s"
+        "$(human_size "$bytes")" "$bitpp" "$mbps" "$total_s"
 done
