@@ -31,13 +31,14 @@
 //     to do for most of these primes, so scheduling each one into the
 //     future segment where its next hit actually falls (a fixed-size
 //     ring, buckets_) means a segment's processing only ever looks at the
-//     (few) sparse primes actually due, not all of them. Stores the
-//     multiplier m itself across segments (sparse_m_) and derives k from
-//     it via wheel_index (p*m, then a divide by the compile-time constant
-//     WHEEL_MOD) -- no division by the runtime value p anymore (see
-//     attempt 4 below); same 8 bytes/prime as storing k would take.
+//     (few) sparse primes actually due, not all of them. Steps forward the
+//     same qp*GAP_K[j] + ONFLY_CORRECTION[pr][j] way dense_onfly_ does --
+//     no division by the runtime value p anywhere in this tier anymore
+//     (see attempt 5 below) -- with k and the wheel phase j packed into
+//     one word (sparse_kj_) instead of stored separately, so this costs
+//     the same 8 bytes/prime as storing plain k did.
 //
-//     Four changes to this tier's *stepping math* were tried and
+//     Five changes to this tier's *stepping math* were tried and
 //     reverted as net regressions -- two predate splitting
 //     process_sparse_bucket (below) into its own noinline function (see
 //     that split's own commit): a shared-table scheme like
@@ -66,9 +67,9 @@
 //         thing that changed between N=1e12 (attempts 1-2) and N=1e13
 //         (attempt 3), given how much bigger the sparse population is at
 //         the natural cliff vs a forced-small-N proxy. Reverted.
-//       - attempt 4 (this one, kept -- dev PC, N=1e13, natural auto -s,
-//         same 72,036/227,647 sparse split as attempt 3): same
-//         division-free goal as attempt 3, but stores m instead of adding
+//       - attempt 4 (superseded by attempt 5 below -- dev PC, N=1e13,
+//         natural auto -s, same 72,036/227,647 sparse split as attempt 3):
+//         same division-free goal as attempt 3, but stores m instead of adding
 //         qp/pr fields, so there's no memory-footprint growth to fight the
 //         division's removal with -- wheel_index(p*m) (a multiply plus a
 //         compile-time-constant divide) replaces both the old
@@ -76,7 +77,31 @@
 //         attempt 3 needed. Clean same-session A/B via perf stat
 //         cycles:u: 41.39T vs 42.68T baseline, -3.0%; wall-clock 1011.38s
 //         vs 1094.00s, -7.55%; IPC 0.96->1.00; cache-miss rate flat
-//         (9.52%->9.63%, confirming no footprint growth this time). Kept.
+//         (9.52%->9.63%, confirming no footprint growth this time).
+//       - attempt 5 (dev PC session, same day): a division-by-p removal
+//         that fixes attempt 3's actual failure (memory footprint, not
+//         the division itself) directly, instead of attempt 4's
+//         alternative fix (wheel_index(p*m) instead of the shared-table
+//         step). qp=p/WHEEL_MOD and pr=p%WHEEL_MOD are recomputed from p
+//         per due-check rather than stored -- both are divisions by the
+//         *compile-time* constant WHEEL_MOD, a cheap multiply-shift, not
+//         the runtime-p division being removed -- and k+j are packed into
+//         one word (sparse_kj_) instead of two, so total per-prime memory
+//         stays exactly what attempt 4's plain k took. Measured two ways:
+//         a forced-heavy-sparse proxy (N=1e12, -s 500000, 84% sparse, the
+//         same trick used elsewhere in this file to test this tier
+//         cheaply) showed a clean win -- cycles:u 4.480T->4.112T (-8.2%),
+//         wall-clock 96.57s->89.06s (-7.8%), instructions:u down too (not
+//         just cycles), cache-miss rate 4.04%->3.48%. At the *natural*
+//         N=1e13 cliff (31.6% sparse, this tier only ~17% of total cycles
+//         per a perf profile taken this session) the same fix only moved
+//         wall-clock 898.63s->892.09s (-0.7%) -- small because the tier
+//         itself is still a minority of the work at this N, not because
+//         the fix doesn't hold up; instructions:u still dropped
+//         (42.819e9->42.293e9), confirming a real if modest effect here,
+//         expected to matter more as N grows past 1e13 and this tier's
+//         share of total cycles grows with it (see main.cpp's comment on
+//         the segment-width L2 cliff). Kept.
 //
 // Extraction (turning the finished bit array into actual prime values):
 // invert each word, decompose into (q, r) = (k / WHEEL_SIZE, k %
@@ -89,6 +114,16 @@
 
 #include "presieve.hpp"
 #include "wheel.hpp"
+
+// Bits needed to hold a wheel phase j (0..wheel_size-1) -- see
+// SegmentSieve::sparse_kj_ for what this packs it into. A free function
+// (not a class member) because a constexpr member can't be used to
+// initialize another static member of the same still-incomplete class.
+constexpr int compute_sparse_j_bits(int wheel_size) {
+    int bits = 0;
+    while ((1 << bits) < wheel_size) ++bits;
+    return bits;
+}
 
 class SegmentSieve {
 public:
@@ -139,7 +174,7 @@ public:
         dense_j_.clear();
         onfly_k_.clear();
         onfly_j_.clear();
-        sparse_m_.clear();
+        sparse_kj_.clear();
         sparse_next_.clear();
         std::fill(bucket_head_.begin(), bucket_head_.end(), NPOS);
     }
@@ -213,14 +248,19 @@ public:
             uint64_t r = m % WHEEL_MOD;
             uint64_t step = STEP_TO_COPRIME[r];
             m += step;
+            r += step;
+            if (r >= WHEEL_MOD) r -= WHEEL_MOD;
             uint64_t k = wheel_index(p * m);
+            uint64_t j = static_cast<uint64_t>(WHEEL_POS[r]);
 
-            // sparse_m_/sparse_next_ grow in lockstep with next_sparse_idx_
-            // (see the pool comment near their declaration), so this index
-            // is exactly where this prime's permanent slot lives. sparse_m_
-            // stores the multiplier m itself (not k) -- see
-            // process_sparse_bucket for why.
-            sparse_m_.push_back(m);
+            // sparse_kj_/sparse_next_ grow in lockstep with
+            // next_sparse_idx_ (see the pool comment near their
+            // declaration), so this index is exactly where this prime's
+            // permanent slot lives. sparse_kj_ packs k and the wheel phase
+            // j into one word (k << SPARSE_J_BITS | j) -- see
+            // process_sparse_bucket for the division-free stepping this
+            // enables at no extra memory cost.
+            sparse_kj_.push_back((k << SPARSE_J_BITS) | j);
             sparse_next_.push_back(NPOS);
             schedule_sparse(static_cast<uint32_t>(next_sparse_idx_), k, k_high);
             ++next_sparse_idx_;
@@ -366,10 +406,17 @@ public:
 private:
     static constexpr uint32_t NPOS = static_cast<uint32_t>(-1);
 
+    // Exact minimum bits for the active WHEEL_SIZE (3 for mod 30's 8, 9
+    // for mod 2310's 480), not a fixed guess, so the k budget this leaves
+    // (64 minus this) only ever shrinks as much as the active wheel
+    // actually needs.
+    static constexpr int SPARSE_J_BITS = compute_sparse_j_bits(WHEEL_SIZE);
+    static constexpr uint64_t SPARSE_J_MASK = (uint64_t{1} << SPARSE_J_BITS) - 1;
+
     // Processes exactly the sparse-tier entries due this segment: mark,
     // advance, reschedule into whichever future bucket the next hit lands
     // in. Each activated sparse prime owns exactly one permanent slot in
-    // sparse_m_/sparse_next_ for the rest of the chunk (see the pool
+    // sparse_kj_/sparse_next_ for the rest of the chunk (see the pool
     // comment near their declaration) -- "the bucket" is just that slot's
     // index appearing in this ring position's intrusive list, relinked
     // into a new position by schedule_sparse, never allocated or freed
@@ -405,33 +452,36 @@ private:
         bucket_head_[slot] = NPOS;
         while (idx != NPOS) {
             uint32_t next_idx = sparse_next_[idx]; // save: schedule_sparse below overwrites it
-            // Attempt 4 (see the tier's header comment for 1-3): stores the
-            // multiplier m itself across segments instead of k, so there's
-            // no division by p to recover it anymore -- k is derived from m
-            // via wheel_index (p*m, then a divide by the compile-time
-            // constant WHEEL_MOD, which the compiler turns into a
-            // multiply-shift) instead of the other way around. Same 8
-            // bytes/prime as the k it replaces -- no memory-footprint
-            // growth, unlike attempt 3's per-prime qp/pr fields.
+            // Attempt 5 (see the tier's header comment for 1-4): same
+            // division-free stepping as dense_onfly_ (qp*GAP_K[j] +
+            // ONFLY_CORRECTION[pr][j]), but qp/pr are recomputed from p
+            // here instead of stored -- p/WHEEL_MOD and p%WHEEL_MOD are
+            // divisions by the *compile-time* constant WHEEL_MOD (a cheap
+            // multiply-shift the compiler generates), not the runtime-p
+            // division attempt 4 already removed, so there's no real cost
+            // to redoing them per due-check instead of caching them.
+            // sparse_kj_ packs k and the phase j into one word -- same 8
+            // bytes/prime as attempt 4's plain k, avoiding attempt 3's
+            // actual failure mode (a 40-byte/prime total after adding a
+            // stored qp/pr struct *and* separate k/j/next arrays).
             uint64_t p = sparse_primes[idx];
-            uint64_t m = sparse_m_[idx];
-            uint64_t k = wheel_index(p * m);
+            uint64_t packed = sparse_kj_[idx];
+            uint64_t k = packed >> SPARSE_J_BITS;
+            uint32_t j = static_cast<uint32_t>(packed & SPARSE_J_MASK);
+            uint64_t qp = p / WHEEL_MOD;
+            uint32_t pr = static_cast<uint32_t>(WHEEL_POS[p % WHEEL_MOD]);
             while (k < k_high) {
                 uint64_t widx = k - k_low;
                 words_[widx >> 6] |= (1ULL << (widx & 63));
-                // m is already coprime with WHEEL_MOD (it's the
-                // multiplier of the hit just marked), so
-                // STEP_TO_COPRIME[m % WHEEL_MOD] alone is 0 -- that
-                // table answers "distance to the *nearest* coprime
-                // residue", which is where you already are. Step past
-                // it first so it finds the *next* one instead of
-                // stalling on this one forever.
-                ++m;
-                uint64_t step = STEP_TO_COPRIME[m % WHEEL_MOD];
-                m += step;
-                k = wheel_index(p * m);
+                k += qp * GAP_K[j] + ONFLY_CORRECTION[pr][j];
+                if constexpr (WHEEL_SIZE_IS_POW2) {
+                    j = (j + 1) & (WHEEL_SIZE - 1);
+                } else {
+                    ++j;
+                    if (j == WHEEL_SIZE) j = 0;
+                }
             }
-            sparse_m_[idx] = m;
+            sparse_kj_[idx] = (k << SPARSE_J_BITS) | j;
             schedule_sparse(idx, k, k_high);
             idx = next_idx;
         }
@@ -444,11 +494,11 @@ private:
     // corrupting results if the ring ever turns out too small for the
     // actual data (see constructor).
     //
-    // No allocation here, ever, after activation: idx's slot in sparse_m_/
+    // No allocation here, ever, after activation: idx's slot in sparse_kj_/
     // sparse_next_ already exists (see the pool comment near their
     // declaration) -- this just relinks it onto the target ring slot's
-    // list (sparse_m_[idx] is the caller's job to update first -- k here
-    // is only used to place the slot, never stored, since sparse_m_ is now
+    // list (sparse_kj_[idx] is the caller's job to update first -- k here
+    // is only used to place the slot, never stored, since sparse_kj_ is now
     // the persisted state -- see process_sparse_bucket). That's the actual
     // memory-pool win over a std::vector<Entry> per bucket: no per-bucket
     // heap allocation to begin with, and no reallocation on reschedule
@@ -480,15 +530,16 @@ private:
     std::vector<int> onfly_j_;
 
     // Sparse tier's bucket ring, as an intrusive linked list over a flat
-    // pool instead of one std::vector<Entry> per ring slot: sparse_m_/
+    // pool instead of one std::vector<Entry> per ring slot: sparse_kj_/
     // sparse_next_ grow in lockstep with next_sparse_idx_ as primes
-    // activate (mirroring dense_k_/onfly_k_ above), so sparse_m_[i] is
-    // always prime i's current multiplier m (see process_sparse_bucket's
-    // attempt-4 comment for why m, not k) and sparse_next_[i] chains it
-    // into whichever ring slot's list it's currently scheduled on.
+    // activate (mirroring dense_k_/onfly_k_ above), so sparse_kj_[i] is
+    // always prime i's current (k, wheel phase j) packed into one word
+    // (see process_sparse_bucket's attempt-5 comment) and sparse_next_[i]
+    // chains it into whichever ring slot's list it's currently scheduled
+    // on.
     // bucket_head_[slot] is that list's head index, or NPOS if empty. A
     // prime is relinked (schedule_sparse) every time it's processed, but
-    // its slot in sparse_m_/sparse_next_ is allocated exactly once, at
+    // its slot in sparse_kj_/sparse_next_ is allocated exactly once, at
     // activation -- no heap allocation on the hot path at all.
     //
     // An AoS layout (one {k, p, next} struct per prime, instead of these
@@ -502,11 +553,10 @@ private:
     // here still isn't understood; see main.cpp's comment on this tier.
     uint64_t num_buckets_ = 1;
     std::vector<uint32_t> bucket_head_;
-    // The multiplier m, not k -- see process_sparse_bucket's attempt-4
-    // comment for why storing this instead of k removes the division by p
-    // that used to be needed to recover it, at no memory cost (same 8
-    // bytes/prime either way).
-    std::vector<uint64_t> sparse_m_;
+    // k and the wheel phase j, packed into one word -- see
+    // process_sparse_bucket's attempt-5 comment for why, at no memory
+    // cost over storing plain k (same 8 bytes/prime either way).
+    std::vector<uint64_t> sparse_kj_;
     std::vector<uint32_t> sparse_next_;
     uint64_t cur_segment_ = 0;
 

@@ -38,10 +38,14 @@
 # count), SEGMENT (default: unset, i.e. the CLI's own auto -s), REPS
 # (default: 1, keeps the fastest of REPS runs per N in the CPU sweep --
 # there's real run-to-run noise on this kind of box, see BENCHMARK section
-# of the README/commit history), WRITE_PATH/KEEP_DB (see above; KEEP_DB=0
-# deletes each .db after measuring it -- useful if the disk doesn't have
-# room for the ~26 GB the I/O sweep accumulates otherwise, mostly the
-# N=1e12 row at ~23 GB).
+# of the README/commit history), WRITE_PATH/KEEP_DB (see above; KEEP_DB
+# defaults to 0 -- each .db is deleted right after it's measured, since
+# the ~26 GB the I/O sweep accumulates otherwise (mostly the N=1e12 row at
+# ~23 GB) isn't something to leave lying around by default. Set KEEP_DB=1
+# to keep them for inspection instead. A trap also cleans up the
+# in-progress file if the script is interrupted or errors out partway
+# (not on a hard SIGKILL, which can't be trapped -- see git history for
+# why that matters here).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -56,7 +60,19 @@ THREADS="${THREADS:-$(nproc)}"
 SEGMENT="${SEGMENT:-}"
 REPS="${REPS:-1}"
 WRITE_PATH="${WRITE_PATH:-$HOME/eratostenes-io-bench}"
-KEEP_DB="${KEEP_DB:-1}"
+KEEP_DB="${KEEP_DB:-0}"
+
+# Cleans up the .db currently being written if this script exits early
+# (error, Ctrl-C) instead of leaving a partial file behind -- set right
+# before each eratostenes -o call below, cleared right after it succeeds.
+# Empty when nothing is in flight, so a clean exit is a no-op here.
+CURRENT_IO_FILE=""
+cleanup_current_io_file() {
+    if [ "$KEEP_DB" = "0" ] && [ -n "$CURRENT_IO_FILE" ]; then
+        rm -f "$CURRENT_IO_FILE"
+    fi
+}
+trap cleanup_current_io_file EXIT
 
 echo "Reconstruyendo eratostenes..." >&2
 make re >/tmp/benchmark_build.log 2>&1 || { cat /tmp/benchmark_build.log >&2; exit 1; }
@@ -168,6 +184,7 @@ for i in "${!IO_SIZES[@]}"; do
     file="$WRITE_PATH/primes-$n.db"
 
     echo "== N=$n (limite $limit) ==" >&2
+    CURRENT_IO_FILE="$file"
     out=$("$BIN" "$n" -t "$THREADS" -s "${SEGMENT:-4194304}" -o "$file" 2>&1) || {
         echo "$out" >&2
         echo "eratostenes fallo para N=$n" >&2
@@ -203,6 +220,7 @@ for i in "${!IO_SIZES[@]}"; do
     if [ "$KEEP_DB" = "0" ]; then
         rm -f "$file"
     fi
+    CURRENT_IO_FILE=""
 done
 
 if [ "$fail" -ne 0 ]; then
