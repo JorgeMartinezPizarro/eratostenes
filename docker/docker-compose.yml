@@ -7,9 +7,8 @@ services:
     volumes:
       - ../output:/output
 
-  # Full toolchain (gcc + primesieve): runs `make test`/`verify-db`/
-  # `test-io`/`benchmark` inside the container, see Makefile's docker-*
-  # targets below.
+  # Full toolchain (gcc + primesieve): runs `make test`/`benchmark` inside
+  # the container, see Makefile's docker-* targets below.
   dev:
     build:
       context: ..

@@ -22,10 +22,10 @@ sudo apt-get install libsqlite3-dev libzstd-dev   # Debian/Ubuntu/WSL
 make            # release build: -O3 -march=native -flto, plus nth_prime
 make portable   # no -march=native, for a binary you'll copy to another machine
 make debug      # ASan/UBSan, for debugging
-make test       # checks pi(N) for N=1e8..1e11, plus known primes by
-                # position in a real .db (N=1e10, via nth_prime)
-make verify-db  # round-trips small N through .db output and checks it
-                # against the text output, position by position
+make test       # checks pi(N) for N=1e8..1e11, known primes by position
+                # in a real .db (N=1e10, via nth_prime), and round-trips
+                # smaller N through .db output checked against text output,
+                # position by position
 ```
 
 ## Docker
@@ -114,11 +114,11 @@ Writting primes to a `.db` file results in the following ratios per prime:
 
 `make test` checks pi(N) against the known value for N=1e8..1e11, plus a
 handful of known primes by position in a real `.db` built at N=1e10, read
-back with `nth_prime`. `make verify-db` checks the `.db` output mode
-against plain text output: matching pi(N), and every (or, past a few
-hundred thousand primes, a random sample of) position agreeing between the
-two. Output has also been checked to be byte-for-byte identical across
-thread counts, segment widths, and wheels for the same N.
+back with `nth_prime`. It also checks the `.db` output mode against plain
+text output: matching pi(N), and every (or, past a few hundred thousand
+primes, a random sample of) position agreeing between the two. Output has
+also been checked to be byte-for-byte identical across thread counts,
+segment widths, and wheels for the same N.
 
 ## WSL disk reclaim
 

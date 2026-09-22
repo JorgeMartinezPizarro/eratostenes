@@ -42,8 +42,8 @@ NTH_OBJ := $(OBJ_DIR_RELEASE)/nth_prime.o
 OUT_DIR := $(CURDIR)/output
 COMPOSE := docker compose -f docker/docker-compose.yml
 
-.PHONY: all portable debug clean fclean re docker run test verify-db test-io \
-        docker-dev docker-test docker-verify-db docker-test-io docker-benchmark
+.PHONY: all portable debug clean fclean re docker run test benchmark \
+        docker-dev docker-test docker-benchmark
 
 # --- release (default) ---
 all: $(BIN) $(NTH_BIN)
@@ -98,29 +98,21 @@ run:
 	$(COMPOSE) run --rm eratostenes $(ARGS)
 
 # Compara pi(N) contra el valor conocido para N=1e8..1e11 (--count-only,
-# sin E/S), y unos cuantos primos conocidos por posicion en un .db real de
-# N=1e10 via nth_prime. THREADS=N make test para fijar el numero de hilos.
+# sin E/S); un .db real en N=1e10 con primos conocidos por posicion via
+# nth_prime; y round-trip texto vs .db en N=1e5..1e7, posicion por posicion
+# (ver scripts/test.sh). THREADS=N make test para fijar el numero de hilos.
 test: $(BIN) $(NTH_BIN)
 	./scripts/test.sh
 
-# Round-trips small N through both text and .db output and checks the .db
-# (SQLite + zstd gap encoding) against the text baseline, position by
-# position (see scripts/verify_db.sh).
-verify-db: $(BIN) $(NTH_BIN)
-	./scripts/verify_db.sh
-
+# Dos barridos (ver scripts/benchmark.sh): 1) eratostenes vs primesieve en
+# CPU, N=1e10..1e13 -- la tabla de README.md#benchmarks; 2) E/S real,
+# construye un .db por cada N en 1e8..1e12 y mide tamano/bits-por-primo/
+# throughput/tiempo. THREADS/SEGMENT/REPS/WRITE_PATH/KEEP_DB se pueden
+# pasar como variables de entorno (ver el propio script). WRITE_PATH debe
+# apuntar al filesystem nativo de Linux (no a un /mnt/c... montado, mucho
+# mas lento) -- default: $HOME/eratostenes-io-bench.
 benchmark:
 	./scripts/benchmark.sh
-
-# Barrido de E/S real: construye un .db por cada N en 1k..1t y muestra una
-# tabla con tamano de fichero, bytes/bits por primo y los tiempos de
-# escritura/total que reporta el propio binario (ver scripts/test_io.sh).
-# WRITE_PATH/THREADS/SEGMENT/KEEP_DB se pueden pasar como variables de
-# entorno. WRITE_PATH debe apuntar al filesystem nativo de Linux (no a un
-# /mnt/c... montado, mucho mas lento) -- default: $HOME/eratostenes-io-bench.
-# P.ej. KEEP_DB=0 make test-io para no conservar los .db tras medir.
-test-io: $(BIN)
-	./scripts/test_io.sh
 
 # --- run the same targets inside Docker (see docker/Dockerfile's `dev`
 # stage: gcc + libsqlite3-dev + libzstd-dev + primesieve). Each rebuilds
@@ -128,18 +120,12 @@ test-io: $(BIN)
 # container's own CPU, so these work the same regardless of what's
 # installed/compiled on the host. THREADS/SEGMENT/WRITE_PATH/KEEP_DB/REPS
 # are forwarded from the host environment when set, same as running the
-# scripts directly (e.g. THREADS=8 make docker-test-io).
+# scripts directly (e.g. THREADS=8 make docker-benchmark).
 docker-dev:
 	$(COMPOSE) build dev
 
 docker-test: docker-dev
 	$(COMPOSE) run --rm -e THREADS dev make test
 
-docker-verify-db: docker-dev
-	$(COMPOSE) run --rm -e THREADS dev make verify-db
-
-docker-test-io: docker-dev
-	$(COMPOSE) run --rm -e THREADS -e SEGMENT -e WRITE_PATH -e KEEP_DB dev make test-io
-
 docker-benchmark: docker-dev
-	$(COMPOSE) run --rm -e THREADS -e SEGMENT -e REPS dev make benchmark
+	$(COMPOSE) run --rm -e THREADS -e SEGMENT -e REPS -e WRITE_PATH -e KEEP_DB dev make benchmark

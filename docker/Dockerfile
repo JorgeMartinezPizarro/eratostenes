@@ -11,8 +11,8 @@ COPY Makefile ./
 COPY src ./src
 RUN make portable nth_prime
 
-# dev: full toolchain image for `make test`/`verify-db`/`test-io`/`benchmark`
-# inside Docker (see the `dev` service in docker-compose.yml). Those targets
+# dev: full toolchain image for `make test`/`benchmark` inside Docker (see
+# the `dev` service in docker-compose.yml). Those targets
 # compile from source themselves (release build, -march=native against the
 # container's own CPU) rather than just running prebuilt binaries, so this
 # stage keeps gcc/make instead of shipping only the runtime image below.
