@@ -272,6 +272,23 @@ inline Options parse_args(int argc, char** argv) {
 
         opt.segment_width = std::min(sqrt_based, l2_based_width);
     }
+
+    // Untested idea (dev PC session, N=1e13): primesieve itself targets L1
+    // (historically ~32-48KiB) for its sieve size, not L2 -- we've only
+    // measured the *other* direction from here (full L2, no /2 halving:
+    // -3.8% at 1e13, see segment_sieve.hpp's header comment), never
+    // something this much smaller. Not run this session because it isn't a
+    // clean isolated test: seg_k_width here does double duty as both the
+    // marking array's size *and* the dense/sparse cutoff (see
+    // segment_sieve.hpp), so targeting L1 (roughly 10x smaller than the
+    // current L2/2 default on this machine) would also push far more base
+    // primes into the sparse tier at the same time -- any result would
+    // conflate "smaller array, better residency" with "different tier
+    // mix," not isolate the former. A clean test needs those two roles
+    // decoupled first: a physical L1-sized sieve pass *inside* each
+    // logical (tier-classification) segment, closer to how primesieve
+    // actually splits EratSmall from EratMedium/EratBig -- a real
+    // restructuring, not a one-line change.
     if (opt.segment_width < 64) opt.segment_width = 64;
     if (opt.segment_width % 2 != 0) opt.segment_width += 1; // must be even
 
