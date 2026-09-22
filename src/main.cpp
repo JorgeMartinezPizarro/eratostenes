@@ -41,6 +41,8 @@
 #include <string>
 #include <thread>
 #include <atomic>
+#include <condition_variable>
+#include <mutex>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -100,24 +102,32 @@ const std::string SMALL_PRIMES_TEXT = build_small_primes_text();
 const uint64_t SMALL_PRIMES_BYTES = SMALL_PRIMES_TEXT.size();
 const uint64_t SMALL_PRIMES_COUNT = WHEEL_PRIMES.size();
 
+// L1-sized slice the small dense tier is crossed off in (SegmentSieve);
+// set once in main() from the detected L1d size.
+static uint64_t SUB_BLOCK_BYTES = 32 * 1024;
+
 struct ChunkRange {
     uint64_t low;   // first wheel index of the chunk (inclusive)
     uint64_t high;  // upper bound in wheel index (exclusive)
 };
 
 // Splits the wheel indices into 'threads' chunks as evenly as possible.
-// k=1 is the first useful index (k=0 would be n=1, which isn't prime);
+// k=0 is the number 1 (not prime; SegmentSieve clears it itself);
 // k_end_exclusive is wheel_count_upto(limit), the first index whose number
 // exceeds limit.
 static std::vector<ChunkRange> split_ranges(uint64_t limit, unsigned threads) {
     std::vector<ChunkRange> ranges;
-    uint64_t k_start = 1;
+    // Starts at k=0 (the number 1, cleared by SegmentSieve itself) rather
+    // than k=1, and every chunk boundary is a multiple of 64: the
+    // byte-addressed dense tiers (erat_small.hpp) need each segment to
+    // start on a word boundary.
+    uint64_t k_start = 0;
     uint64_t k_end = wheel_count_upto(limit);
     if (k_end <= k_start) return ranges;
 
     uint64_t total = k_end - k_start;
     uint64_t per_thread = (total + threads - 1) / threads;
-    if (per_thread == 0) per_thread = 1;
+    per_thread = (per_thread + 63) / 64 * 64;
 
     uint64_t cursor = k_start;
     uint64_t remaining = total;
@@ -137,46 +147,46 @@ static std::vector<ChunkRange> split_ranges(uint64_t limit, unsigned threads) {
 // writing) -- they only differ in which Writer they pass in.
 template <typename Writer>
 static void sieve_chunk(ChunkRange range, uint64_t seg_k_width, uint64_t base_prime_max,
-                         const std::vector<WheelBasePrime>& wheel_base_primes,
-                         const std::vector<OnFlyPrime>& dense_onfly_primes,
+                         const std::vector<uint64_t>& small_primes,
+                         const std::vector<uint64_t>& medium_primes,
                          const std::vector<uint64_t>& sparse_primes,
                          const Presieve& presieve,
                          Writer& out, uint64_t& local_count,
                          std::atomic<uint64_t>& progress) {
-    SegmentSieve sieve(seg_k_width, base_prime_max, presieve);
+    SegmentSieve sieve(seg_k_width, base_prime_max, presieve, SUB_BLOCK_BYTES);
     sieve.begin_chunk();
     for (uint64_t k_low = range.low; k_low < range.high; k_low += seg_k_width) {
         uint64_t k_high = std::min(k_low + seg_k_width, range.high);
-        sieve.sieve_and_emit(k_low, k_high, wheel_base_primes, dense_onfly_primes, sparse_primes, out, local_count);
+        sieve.sieve_and_emit(k_low, k_high, small_primes, medium_primes, sparse_primes, out, local_count);
         progress.fetch_add(k_high - k_low, std::memory_order_relaxed);
     }
 }
 
 // Count-only pass: no I/O, no byte accounting, just the prime count.
 static void count_only_worker(ChunkRange range, uint64_t seg_k_width, uint64_t base_prime_max,
-                               const std::vector<WheelBasePrime>& wheel_base_primes,
-                               const std::vector<OnFlyPrime>& dense_onfly_primes,
+                               const std::vector<uint64_t>& small_primes,
+                               const std::vector<uint64_t>& medium_primes,
                                const std::vector<uint64_t>& sparse_primes,
                                const Presieve& presieve,
                                uint64_t& out_count, std::atomic<uint64_t>& progress) {
     NullSink sink;
     uint64_t local_count = 0;
-    sieve_chunk(range, seg_k_width, base_prime_max, wheel_base_primes, dense_onfly_primes, sparse_primes, presieve, sink, local_count, progress);
+    sieve_chunk(range, seg_k_width, base_prime_max, small_primes, medium_primes, sparse_primes, presieve, sink, local_count, progress);
     out_count = local_count;
 }
 
 // Byte-counting pass: no disk I/O, just measures how many text bytes each
 // thread's primes will take.
 static void count_worker(ChunkRange range, uint64_t seg_k_width, uint64_t base_prime_max,
-                          const std::vector<WheelBasePrime>& wheel_base_primes,
-                          const std::vector<OnFlyPrime>& dense_onfly_primes,
+                          const std::vector<uint64_t>& small_primes,
+                          const std::vector<uint64_t>& medium_primes,
                           const std::vector<uint64_t>& sparse_primes,
                           const Presieve& presieve,
                           uint64_t& out_bytes, uint64_t& out_count,
                           std::atomic<uint64_t>& progress) {
     ByteCounter counter;
     uint64_t local_count = 0;
-    sieve_chunk(range, seg_k_width, base_prime_max, wheel_base_primes, dense_onfly_primes, sparse_primes, presieve, counter, local_count, progress);
+    sieve_chunk(range, seg_k_width, base_prime_max, small_primes, medium_primes, sparse_primes, presieve, counter, local_count, progress);
     out_bytes = counter.total_bytes;
     out_count = local_count;
 }
@@ -184,8 +194,8 @@ static void count_worker(ChunkRange range, uint64_t seg_k_width, uint64_t base_p
 // Write pass: re-sieves the same chunk and writes with pwrite() directly
 // into its (disjoint) region of the final file.
 static void emit_worker(int idx, ChunkRange range, uint64_t seg_k_width, uint64_t base_prime_max,
-                         const std::vector<WheelBasePrime>& wheel_base_primes,
-                         const std::vector<OnFlyPrime>& dense_onfly_primes,
+                         const std::vector<uint64_t>& small_primes,
+                         const std::vector<uint64_t>& medium_primes,
                          const std::vector<uint64_t>& sparse_primes,
                          const Presieve& presieve,
                          int fd, uint64_t base_offset,
@@ -197,7 +207,7 @@ static void emit_worker(int idx, ChunkRange range, uint64_t seg_k_width, uint64_
         out.write_raw(SMALL_PRIMES_TEXT.data(), SMALL_PRIMES_BYTES);
     }
 
-    sieve_chunk(range, seg_k_width, base_prime_max, wheel_base_primes, dense_onfly_primes, sparse_primes, presieve, out, local_count, progress);
+    sieve_chunk(range, seg_k_width, base_prime_max, small_primes, medium_primes, sparse_primes, presieve, out, local_count, progress);
     out.flush();
 }
 
@@ -208,8 +218,8 @@ static void emit_worker(int idx, ChunkRange range, uint64_t seg_k_width, uint64_
 // since blocks carry their own start_index and SQLite doesn't care what
 // order rows are inserted in.
 static void emit_db_worker(int idx, ChunkRange range, uint64_t seg_k_width, uint64_t base_prime_max,
-                            const std::vector<WheelBasePrime>& wheel_base_primes,
-                            const std::vector<OnFlyPrime>& dense_onfly_primes,
+                            const std::vector<uint64_t>& small_primes,
+                            const std::vector<uint64_t>& medium_primes,
                             const std::vector<uint64_t>& sparse_primes,
                             const Presieve& presieve,
                             SqlitePrimeStore& store, uint64_t start_index,
@@ -223,15 +233,26 @@ static void emit_db_worker(int idx, ChunkRange range, uint64_t seg_k_width, uint
         for (uint64_t p : WHEEL_PRIMES) sink.write_uint64(p);
     }
 
-    sieve_chunk(range, seg_k_width, base_prime_max, wheel_base_primes, dense_onfly_primes, sparse_primes, presieve, sink, local_count, progress);
+    sieve_chunk(range, seg_k_width, base_prime_max, small_primes, medium_primes, sparse_primes, presieve, sink, local_count, progress);
     sink.flush();
 }
+
+// Wakes the progress thread as soon as ProgressGuard sets `done`, instead
+// of it finishing out a 500ms sleep: with a plain sleep_for, joining it
+// delayed every pass's end by up to 500ms, which quantized the reported
+// "total:" time to the next 0.5s tick (1e8..1e10 all read 0.51s). Only one
+// progress thread is ever alive at a time, so one shared pair is enough.
+static std::mutex g_progress_mu;
+static std::condition_variable g_progress_cv;
 
 static void print_progress(const Colors& C, const char* label, std::atomic<uint64_t>& progress,
                             uint64_t total, std::atomic<bool>& done) {
     using namespace std::chrono_literals;
     while (!done.load()) {
-        std::this_thread::sleep_for(500ms);
+        {
+            std::unique_lock<std::mutex> lk(g_progress_mu);
+            g_progress_cv.wait_for(lk, 500ms, [&] { return done.load(); });
+        }
         if (done.load()) break;
         uint64_t d = progress.load(std::memory_order_relaxed);
         double pct = total ? std::min(100.0, 100.0 * d / total) : 100.0;
@@ -248,7 +269,16 @@ static void print_progress(const Colors& C, const char* label, std::atomic<uint6
 struct ProgressGuard {
     std::atomic<bool>& done;
     std::thread& th;
-    ~ProgressGuard() { done = true; th.join(); }
+    ~ProgressGuard() {
+        {
+            // Under the mutex, so the store can't land between the
+            // waiter's predicate check and its going to sleep.
+            std::lock_guard<std::mutex> lk(g_progress_mu);
+            done = true;
+        }
+        g_progress_cv.notify_all();
+        th.join();
+    }
 };
 
 // Spawns 'workers' OS threads that dynamically pull chunk indices in
@@ -352,8 +382,26 @@ int main(int argc, char** argv) {
 
     // --segment-width is a numeric width (so the option keeps meaning the
     // same thing to the user); it's converted to a width in wheel indices
-    // (WHEEL_SIZE useful numbers out of every WHEEL_MOD).
-    uint64_t seg_k_width = std::max<uint64_t>(64, opt.segment_width * WHEEL_SIZE / WHEEL_MOD);
+    // (WHEEL_SIZE useful numbers out of every WHEEL_MOD), rounded down to
+    // whole 64-bit words: the byte-addressed dense tiers (erat_small.hpp)
+    // need every segment to start on a word boundary.
+    uint64_t seg_k_width = std::max<uint64_t>(64, (opt.segment_width * WHEEL_SIZE / WHEEL_MOD) / 64 * 64);
+
+    // The small tier is crossed off one L1-sized sub-block at a time (see
+    // SegmentSieve::sieve_and_emit), so the sub-block is the machine's real
+    // L1 data cache (detected, like L2 for -s), and a prime counts as small
+    // when it has >= ~16 hits per sub-block (p < sub-block bytes / 2; each
+    // p-byte cycle holds 8 hits). Measured on an i5-11400F (48KiB L1d),
+    // cycles:u at N=1e12 vs the old table/onfly tiers: 2414G ->
+    // 1730G (32KiB), 1693G (48KiB), 1798G (64KiB), 1935G (128KiB), 1931G
+    // (512KiB, i.e. no sub-blocking); cutoff at /4 and /1 both lost to /2
+    // at every size -- a lower cutoff leaves too many hits on the slower
+    // medium loop, a higher one pays the unrolled loop's unpredictable
+    // entry/exit on primes with too few hits to amortize it.
+    uint64_t l1_bytes = opt.l1_bytes_override ? opt.l1_bytes_override : detect_l1d_cache_bytes();
+    if (l1_bytes == 0) l1_bytes = 32 * 1024;
+    SUB_BLOCK_BYTES = std::max<uint64_t>(8, l1_bytes / 8 * 8);
+    uint64_t small_limit = SUB_BLOCK_BYTES / 2;
 
     // Primes also covered by the pre-sieve pattern (see presieve.hpp) are
     // skipped here: they're never scheduled as active markers, their
@@ -362,85 +410,27 @@ int main(int argc, char** argv) {
     // themselves composite either way, so they survive extraction exactly
     // as before.
     //
-    // The rest split into three tiers by expected hits per segment (see
-    // segment_sieve.hpp and wheel.hpp/wheel_delta_at for the reasoning):
-    //   - wheel_base_primes (p < seg_k_width, up to TABLE_PRIME_BUDGET of
-    //     them): keeps a per-phase delta[] table. Reusing a cache-resident
-    //     table entry beats recomputing on every hit, but only as long as
-    //     the *whole* table stays cache-resident -- so this tier is capped
-    //     by total table BYTES, not by a prime value or a hit-count
-    //     estimate: base_primes is already sorted ascending, so taking the
-    //     first TABLE_PRIME_BUDGET dense primes (by count) is exactly "the
-    //     table never exceeds TABLE_BYTES_BUDGET," which is what actually
-    //     determines whether a table lookup or recomputing wins -- and
-    //     which primes end up in this tier at any given N falls out of
-    //     that count on its own, no threshold on p needed.
-    //   - dense_onfly_primes (remaining p < seg_k_width): no per-prime
-    //     table -- each phase's advance comes from a tiny SHARED table
-    //     instead (ONFLY_CORRECTION, wheel.hpp), so this tier's per-hit
-    //     cost stays cheap (one multiply, one lookup, one add) no matter
-    //     how many primes end up here; this is the tier whose per-prime
-    //     table, summed across all its primes, used to stop fitting L3
-    //     before that table was dropped in favor of the shared one.
-    //   - sparse_primes (p >= seg_k_width): at most ~1 hit/segment, plain
-    //     uint64_t, recovers an absolute multiplier from k (unchanged --
-    //     see segment_sieve.hpp for the two stepping-math changes tried
-    //     and reverted here, and process_sparse_bucket for the one that
-    //     actually helped -- register allocation, not the math). Once the
-    //     auto segment width gets L2-capped below sqrt(N), a growing
-    //     fraction of base primes land here instead of dense_onfly_primes
-    //     above -- the real driver of the 1e13 cliff (README#benchmarks).
-    //
-    // TABLE_BYTES_BUDGET scales with the machine's real L3 (detected, not
-    // guessed -- see detect_l3_cache_bytes in arg_parser.hpp): a fixed
-    // small budget (this used to be a flat 2MiB) looked fine up to ~1e12,
-    // where the *count* of dense primes past the budget was still small
-    // enough that the extra per-hit cost of onfly/sparse barely showed --
-    // but at 1e13+, pi(sqrt(N)) grows well past what 2MiB covers regardless
-    // of machine, so a fixed budget makes every machine behave like the
-    // smallest-L3 one: it's not that a bigger budget never helps, it's
-    // that N wasn't large enough yet to need one. Half of L3 leaves room
-    // for onfly/sparse's own (much smaller) per-prime arrays, presieve,
-    // and whatever else shares L3 (other threads' segment buffers, if
-    // -s wasn't capped small enough to stay in L2 -- see the auto -s
-    // default). Falls back to a conservative 4MiB if L3 can't be detected
-    // -- or use --l3-bytes if that fallback is wrong for this machine
-    // (e.g. a container that can't see the host's real /sys/.../cache;
-    // silently landing on 4MiB there costs real speed with no warning,
-    // see the Options field comment in arg_parser.hpp).
-    const char* l3_source = opt.l3_bytes_override ? "--l3-bytes" : "auto-detectado";
-    uint64_t l3_bytes = opt.l3_bytes_override ? opt.l3_bytes_override : detect_l3_cache_bytes();
-    if (l3_bytes == 0) {
-        l3_bytes = 4 * 1024 * 1024;
-        l3_source = "fallback, auto-deteccion fallo";
-    }
-    size_t TABLE_BYTES_BUDGET = static_cast<size_t>(l3_bytes / 2);
-    size_t TABLE_PRIME_BUDGET = TABLE_BYTES_BUDGET / sizeof(WheelBasePrime);
+    // The rest split into three tiers by expected hits (see
+    // segment_sieve.hpp / erat_small.hpp):
+    //   - small_primes (p < small_limit): many hits per L1 sub-block,
+    //     crossed off one sub-block at a time so the marks land in L1.
+    //   - medium_primes (small_limit <= p < seg_k_width): a few hits per
+    //     segment, one pass over the whole segment each.
+    //   - sparse_primes (p >= seg_k_width): at most ~1 hit/segment, bucket
+    //     ring (see process_sparse_bucket).
     std::vector<uint64_t> presieve_primes_flat;
     for (const auto& group : PRESIEVE_GROUPS)
         presieve_primes_flat.insert(presieve_primes_flat.end(), group.begin(), group.end());
 
-    std::vector<WheelBasePrime> wheel_base_primes;
-    std::vector<OnFlyPrime> dense_onfly_primes;
+    std::vector<uint64_t> small_primes;
+    std::vector<uint64_t> medium_primes;
     std::vector<uint64_t> sparse_primes;
-    wheel_base_primes.reserve(std::min(base_primes.size(), TABLE_PRIME_BUDGET));
     for (uint64_t p : base_primes) {
         if (p < FIRST_WHEEL_PRIME) continue;
         if (std::find(presieve_primes_flat.begin(), presieve_primes_flat.end(), p) != presieve_primes_flat.end()) continue;
         if (p < seg_k_width) {
-            if (wheel_base_primes.size() < TABLE_PRIME_BUDGET) {
-                wheel_base_primes.push_back({p, compute_wheel_deltas(p)});
-            } else {
-                dense_onfly_primes.push_back({p, p / WHEEL_MOD, static_cast<uint32_t>(WHEEL_POS[p % WHEEL_MOD])});
-            }
+            (p < small_limit ? small_primes : medium_primes).push_back(p);
         } else {
-            // Tried giving this tier the same OnFlyPrime shape as
-            // dense_onfly above (qp/pr, division-free stepping) -- reverted
-            // as a measured regression, see the "attempt 3" comment on
-            // SegmentSieve's sparse tier in segment_sieve.hpp: the fatter
-            // per-prime struct (24 bytes vs plain uint64_t's 8) cost more
-            // in cache pressure, on this tier's pseudo-random bucket-ring
-            // access pattern, than the division it removed was worth.
             sparse_primes.push_back(p);
         }
     }
@@ -458,16 +448,15 @@ int main(int argc, char** argv) {
 
     Presieve presieve = build_presieve(PRESIEVE_GROUPS, seg_k_width);
 
-    std::fprintf(stderr, "L3 usado para presupuesto de tabla: %.1f MiB (%s)\n",
-                 l3_bytes / 1024.0 / 1024.0, l3_source);
     std::fprintf(stderr, "Iniciando %u hilos, limite=%llu, segmento=%llu, rueda mod %llu (%zu primos), "
-                 "%zu primos base densos (tabla), %zu densos (recalculo), %zu dispersos...\n",
+                 "%zu primos base pequenos (sub-bloque %llu KiB), %zu medianos, %zu dispersos...\n",
                  actual_threads,
                  static_cast<unsigned long long>(opt.limit),
                  static_cast<unsigned long long>(opt.segment_width),
                  static_cast<unsigned long long>(WHEEL_MOD),
                  WHEEL_PRIMES.size(),
-                 wheel_base_primes.size(), dense_onfly_primes.size(), sparse_primes.size());
+                 small_primes.size(), static_cast<unsigned long long>(SUB_BLOCK_BYTES / 1024),
+                 medium_primes.size(), sparse_primes.size());
 
     // Every pass below runs worker threads that can throw (pwrite() on a
     // full disk, or the bucket-sieve sizing check) -- see run_parallel_chunks
@@ -486,8 +475,8 @@ int main(int argc, char** argv) {
                 ProgressGuard guard{done, prog};
 
                 run_parallel_chunks(actual_threads, num_chunks, [&](unsigned i) {
-                    count_only_worker(ranges[i], seg_k_width, base_limit, wheel_base_primes,
-                                       dense_onfly_primes, sparse_primes, presieve, prime_counts[i], progress);
+                    count_only_worker(ranges[i], seg_k_width, base_limit, small_primes,
+                                       medium_primes, sparse_primes, presieve, prime_counts[i], progress);
                 });
             } // guard destructs here: progress thread joined before the summary prints below
 
@@ -521,8 +510,8 @@ int main(int argc, char** argv) {
                 ProgressGuard guard{done, prog};
 
                 run_parallel_chunks(actual_threads, num_chunks, [&](unsigned i) {
-                    count_only_worker(ranges[i], seg_k_width, base_limit, wheel_base_primes,
-                                       dense_onfly_primes, sparse_primes, presieve, prime_counts[i], progress);
+                    count_only_worker(ranges[i], seg_k_width, base_limit, small_primes,
+                                       medium_primes, sparse_primes, presieve, prime_counts[i], progress);
                 });
             }
 
@@ -545,7 +534,7 @@ int main(int argc, char** argv) {
 
                 run_parallel_chunks(actual_threads, num_chunks, [&](unsigned i) {
                     emit_db_worker(static_cast<int>(i), ranges[i], seg_k_width, base_limit,
-                                    wheel_base_primes, dense_onfly_primes, sparse_primes, presieve,
+                                    small_primes, medium_primes, sparse_primes, presieve,
                                     store, prime_offset[i], opt.db_block_size, opt.zstd_level, progress);
                 });
             }
@@ -586,8 +575,8 @@ int main(int argc, char** argv) {
             ProgressGuard guard{done, prog};
 
             run_parallel_chunks(actual_threads, num_chunks, [&](unsigned i) {
-                count_worker(ranges[i], seg_k_width, base_limit, wheel_base_primes,
-                             dense_onfly_primes, sparse_primes, presieve, byte_counts[i], prime_counts[i], progress);
+                count_worker(ranges[i], seg_k_width, base_limit, small_primes,
+                             medium_primes, sparse_primes, presieve, byte_counts[i], prime_counts[i], progress);
             });
         }
 
@@ -624,7 +613,7 @@ int main(int argc, char** argv) {
             try {
                 run_parallel_chunks(actual_threads, num_chunks, [&](unsigned i) {
                     emit_worker(static_cast<int>(i), ranges[i], seg_k_width, base_limit,
-                                wheel_base_primes, dense_onfly_primes, sparse_primes, presieve, fd, offsets[i], progress);
+                                small_primes, medium_primes, sparse_primes, presieve, fd, offsets[i], progress);
                 });
             } catch (...) {
                 ::close(fd);

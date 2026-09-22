@@ -17,17 +17,15 @@
 #include "base_sieve.hpp"
 #include "wheel.hpp"
 
-// Best-effort cache size (bytes) for a given level (2 = L2, 3 = L3), Linux
+// Best-effort cache size (bytes) for a given level (1 = L1 data, 2 = L2), Linux
 // sysfs (also visible inside a Docker container, since containers share
 // the host kernel's /sys). Returns 0 on any failure (non-Linux, sysfs
 // unavailable, unexpected format) -- callers must fall back to a sane
 // default rather than divide by it directly. Scans
 // /sys/devices/system/cpu/cpu0/cache/index*/ for the matching "level" file
-// (index numbering isn't standardized -- e.g. index2 is L2 and index3 is
-// L3 on this project's own dev machine, but that's not guaranteed
-// elsewhere). L3's "size" here is the cache's real total size (shared
-// across every core), not divided per-thread -- no adjustment needed for
-// that, unlike how a per-thread *budget* out of it might get divided.
+// (index numbering isn't standardized -- e.g. index0 is L1d and index2 is
+// L2 on this project's own dev machine, but that's not guaranteed
+// elsewhere).
 inline uint64_t detect_cache_bytes(int target_level) {
     for (int idx = 0; idx < 8; ++idx) {
         std::string base = "/sys/devices/system/cpu/cpu0/cache/index" + std::to_string(idx);
@@ -36,6 +34,10 @@ inline uint64_t detect_cache_bytes(int target_level) {
         int level = 0;
         level_f >> level;
         if (level != target_level) continue;
+        // L1 is split into Data and Instruction entries; only data counts.
+        std::ifstream type_f(base + "/type");
+        std::string type;
+        if (type_f >> type && type == "Instruction") continue;
 
         std::ifstream size_f(base + "/size");
         std::string size_str;
@@ -59,7 +61,7 @@ inline uint64_t detect_cache_bytes(int target_level) {
     return 0;
 }
 inline uint64_t detect_l2_cache_bytes() { return detect_cache_bytes(2); }
-inline uint64_t detect_l3_cache_bytes() { return detect_cache_bytes(3); }
+inline uint64_t detect_l1d_cache_bytes() { return detect_cache_bytes(1); }
 
 struct Options {
     uint64_t limit = 0;                 // N: sieve up to N (inclusive)
@@ -87,7 +89,7 @@ struct Options {
                                           // so higher levels mostly buy
                                           // slower builds, not smaller files
 
-    // Manual overrides for detect_l2_cache_bytes()/detect_l3_cache_bytes()
+    // Manual overrides for detect_l2_cache_bytes()/detect_l1d_cache_bytes()
     // (this file, below): 0 means "keep auto-detecting". Auto-detection
     // reads /sys/devices/system/cpu/cpu0/cache/index*/ and isn't
     // guaranteed everywhere -- a container runtime, an unusual kernel, or
@@ -97,9 +99,10 @@ struct Options {
     // real speed on a bigger machine without saying so anywhere. These
     // flags are the escape hatch when that happens: safe to try because
     // neither touches anything on the per-segment hot path, only how
-    // TABLE_PRIME_BUDGET/the auto -s width get sized once at startup.
+    // the auto -s width and the small tier's L1 sub-block get sized once
+    // at startup.
     uint64_t l2_bytes_override = 0;
-    uint64_t l3_bytes_override = 0;
+    uint64_t l1_bytes_override = 0;
 };
 
 // Interprets suffixes: k=1e3 m=1e6 b=1e9 (short scale billion) t=1e12
@@ -171,8 +174,9 @@ inline void print_usage(const char* prog) {
         "                         de segmento automatico (default: auto-\n"
         "                         detectado via /sys; usar si la deteccion\n"
         "                         falla, p.ej. dentro de un contenedor)\n"
-        "      --l3-bytes N       Fuerza el tamano de L3 usado para\n"
-        "                         TABLE_PRIME_BUDGET (mismo caso que --l2-bytes)\n"
+        "      --l1-bytes N       Fuerza el tamano de L1 (datos) usado para el\n"
+        "                         sub-bloque de primos pequenos (mismo caso\n"
+        "                         que --l2-bytes)\n"
         "  -h, --help             Muestra esta ayuda\n"
         "\n"
         "La rueda (que primos se descartan de entrada) se fija en tiempo de\n"
@@ -214,8 +218,8 @@ inline Options parse_args(int argc, char** argv) {
             opt.zstd_level = std::stoi(need_value(i, a.c_str()));
         } else if (a == "--l2-bytes") {
             opt.l2_bytes_override = parse_size(need_value(i, a.c_str()));
-        } else if (a == "--l3-bytes") {
-            opt.l3_bytes_override = parse_size(need_value(i, a.c_str()));
+        } else if (a == "--l1-bytes") {
+            opt.l1_bytes_override = parse_size(need_value(i, a.c_str()));
         } else if (!a.empty() && a[0] != '-' && !has_limit) {
             // Bare positional limit (./eratostenes 1t -c), primesieve-style
             // -- the only way to give it; there's no -n/--limit flag (one
@@ -273,22 +277,11 @@ inline Options parse_args(int argc, char** argv) {
         opt.segment_width = std::min(sqrt_based, l2_based_width);
     }
 
-    // Untested idea (dev PC session, N=1e13): primesieve itself targets L1
-    // (historically ~32-48KiB) for its sieve size, not L2 -- we've only
-    // measured the *other* direction from here (full L2, no /2 halving:
-    // -3.8% at 1e13, see segment_sieve.hpp's header comment), never
-    // something this much smaller. Not run this session because it isn't a
-    // clean isolated test: seg_k_width here does double duty as both the
-    // marking array's size *and* the dense/sparse cutoff (see
-    // segment_sieve.hpp), so targeting L1 (roughly 10x smaller than the
-    // current L2/2 default on this machine) would also push far more base
-    // primes into the sparse tier at the same time -- any result would
-    // conflate "smaller array, better residency" with "different tier
-    // mix," not isolate the former. A clean test needs those two roles
-    // decoupled first: a physical L1-sized sieve pass *inside* each
-    // logical (tier-classification) segment, closer to how primesieve
-    // actually splits EratSmall from EratMedium/EratBig -- a real
-    // restructuring, not a one-line change.
+    // The segment stays L2-sized (it is also the medium/sparse tier
+    // cutoff); L1 residency for the small primes -- the bulk of all marks
+    // -- comes from crossing them off one L1d-sized sub-block of the
+    // segment at a time instead (see main.cpp's SUB_BLOCK_BYTES and
+    // SegmentSieve::sieve_and_emit), which keeps those two roles decoupled.
     if (opt.segment_width < 64) opt.segment_width = 64;
     if (opt.segment_width % 2 != 0) opt.segment_width += 1; // must be even
 

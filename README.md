@@ -84,7 +84,7 @@ What this project is built from, one term each — follow the link for the conce
 - [Wheel factorization](https://en.wikipedia.org/wiki/Wheel_factorization)
 - [Bucket sieve](https://en.wikipedia.org/wiki/Bucket_queue)
 - [Memory pool](https://en.wikipedia.org/wiki/Memory_pool) (the bucket sieve's ring: an intrusive linked list over a preallocated flat array, no per-segment heap allocation)
-- [CPU cache](https://en.wikipedia.org/wiki/CPU_cache) (segment width and the table/on-the-fly prime-tier cutoff are both auto-tuned from the machine's real, detected L2/L3 size, not a fixed guess -- see `--l2-bytes`/`--l3-bytes` for when detection itself can't be trusted, e.g. inside a container)
+- [CPU cache](https://en.wikipedia.org/wiki/CPU_cache) (segment width and the small-prime L1 sub-block are both auto-tuned from the machine's real, detected L2/L1d size, not a fixed guess -- see `--l2-bytes`/`--l1-bytes` for when detection itself can't be trusted, e.g. inside a container)
 - [Load balancing (computing)](https://en.wikipedia.org/wiki/Load_balancing_(computing)) (many more chunks than threads, pulled from a shared queue, since work per chunk isn't uniform across the range -- see `run_parallel_chunks`)
 - [Random access](https://en.wikipedia.org/wiki/Random_access) (`pwrite()` into disjoint, precomputed regions of a pre-sized file lets every thread write its own share of the output in parallel with no locking and no merge step)
 - [Delta encoding](https://en.wikipedia.org/wiki/Delta_encoding) (gaps between consecutive primes, for `.db`)

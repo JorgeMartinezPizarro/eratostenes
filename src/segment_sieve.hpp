@@ -2,37 +2,40 @@
 // Segmented sieve on a compile-time wheel (see wheel.hpp), bit-packed into
 // uint64_t words.
 //
-// Two scheduling strategies, chosen per prime tier by expected hits per
-// segment (see SMALL_PRIME_LIMIT/TABLE_BYTES_BUDGET in main.cpp for the
-// actual cutoffs) -- this mirrors primesieve's own split (EratSmall/
-// EratMedium vs EratBig): a prime p's average gap between hits, in
-// wheel-index terms, is ~p (each wheel-coprime multiplier step advances
-// the value by ~p*WHEEL_MOD/WHEEL_SIZE, which converts back to a k-gap of
-// ~p).
+// Three prime tiers, chosen by expected hits (see main.cpp for the actual
+// cutoffs) -- this mirrors primesieve's own split (EratSmall / EratMedium /
+// EratBig): a prime p's average gap between hits, in wheel-index terms, is
+// ~p (each wheel-coprime multiplier step advances the value by
+// ~p*WHEEL_MOD/WHEEL_SIZE, which converts back to a k-gap of ~p).
 //
-//   - wheel_base_primes and dense_onfly_primes (p < segment width, so
-//     >=1 hit/segment on average): FLAT, no bucket. Each activated prime's
-//     (k, j) state lives in a plain parallel array (dense_k_/dense_j_,
-//     onfly_k_/onfly_j_) and is walked *every* segment, updating that same
-//     slot in place -- there is never a segment these primes "skip", so a
-//     bucket's whole reason to exist (letting a segment's processing touch
-//     only the primes actually due) buys nothing here, and previously cost
-//     a schedule() call (bounds check + vector push_back) every segment
-//     for no benefit. wheel_base_primes tracks phase j into a per-prime
-//     delta[] table (wheel.hpp) -- cheap reuse, and few enough of these
-//     primes that the table stays tiny (see TABLE_BYTES_BUDGET). Once a
-//     prime needs recomputing the same phase's advance on the fly instead,
-//     it reads it from ONFLY_CORRECTION (wheel.hpp) -- a small table
-//     *shared* across every such prime (one multiply by the prime's own
-//     qp=p/WHEEL_MOD, one lookup, one add; no division by p, no per-prime
-//     memory cost either).
+//   - small_primes (p < L1d/2 bytes, >= ~16 hits per L1-sized sub-block):
+//     FLAT, crossed off one L1-sized sub-block at a time (presieve fill
+//     first, then every small prime), so the marks -- ~80%+ of all of them
+//     -- land in L1 instead of the L2-sized segment. Uses erat_small.hpp's
+//     unrolled 8-hits-per-cycle loop with compile-time bit masks, one list
+//     per residue class p % 30 (small_[pr]) so the class dispatch isn't an
+//     unpredictable branch per prime.
+//   - medium_primes (up to the segment width, so >= ~1 hit/segment): FLAT,
+//     one pass over the whole segment, generic one-hit-per-iteration
+//     stepping via ONFLY_CORRECTION (wheel.hpp: one multiply by qp=p/30,
+//     one shared-table lookup, one add). The unrolled loop was measured
+//     slower here: with only a few hits per segment it can't amortize its
+//     unpredictable entry/exit (see erat_small.hpp::cross_off_medium).
+//     Both flat tiers keep 8 bytes/prime of state (erat::DenseState),
+//     walked every segment in place -- there is never a segment these
+//     primes "skip", so a bucket would buy nothing.
+//
+//     These two tiers replaced (dev PC, i5-11400F, cycles:u) a per-prime
+//     delta[] table tier (40 bytes/prime, capped by an L3/2 budget) plus
+//     the ONFLY_CORRECTION loop for everything past that budget, both on
+//     the whole L2-sized segment: -26% at N=1e11, -30% at N=1e12.
 //   - sparse_primes (p >= segment width, at most ~1 hit/segment): BUCKET.
 //     This is where a bucket earns its keep -- most segments have nothing
 //     to do for most of these primes, so scheduling each one into the
 //     future segment where its next hit actually falls (a fixed-size
 //     ring, buckets_) means a segment's processing only ever looks at the
 //     (few) sparse primes actually due, not all of them. Steps forward the
-//     same qp*GAP_K[j] + ONFLY_CORRECTION[pr][j] way dense_onfly_ does --
+//     same qp*GAP_K[j] + ONFLY_CORRECTION[pr][j] way the medium tier does --
 //     no division by the runtime value p anywhere in this tier anymore
 //     (see attempt 5 below) -- with k and the wheel phase j packed into
 //     one word (sparse_kj_) instead of stored separately, so this costs
@@ -112,6 +115,7 @@
 #include <algorithm>
 #include <stdexcept>
 
+#include "erat_small.hpp"
 #include "presieve.hpp"
 #include "wheel.hpp"
 
@@ -136,11 +140,27 @@ public:
     // it.
     // presieve: shared, read-only pre-sieve pattern (see presieve.hpp) used
     // to fill each segment instead of zeroing it; its primes must already
-    // be excluded from wheel_base_primes by the caller.
-    SegmentSieve(uint64_t seg_k_width, uint64_t base_prime_max, const Presieve& presieve)
+    // be excluded from small/medium/sparse primes by the caller.
+    // sub_block_bytes: L1-sized slice the small tier (and presieve fill)
+    // is run over, one slice at a time -- see sieve_and_emit.
+    SegmentSieve(uint64_t seg_k_width, uint64_t base_prime_max, const Presieve& presieve,
+                 uint64_t sub_block_bytes)
         : words_((seg_k_width + 63) / 64, 0),
           seg_k_width_(seg_k_width),
+          sub_block_bytes_(sub_block_bytes),
           presieve_(presieve) {
+        // The byte-addressed dense tiers (erat_small.hpp) need every
+        // segment to start on a byte (k multiple of 8) and to stay a whole
+        // number of words; callers align chunk starts to 64 too.
+        if (seg_k_width % 64 != 0 || sub_block_bytes % 8 != 0 || sub_block_bytes == 0) {
+            throw std::runtime_error("SegmentSieve: ancho de segmento/sub-bloque no alineado");
+        }
+        // Dense primes are p < seg_k_width, so their pending hit stays
+        // within a few segment widths of the segment start (fits
+        // DenseState::pos), and p / 30 has to fit its packed qp field.
+        if (seg_k_width / WHEEL_MOD >= erat::QP_LIMIT || seg_k_width >= (uint64_t{1} << 30)) {
+            throw std::runtime_error("SegmentSieve: segmento demasiado grande para el estado denso empaquetado");
+        }
         uint64_t max_gap = 0;
         for (uint64_t g : WHEEL_GAP) max_gap = std::max(max_gap, g);
         // Upper bound on a sparse prime's k-gap between hits: floor_term*
@@ -167,13 +187,11 @@ public:
     // across threads or out of order.
     void begin_chunk() {
         cur_segment_ = 0;
-        next_prime_idx_ = 0;
-        next_onfly_idx_ = 0;
+        next_small_idx_ = 0;
+        next_medium_idx_ = 0;
         next_sparse_idx_ = 0;
-        dense_k_.clear();
-        dense_j_.clear();
-        onfly_k_.clear();
-        onfly_j_.clear();
+        for (auto& v : small_) v.clear();
+        medium_.clear();
         sparse_kj_.clear();
         sparse_next_.clear();
         std::fill(bucket_head_.begin(), bucket_head_.end(), NPOS);
@@ -181,15 +199,15 @@ public:
 
     template <typename Writer>
     void sieve_and_emit(uint64_t k_low, uint64_t k_high,
-                         const std::vector<WheelBasePrime>& wheel_base_primes,
-                         const std::vector<OnFlyPrime>& dense_onfly_primes,
+                         const std::vector<uint64_t>& small_primes,
+                         const std::vector<uint64_t>& medium_primes,
                          const std::vector<uint64_t>& sparse_primes,
                          Writer& out, uint64_t& prime_count) {
         uint64_t count = (k_high > k_low) ? (k_high - k_low) : 0;
         if (count == 0) return;
 
         size_t words_needed = (count + 63) / 64;
-        presieve_.fill(words_.data(), k_low, count);
+        uint64_t bytes_needed = (count + 7) / 8;
 
         uint64_t high_n = wheel_number(k_high); // exclusive numeric bound, valid for the p*p cutoff
         uint64_t low_n = wheel_number(k_low);
@@ -199,45 +217,8 @@ public:
         // monotonically-advancing pointer, so every prime is visited here
         // exactly once for the whole chunk, not once per segment.
         //
-        // Dense/onfly activation appends to dense_k_/dense_j_ (or
-        // onfly_k_/onfly_j_) in lockstep with next_prime_idx_/
-        // next_onfly_idx_, so dense_k_[i] is always primeN's state, no
-        // separate index needed -- see the flat loops below.
-        while (next_prime_idx_ < wheel_base_primes.size()) {
-            uint64_t p = wheel_base_primes[next_prime_idx_].p;
-            if (p * p >= high_n) break;
-
-            // Find the smallest m coprime with WHEEL_MOD such that
-            // p*m >= max(p*p, low_n): the prime's first relevant multiple.
-            uint64_t start_val = std::max(p * p, low_n);
-            uint64_t m = (start_val + p - 1) / p;
-            uint64_t r = m % WHEEL_MOD;
-            uint64_t step = STEP_TO_COPRIME[r];
-            m += step;
-            r += step;
-            if (r >= WHEEL_MOD) r -= WHEEL_MOD;
-
-            dense_k_.push_back(wheel_index(p * m));
-            dense_j_.push_back(WHEEL_POS[r]);
-            ++next_prime_idx_;
-        }
-
-        while (next_onfly_idx_ < dense_onfly_primes.size()) {
-            uint64_t p = dense_onfly_primes[next_onfly_idx_].p;
-            if (p * p >= high_n) break;
-
-            uint64_t start_val = std::max(p * p, low_n);
-            uint64_t m = (start_val + p - 1) / p;
-            uint64_t r = m % WHEEL_MOD;
-            uint64_t step = STEP_TO_COPRIME[r];
-            m += step;
-            r += step;
-            if (r >= WHEEL_MOD) r -= WHEEL_MOD;
-
-            onfly_k_.push_back(wheel_index(p * m));
-            onfly_j_.push_back(WHEEL_POS[r]);
-            ++next_onfly_idx_;
-        }
+        activate_dense(small_primes, next_small_idx_, small_, true, high_n, low_n, k_low);
+        activate_dense(medium_primes, next_medium_idx_, &medium_, false, high_n, low_n, k_low);
 
         while (next_sparse_idx_ < sparse_primes.size()) {
             uint64_t p = sparse_primes[next_sparse_idx_];
@@ -266,88 +247,32 @@ public:
             ++next_sparse_idx_;
         }
 
-        // Flat tiers: every activated prime is due *every* segment (that's
-        // the whole point of not bucketing them -- see header comment), so
-        // just walk the full activated range and update each slot in place.
-        // No reschedule bookkeeping, no bucket indirection.
-        size_t dense_activated = dense_k_.size();
-        for (size_t i = 0; i < dense_activated; ++i) {
-            // Software prefetch a few entries ahead: wheel_base_primes[i]
-            // is walked strictly sequentially (good for the hardware
-            // prefetcher on its own), but each iteration's while-loop below
-            // runs a variable, data-dependent number of times before
-            // moving to i+1 -- that variability can starve the hardware
-            // prefetcher's lookahead. Explicit here since it's a genuinely
-            // different access pattern from the sparse tier's bucket-ring
-            // prefetch attempt (pointer-chasing, reverted -- see
-            // process_sparse_bucket's comment): this one is sequential and
-            // predictable, the case software prefetch is actually meant
-            // for.
-            //
-            // Kept (dev PC, N=1e13, natural auto -s, on top of the
-            // division-free sparse tier above): cache-miss rate dropped
-            // 9.63%->5.67%, and wall-clock 1011.38s->901.61s (-10.85%) --
-            // but cycles:u went slightly *up* (+3.2%), the opposite of
-            // what decided every other change on this tier. Reconciled by
-            // average frequency (cycles:u/task-clock): 3.478GHz->3.982GHz.
-            // Fewer memory stalls let the core sustain a higher clock, so
-            // more cycles executed in less wall-time isn't a contradiction
-            // here -- but it did produce a genuine false alarm before
-            // landing on this number: a same-session "confirmation" rerun
-            // launched immediately after the first (no idle gap) came back
-            // at 1273.77s/48.74T cycles, matching this project's own
-            // documented PL1/Tau back-to-back-long-runs trap (see git
-            // history) almost exactly, with instructions:u identical
-            // across every run (~42.819e9) confirming it was the same code
-            // under different power/thermal states, not a different
-            // execution path. Settled only after a real cooldown (wsl
-            // --shutdown, fresh boot, machine otherwise idle) reproduced
-            // the fast number twice. Reproduced a third time (898.63s,
-            // 5.72% miss rate) after an unrelated editing slip briefly
-            // deleted this very prefetch line while only touching the
-            // comment above it -- caught because the "no-prefetch" number
-            // that slip produced (892.06s) didn't fit either cluster
-            // (901s with, 1011s without), which is what flagged it as
-            // wrong rather than a third data point.
-            if (i + 4 < dense_activated) __builtin_prefetch(&wheel_base_primes[i + 4], 0, 1);
-            const auto& delta = wheel_base_primes[i].delta;
-            uint64_t k = dense_k_[i];
-            int j = dense_j_[i];
-            while (k < k_high) {
-                uint64_t idx = k - k_low;
-                words_[idx >> 6] |= (1ULL << (idx & 63));
-                k += delta[j];
-                if constexpr (WHEEL_SIZE_IS_POW2) {
-                    j = (j + 1) & (WHEEL_SIZE - 1); // branchless wraparound
-                } else {
-                    ++j;
-                    if (j == WHEEL_SIZE) j = 0;
-                }
-            }
-            dense_k_[i] = k;
-            dense_j_[i] = j;
+        // Small tier, one L1-sized sub-block at a time: presieve fill,
+        // then every small prime crossed off inside that sub-block while
+        // it's still L1-resident, instead of each prime sweeping the whole
+        // (L2-sized) segment. Pending hits stay relative to the segment's
+        // first byte until the last sub-block rebases them.
+        uint8_t* bytes = reinterpret_cast<uint8_t*>(words_.data());
+        for (uint64_t sb = 0; sb < bytes_needed; sb += sub_block_bytes_) {
+            uint64_t se = std::min(sb + sub_block_bytes_, bytes_needed);
+            uint64_t sb_bit = sb * 8;
+            presieve_.fill(words_.data() + sb / 8, k_low + sb_bit, std::min<uint64_t>(count - sb_bit, (se - sb) * 8));
+            uint64_t rebase = (se == bytes_needed) ? bytes_needed : 0;
+            erat::cross_off_class<0>(bytes, se, small_[0].data(), small_[0].data() + small_[0].size(), rebase);
+            erat::cross_off_class<1>(bytes, se, small_[1].data(), small_[1].data() + small_[1].size(), rebase);
+            erat::cross_off_class<2>(bytes, se, small_[2].data(), small_[2].data() + small_[2].size(), rebase);
+            erat::cross_off_class<3>(bytes, se, small_[3].data(), small_[3].data() + small_[3].size(), rebase);
+            erat::cross_off_class<4>(bytes, se, small_[4].data(), small_[4].data() + small_[4].size(), rebase);
+            erat::cross_off_class<5>(bytes, se, small_[5].data(), small_[5].data() + small_[5].size(), rebase);
+            erat::cross_off_class<6>(bytes, se, small_[6].data(), small_[6].data() + small_[6].size(), rebase);
+            erat::cross_off_class<7>(bytes, se, small_[7].data(), small_[7].data() + small_[7].size(), rebase);
         }
+        // Wheel index 0 is the number 1: not prime, and nothing marks it.
+        if (k_low == 0) words_[0] |= 1;
 
-        size_t onfly_activated = onfly_k_.size();
-        for (size_t i = 0; i < onfly_activated; ++i) {
-            uint64_t qp = dense_onfly_primes[i].qp;
-            uint32_t pr = dense_onfly_primes[i].pr;
-            uint64_t k = onfly_k_[i];
-            int j = onfly_j_[i];
-            while (k < k_high) {
-                uint64_t idx = k - k_low;
-                words_[idx >> 6] |= (1ULL << (idx & 63));
-                k += qp * GAP_K[j] + ONFLY_CORRECTION[pr][j];
-                if constexpr (WHEEL_SIZE_IS_POW2) {
-                    j = (j + 1) & (WHEEL_SIZE - 1);
-                } else {
-                    ++j;
-                    if (j == WHEEL_SIZE) j = 0;
-                }
-            }
-            onfly_k_[i] = k;
-            onfly_j_[i] = j;
-        }
+        // Medium tier: few hits per sub-block, so one pass over the whole
+        // segment each.
+        erat::cross_off_medium(words_.data(), count, medium_.data(), medium_.data() + medium_.size(), count);
 
         // Sparse tier: see process_sparse_bucket below (pulled out of this
         // function on purpose -- see its own comment). sparse_primes is
@@ -406,6 +331,37 @@ public:
 private:
     static constexpr uint32_t NPOS = static_cast<uint32_t>(-1);
 
+    // Activates (appends state for) every prime in `primes` from `next`
+    // on whose square falls below this segment's end; `primes` is sorted,
+    // so this touches each prime exactly once per chunk. by_class: the
+    // small tier -- byte positions, and one output list per residue class
+    // (state[pr]); otherwise bit positions, all into state[0].
+    static void activate_dense(const std::vector<uint64_t>& primes, size_t& next,
+                               std::vector<erat::DenseState>* state, bool by_class,
+                               uint64_t high_n, uint64_t low_n, uint64_t k_low) {
+        while (next < primes.size()) {
+            uint64_t p = primes[next];
+            if (p * p >= high_n) break;
+
+            // Smallest m coprime with WHEEL_MOD with p*m >= max(p*p, low_n).
+            uint64_t start_val = std::max(p * p, low_n);
+            uint64_t m = (start_val + p - 1) / p;
+            uint64_t r = m % WHEEL_MOD;
+            uint64_t step = STEP_TO_COPRIME[r];
+            m += step;
+            r += step;
+            if (r >= WHEEL_MOD) r -= WHEEL_MOD;
+
+            // Byte of p*m is (p*m)/30 (k = byte*8 + bit, see erat_small.hpp).
+            uint64_t pos = by_class ? (p * m) / WHEEL_MOD - k_low / 8 : wheel_index(p * m) - k_low;
+            uint64_t pr = static_cast<uint64_t>(WHEEL_POS[p % WHEEL_MOD]);
+            uint64_t j = static_cast<uint64_t>(WHEEL_POS[r]);
+            state[by_class ? pr : 0].push_back({static_cast<uint32_t>(((p / WHEEL_MOD) << 6) | (pr << 3) | j),
+                             static_cast<uint32_t>(pos)});
+            ++next;
+        }
+    }
+
     // Exact minimum bits for the active WHEEL_SIZE (3 for mod 30's 8, 9
     // for mod 2310's 480), not a fixed guess, so the k budget this leaves
     // (64 minus this) only ever shrinks as much as the active wheel
@@ -453,7 +409,7 @@ private:
         while (idx != NPOS) {
             uint32_t next_idx = sparse_next_[idx]; // save: schedule_sparse below overwrites it
             // Attempt 5 (see the tier's header comment for 1-4): same
-            // division-free stepping as dense_onfly_ (qp*GAP_K[j] +
+            // division-free stepping as the medium tier (qp*GAP_K[j] +
             // ONFLY_CORRECTION[pr][j]), but qp/pr are recomputed from p
             // here instead of stored -- p/WHEEL_MOD and p%WHEEL_MOD are
             // divisions by the *compile-time* constant WHEEL_MOD (a cheap
@@ -518,21 +474,19 @@ private:
 
     std::vector<uint64_t> words_;
     uint64_t seg_k_width_;
+    uint64_t sub_block_bytes_;
     const Presieve& presieve_;
 
-    // Flat tiers' per-prime state, indexed in lockstep with
-    // wheel_base_primes/dense_onfly_primes as they activate (see
-    // sieve_and_emit's activation loops) -- no bucket, walked every
-    // segment.
-    std::vector<uint64_t> dense_k_;
-    std::vector<int> dense_j_;
-    std::vector<uint64_t> onfly_k_;
-    std::vector<int> onfly_j_;
+    // Dense tiers' per-prime state (erat_small.hpp), in lockstep with
+    // small_primes/medium_primes as they activate -- no bucket, walked
+    // every segment (small: every sub-block).
+    std::vector<erat::DenseState> small_[8]; // one list per residue class p % 30
+    std::vector<erat::DenseState> medium_;
 
     // Sparse tier's bucket ring, as an intrusive linked list over a flat
     // pool instead of one std::vector<Entry> per ring slot: sparse_kj_/
     // sparse_next_ grow in lockstep with next_sparse_idx_ as primes
-    // activate (mirroring dense_k_/onfly_k_ above), so sparse_kj_[i] is
+    // activate (mirroring small_/medium_ above), so sparse_kj_[i] is
     // always prime i's current (k, wheel phase j) packed into one word
     // (see process_sparse_bucket's attempt-5 comment) and sparse_next_[i]
     // chains it into whichever ring slot's list it's currently scheduled
@@ -560,7 +514,7 @@ private:
     std::vector<uint32_t> sparse_next_;
     uint64_t cur_segment_ = 0;
 
-    size_t next_prime_idx_ = 0;
-    size_t next_onfly_idx_ = 0;
+    size_t next_small_idx_ = 0;
+    size_t next_medium_idx_ = 0;
     size_t next_sparse_idx_ = 0;
 };

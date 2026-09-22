@@ -7,7 +7,7 @@
 // can't do for a runtime value.
 //
 // Bigger wheels remove more candidates per number checked, but the
-// per-prime jump table (see WheelBasePrime below) needed to do that grows
+// per-prime jump tables needed to do that grow
 // faster than the benefit: adding prime p multiplies the table by (p-1)
 // but only cuts marking work by (p-1)/p. Past a certain size that table
 // stops fitting the CPU's L3 cache and the sieve becomes
@@ -23,6 +23,12 @@
 //
 // The array size (the std::array<uint64_t, N> template argument) must
 // match the number of primes listed.
+//
+// NOTE: the small-prime tier (erat_small.hpp) relies on the mod-30 byte
+// layout (one byte = 30 numbers) for its compile-time bit masks and
+// static_asserts WHEEL_MOD == 30; the other configs below no longer build
+// without deriving an equivalent for them. mod 30 was already the measured
+// best (README#benchmarks).
 
 #include <cstdint>
 #include <array>
@@ -169,28 +175,11 @@ inline uint64_t wheel_count_upto(uint64_t limit) {
     return q * WHEEL_SIZE + partial;
 }
 
-// Same math as the delta[] table below: the wheel-index advance when a
-// multiplier of p moves from phase jj to phase jj+1 (n grows by
-// p*WHEEL_GAP[jj]). p_mod is p % WHEEL_MOD, precomputed once per prime
-// (invariant across every hit, so there's no reason to redo that division
-// per hit) rather than derived here.
-//
-// Reading this from a per-prime delta[] table (below) is cheap *if* the
-// prime is reused often enough per segment to amortize the table's own
-// memory cost -- but a prime just below the dense/sparse cutoff hits at
-// most ~once per segment, so it never gets that reuse, and there can be
-// hundreds of thousands of such primes: their tables, summed, are the
-// single biggest piece of read-only state every thread walks through per
-// segment, and can run into the tens of megabytes -- more than this
-// project's target CPUs' L3 (see README's L3-cliff section). This function
-// recomputes the same value instead: a handful of ALU ops and loads from
-// WHEEL_R/WHEEL_GAP/WHEEL_POS (each at most WHEEL_MOD entries, always
-// cache-resident) rather than one load from a table that might not be.
-// primesieve's medium/big-prime tiers make the same trade (see
-// EratMedium/EratBig in its source) for exactly this reason. It only pays
-// off where reuse is low, though -- see OnFlyPrime and SMALL_PRIME_LIMIT
-// in main.cpp for where SegmentSieve actually switches between this and
-// the table.
+// The wheel-index advance when a multiplier of p moves from phase jj to
+// phase jj+1 (n grows by p*WHEEL_GAP[jj]); p_mod is p % WHEEL_MOD. Only
+// used to build presieve tables (compute_wheel_deltas) and as the
+// derivation behind ONFLY_CORRECTION below -- the hot loops use
+// erat_small.hpp (small primes) or ONFLY_CORRECTION (medium/sparse).
 inline uint64_t wheel_delta_at(uint64_t p, uint64_t p_mod, int jj) {
     uint64_t rp = (p_mod * WHEEL_R[jj]) % WHEEL_MOD;
     uint64_t d = p * WHEEL_GAP[jj];
@@ -204,18 +193,8 @@ inline uint64_t wheel_delta_at(uint64_t p, uint64_t p_mod, int jj) {
     return static_cast<uint64_t>(signed_delta);
 }
 
-// A base prime (p >= FIRST_WHEEL_PRIME, i.e. not one of the wheel's own
-// primes) with p mod WHEEL_MOD precomputed (see wheel_delta_at): the
-// "many hits per segment" tier below SMALL_PRIME_LIMIT (main.cpp), where
-// the delta[] table's reuse pays for its own memory cost, but its own
-// prime count is small by construction, so the table stays tiny.
-struct WheelBasePrime {
-    uint64_t p;
-    std::array<uint32_t, WHEEL_SIZE> delta;
-};
-
 // Shared (residue class of p mod WHEEL_MOD, phase j) correction table for
-// on-the-fly wheel stepping (OnFlyPrime below), replacing per-hit calls to
+// on-the-fly wheel stepping (medium and sparse tiers), replacing per-hit calls to
 // wheel_delta_at. Derivation: writing p = qp*WHEEL_MOD + p_mod (qp = p /
 // WHEEL_MOD), wheel_delta_at's own floor_term = floor((rp + p*WHEEL_GAP[j])
 // / WHEEL_MOD) splits as
@@ -239,7 +218,7 @@ struct WheelBasePrime {
 // WHEEL_POS lookups per hit like the old recompute-every-time version.
 // Measured ~3.25x faster for primes forced through this tier at N=1e11 on
 // an i5-11400F (README#benchmarks), because unlike a per-prime delta[]
-// table (WheelBasePrime above), this table's size never grows with how
+// table (the old dense tier's delta[]), this table's size never grows with how
 // many primes use it -- it stays L1-resident regardless of tier size, so
 // there's no memory-budget tradeoff being made here at all.
 // primesieve's own EratMedium/WheelFactorization does the same trick (a
@@ -275,16 +254,7 @@ inline std::array<uint32_t, WHEEL_SIZE> make_gap_k() {
 }
 inline const std::array<uint32_t, WHEEL_SIZE> GAP_K = make_gap_k();
 
-// The "few hits per segment" dense tier (SMALL_PRIME_LIMIT <= p <
-// seg_k_width, main.cpp): no per-prime table, ONFLY_CORRECTION (shared,
-// above) plus qp/pr drive each phase's advance instead. This is the tier
-// that used to carry the oversized table -- see WheelBasePrime above.
-struct OnFlyPrime {
-    uint64_t p;   // needed only at activation (p*p < high_n test, initial multiplier)
-    uint64_t qp;  // p / WHEEL_MOD -- the one per-hit multiply's operand
-    uint32_t pr;  // WHEEL_POS[p % WHEEL_MOD] -- index into ONFLY_CORRECTION
-};
-
+// Per-phase wheel-index advances for p (presieve table construction only).
 inline std::array<uint32_t, WHEEL_SIZE> compute_wheel_deltas(uint64_t p) {
     std::array<uint32_t, WHEEL_SIZE> delta{};
     uint64_t pmod = p % WHEEL_MOD;

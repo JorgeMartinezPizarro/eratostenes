@@ -12,4 +12,4 @@ Eratostenes works as a 5-step system, applied to get as efficient a sieve as pos
 
 5. Cache — a cross-cutting concern, not one more phase. Two parameters auto-tune to the real detected hardware (/sys/.../cache), not a fixed value:
 - Segment width ≤ half the detected L2, so each thread's working array fits in cache even while sharing L2 with its hyperthread sibling — measured that removing this cap makes things worse, not better.
-- Dense base-prime table budget ≤ half the detected L3, so that table (shared across threads) stays cache-resident.
+- Small-prime sub-block = the detected L1 data cache: the smallest base primes (p < L1d/2 bytes, ~80%+ of all marks) are crossed off one L1-sized slice of the segment at a time, with an unrolled 8-hits-per-cycle loop whose bit masks are compile-time constants (the mod-30 byte layout makes them so) → erat_small.hpp.
