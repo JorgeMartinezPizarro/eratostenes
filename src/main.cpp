@@ -10,23 +10,33 @@
 //      wheel.hpp -- is split into many more contiguous chunks than threads;
 //      threads pull chunks from a shared queue instead of owning one each
 //      (see run_parallel_chunks for why: work isn't uniform across chunks).
-//   3. COUNT PASS: each thread sieves its chunk and counts how many bytes
-//      of text its primes will take (writes nothing to disk). From those
-//      totals, prefix sums give the exact offset where each thread must
-//      start writing in the final file.
-//   4. The final file is resized to its exact, already-known size.
-//   5. WRITE PASS: each thread re-sieves its chunk (same work) and this
-//      time writes with pwrite() directly into its (disjoint) region of
-//      the final file, in parallel with every other thread.
+//   3. Text output (-o *.txt, the default) needs two passes, because
+//      pwrite() needs an exact byte OFFSET per thread up front:
+//        a. COUNT PASS: each thread sieves its chunk and counts how many
+//           bytes of text its primes will take (writes nothing to disk).
+//           Prefix sums over those totals give the exact offset where each
+//           thread must start writing in the final file.
+//        b. The final file is resized to its exact, already-known size.
+//        c. WRITE PASS: each thread re-sieves its chunk (same work) and
+//           this time writes with pwrite() directly into its (disjoint)
+//           region of the final file, in parallel with every other thread.
+//      This avoids the "write to temp files + merge" pattern, which
+//      doubles disk I/O (every output byte gets written twice). Here every
+//      byte of the final result is written exactly once; the extra cost is
+//      repeating the bit-marking phase (cheap, CPU/cache-bound) instead of
+//      repeating a disk-to-disk copy (expensive, I/O-bound).
+//   4. .db output (-o *.db) needs only ONE pass: blocks go through an
+//      async queue to a single writer thread (SqlitePrimeStore), not to a
+//      precomputed file offset, so there is nothing a second pass would
+//      need to have precomputed -- each chunk's real prime count (needed
+//      only for each block's start_index, itself just a metadata column
+//      used to find a block later, see nth_prime.cpp) falls out of this
+//      same pass for free. See gap_block_sink.hpp and
+//      SqlitePrimeStore::finish/fix_offsets for how start_index gets
+//      corrected from chunk-relative to global after the fact.
 //
-// This design avoids the "write to temp files + merge" pattern, which
-// doubles disk I/O (every output byte gets written twice). Here every byte
-// of the final result is written exactly once; the extra cost is repeating
-// the bit-marking phase (cheap, CPU/cache-bound) instead of repeating a
-// disk-to-disk copy (expensive, I/O-bound).
-//
-// --count-only skips the write pass (and the file) entirely: the count
-// pass alone already yields the total, so nothing else needs to run.
+// --count-only skips the write/emit pass (and the file) entirely: a single
+// pass (like .db's) already yields the total, so nothing else needs to run.
 //
 // The wheel's own primes (WHEEL_PRIMES) are special-cased in thread 0 --
 // they don't take part in the wheel numbering, so they're just emitted
@@ -85,7 +95,7 @@ static void write_tiny_db(const std::string& path, const std::vector<uint64_t>& 
         for (uint64_t p : primes) sink.write_uint64(p);
         sink.flush();
     }
-    store.finish(primes.size(), limit, WHEEL_MOD, block_size, zstd_level);
+    store.finish(primes.size(), limit, WHEEL_MOD, block_size, zstd_level, {});
 }
 
 // Text for the wheel's own primes (e.g. "2\n3\n5\n" for a mod-30 wheel),
@@ -211,21 +221,25 @@ static void emit_worker(int idx, ChunkRange range, uint64_t seg_k_width, uint64_
     out.flush();
 }
 
-// .db write pass: re-sieves the same chunk and feeds a GapBlockSink, which
+// .db pass: sieves the chunk once and feeds a GapBlockSink, which
 // gap-encodes/compresses in BLOCK_SIZE-prime blocks and pushes each one to
 // 'store' (thread-safe, see SqlitePrimeStore::push) as it completes -- no
-// disjoint-region bookkeeping needed here, unlike DirectWriter/pwrite,
-// since blocks carry their own start_index and SQLite doesn't care what
-// order rows are inserted in.
+// disjoint-region bookkeeping needed here, unlike DirectWriter/pwrite, and
+// (unlike before) no separate counting pre-pass either: the sink writes a
+// chunk-relative start_index (SqlitePrimeStore::finish fixes it up to the
+// true global offset afterwards, from out_count -- see main()'s
+// is_db_output block), and SQLite doesn't care what order rows are
+// inserted in either way.
 static void emit_db_worker(int idx, ChunkRange range, uint64_t seg_k_width, uint64_t base_prime_max,
                             const std::vector<uint64_t>& small_primes,
                             const std::vector<uint64_t>& medium_primes,
                             const std::vector<uint64_t>& sparse_primes,
                             const Presieve& presieve,
-                            SqlitePrimeStore& store, uint64_t start_index,
+                            SqlitePrimeStore& store,
                             uint64_t block_size, int zstd_level,
+                            uint64_t& out_count,
                             std::atomic<uint64_t>& progress) {
-    GapBlockSink sink(start_index, block_size, zstd_level,
+    GapBlockSink sink(static_cast<uint64_t>(idx), block_size, zstd_level,
                        [&store](PendingBlock b) { store.push(std::move(b)); });
     uint64_t local_count = 0;
 
@@ -235,6 +249,7 @@ static void emit_db_worker(int idx, ChunkRange range, uint64_t seg_k_width, uint
 
     sieve_chunk(range, seg_k_width, base_prime_max, small_primes, medium_primes, sparse_primes, presieve, sink, local_count, progress);
     sink.flush();
+    out_count = local_count;
 }
 
 // Wakes the progress thread as soon as ProgressGuard sets `done`, instead
@@ -499,32 +514,20 @@ int main(int argc, char** argv) {
         }
 
         if (is_db_output(opt.output)) {
-            // --- Pass 1: prime counting (NullSink -- cheaper than the text
-            // path's ByteCounter, since block sizing only needs how many
-            // primes each thread finds, not their text width) ---
+            // --- Single pass: sieve + gap-encode + zstd, streamed to one
+            // dedicated writer thread draining into SQLite (see
+            // SqlitePrimeStore). No separate counting pre-pass any more --
+            // out_count[i] (each chunk's real prime count) falls out of
+            // this same pass for free (emit_db_worker already tracks it
+            // via sieve_chunk's local_count); text-output mode still needs
+            // its own pre-pass because pwrite() requires exact byte offsets
+            // up front, but .db blocks carry their own (chunk-relative)
+            // start_index and go through an async queue, so nothing here
+            // needs to be known before the sieve runs -- see
+            // gap_block_sink.hpp and SqlitePrimeStore::finish/fix_offsets
+            // for how start_index gets corrected to its true global value
+            // afterwards, from these same counts.
             std::vector<uint64_t> prime_counts(num_chunks, 0);
-            {
-                std::atomic<uint64_t> progress{0};
-                std::atomic<bool> done{false};
-                std::thread prog(print_progress, std::cref(C), "contando", std::ref(progress), total_span, std::ref(done));
-                ProgressGuard guard{done, prog};
-
-                run_parallel_chunks(actual_threads, num_chunks, [&](unsigned i) {
-                    count_only_worker(ranges[i], seg_k_width, base_limit, small_primes,
-                                       medium_primes, sparse_primes, presieve, prime_counts[i], progress);
-                });
-            }
-
-            prime_counts[0] += SMALL_PRIMES_COUNT;
-
-            std::vector<uint64_t> prime_offset(num_chunks, 0);
-            for (unsigned i = 1; i < num_chunks; ++i) prime_offset[i] = prime_offset[i - 1] + prime_counts[i - 1];
-            uint64_t total_primes = prime_offset.back() + prime_counts.back();
-
-            auto t_count_done = std::chrono::steady_clock::now();
-
-            // --- Pass 2: parallel sieve + gap-encode + zstd, one dedicated
-            // writer thread draining into SQLite (see SqlitePrimeStore) ---
             SqlitePrimeStore store(opt.output);
             {
                 std::atomic<uint64_t> progress{0};
@@ -535,31 +538,31 @@ int main(int argc, char** argv) {
                 run_parallel_chunks(actual_threads, num_chunks, [&](unsigned i) {
                     emit_db_worker(static_cast<int>(i), ranges[i], seg_k_width, base_limit,
                                     small_primes, medium_primes, sparse_primes, presieve,
-                                    store, prime_offset[i], opt.db_block_size, opt.zstd_level, progress);
+                                    store, opt.db_block_size, opt.zstd_level, prime_counts[i], progress);
                 });
             }
-            store.finish(total_primes, opt.limit, WHEEL_MOD, opt.db_block_size, opt.zstd_level);
+
+            prime_counts[0] += SMALL_PRIMES_COUNT;
+
+            std::vector<uint64_t> chunk_offset(num_chunks, 0);
+            for (unsigned i = 1; i < num_chunks; ++i) chunk_offset[i] = chunk_offset[i - 1] + prime_counts[i - 1];
+            uint64_t total_primes = num_chunks ? chunk_offset.back() + prime_counts.back() : 0;
+
+            store.finish(total_primes, opt.limit, WHEEL_MOD, opt.db_block_size, opt.zstd_level, chunk_offset);
 
             auto t_end = std::chrono::steady_clock::now();
-            double count_s = std::chrono::duration<double>(t_count_done - t_start).count();
-            double write_s = std::chrono::duration<double>(t_end - t_count_done).count();
             double total_s = std::chrono::duration<double>(t_end - t_start).count();
-            double count_mprimes = count_s > 0 ? (total_primes / 1e6 / count_s) : 0.0;
             double total_mprimes = total_s > 0 ? (total_primes / 1e6 / total_s) : 0.0;
             uint64_t db_bytes = fs::file_size(opt.output);
             double bytes_per_prime = total_primes ? static_cast<double>(db_bytes) / total_primes : 0.0;
 
             std::fprintf(stderr,
                 "%sListo.%s %s%s%s primos encontrados hasta %s %s(%.2f GB, %.3f B/primo)%s.\n"
-                "  %sconteo:%s     %s%6.2fs%s  (%s%.1f M primos/s%s)\n"
-                "  %sescritura:%s  %s%6.2fs%s\n"
                 "  %stotal:%s      %s%6.2fs%s  (%s%.1f M primos/s%s)\n",
                 C.headline, C.reset,
                 C.bold, format_thousands(total_primes).c_str(), C.reset,
                 format_thousands(opt.limit).c_str(),
                 C.dim, db_bytes / 1e9, bytes_per_prime, C.reset,
-                C.label, C.reset, C.time, count_s, C.reset, C.rate, count_mprimes, C.reset,
-                C.label, C.reset, C.time, write_s, C.reset,
                 C.headline, C.reset, C.time, total_s, C.reset, C.headline, total_mprimes, C.reset);
 
             return 0;

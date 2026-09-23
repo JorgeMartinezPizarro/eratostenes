@@ -6,7 +6,12 @@
 // Lookup: find the block whose start_index is the largest one <= the
 // requested (0-based) index -- idx_blocks_start makes this an indexed
 // query, not a table scan -- then decompress just that one block and walk
-// its gap stream up to the requested position.
+// its gap stream up to the requested position. Metadata (blocks) and the
+// compressed payload (block_data) are separate tables joined by block_id;
+// see sqlite_prime_store.hpp for why (writer-side: a post-hoc start_index
+// correction needs to rewrite only small metadata rows, not every block's
+// compressed data too) -- from here it's just one more indexed join for
+// the one matching row, no real cost.
 
 #include <cstdint>
 #include <cstdio>
@@ -56,8 +61,9 @@ static std::string read_meta(sqlite3* db, const char* key) {
 static uint64_t lookup(sqlite3* db, uint64_t target_index) {
     sqlite3_stmt* stmt = nullptr;
     const char* sql =
-        "SELECT start_index, count, start_prime, data FROM blocks "
-        "WHERE start_index <= ?1 ORDER BY start_index DESC LIMIT 1;";
+        "SELECT b.start_index, b.count, b.start_prime, d.data "
+        "FROM blocks b JOIN block_data d ON d.block_id = b.block_id "
+        "WHERE b.start_index <= ?1 ORDER BY b.start_index DESC LIMIT 1;";
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
         throw std::runtime_error(std::string("sqlite: ") + sqlite3_errmsg(db));
     }

@@ -13,6 +13,18 @@
 // each chunk may come out shorter than block_size. That costs at most
 // (chunk count) short blocks total out of what's otherwise hundreds of
 // thousands -- negligible, and it avoids any cross-chunk coordination.
+//
+// start_index here is always CHUNK-RELATIVE (starts at 0), unlike before --
+// there is no separate counting pre-pass any more to hand this sink its
+// true global offset up front (see main.cpp's is_db_output block). Each
+// block instead carries chunk_id, and SqlitePrimeStore::finish() corrects
+// every block's start_index up to its real global value with a handful of
+// cheap UPDATEs (one per chunk, not per block) once every chunk's actual
+// prime count is known -- a count that now falls out of this same sieve
+// pass for free (sieve_chunk's local_count), instead of a second full
+// re-sieve whose only job was computing that count ahead of time. .db
+// blocks are looked up by an index on start_index (nth_prime.cpp), not by
+// insertion order, so this deferred fixup is invisible to any reader.
 
 #include <cstdint>
 #include <functional>
@@ -23,7 +35,8 @@
 #include "gap_encoding.hpp"
 
 struct PendingBlock {
-    uint64_t start_index;
+    uint64_t chunk_id;
+    uint64_t start_index; // chunk-relative until SqlitePrimeStore::finish() fixes it up
     uint64_t count;
     uint64_t start_prime;
     std::vector<uint8_t> compressed;
@@ -34,8 +47,8 @@ public:
     static constexpr bool WANTS_VALUES = true;
     using PushFn = std::function<void(PendingBlock)>;
 
-    GapBlockSink(uint64_t start_index, uint64_t block_size, int zstd_level, PushFn push)
-        : start_index_(start_index), block_size_(block_size), zstd_level_(zstd_level),
+    GapBlockSink(uint64_t chunk_id, uint64_t block_size, int zstd_level, PushFn push)
+        : chunk_id_(chunk_id), block_size_(block_size), zstd_level_(zstd_level),
           push_(std::move(push)) {
         raw_.reserve(block_size_ * 2); // gap bytes average well under 1/prime; generous headroom
         cbuf_.resize(ZSTD_compressBound(block_size_ * 5 + 16)); // worst case: every gap escapes (5 bytes)
@@ -68,6 +81,7 @@ private:
         if (ZSTD_isError(csize)) throw std::runtime_error("zstd compression failed");
 
         PendingBlock blk;
+        blk.chunk_id = chunk_id_;
         blk.start_index = start_index_;
         blk.count = count_in_block_;
         blk.start_prime = block_start_prime_;
@@ -79,7 +93,8 @@ private:
         raw_.clear();
     }
 
-    uint64_t start_index_;
+    uint64_t chunk_id_;
+    uint64_t start_index_ = 0;
     uint64_t block_size_;
     int zstd_level_;
     PushFn push_;

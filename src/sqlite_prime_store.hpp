@@ -5,6 +5,14 @@
 // batched transactions. This keeps SQLite's single-writer constraint off
 // the sieve/compress hot path -- that stays fully parallel across threads;
 // only the (cheap, already-compressed) insert step is serialized.
+//
+// No separate counting pre-pass feeds this any more (see gap_block_sink.hpp
+// and main.cpp's is_db_output block): every block arrives with a
+// chunk-relative start_index and its chunk_id, and finish() corrects
+// start_index up to the true global offset with one UPDATE per chunk
+// (fix_offsets, called from finish before the start_index index is built)
+// once every chunk's real prime count -- a byproduct of the single sieve
+// pass, not a second one -- is known.
 
 #include <condition_variable>
 #include <cstdint>
@@ -34,17 +42,34 @@ public:
         exec("PRAGMA journal_mode=WAL;");
         exec("PRAGMA synchronous=NORMAL;");
         exec("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);");
+        // Metadata (small, mutable -- start_index gets corrected after the
+        // fact, see fix_offsets) lives apart from the compressed payload
+        // (large, immutable, written once). SQLite stores every column of
+        // a row together in one B-tree cell, so an UPDATE touching even one
+        // small integer column would otherwise have to rewrite each row's
+        // BLOB too (measured: an UPDATE across ~62K rows/2.6GB of blobs at
+        // N=1e11 took ~12-17s, comparable to the sieve pass itself it was
+        // meant to be cheaper than) -- splitting them means fix_offsets
+        // only ever touches the tiny `blocks` rows.
         exec("CREATE TABLE blocks ("
              "  block_id    INTEGER PRIMARY KEY,"
+             "  chunk_id    INTEGER NOT NULL,"
              "  start_index INTEGER NOT NULL,"
              "  count       INTEGER NOT NULL,"
-             "  start_prime INTEGER NOT NULL,"
-             "  data        BLOB NOT NULL"
+             "  start_prime INTEGER NOT NULL"
+             ");");
+        exec("CREATE TABLE block_data ("
+             "  block_id INTEGER PRIMARY KEY,"
+             "  data     BLOB NOT NULL"
              ");");
         check(sqlite3_prepare_v2(db_,
-                  "INSERT INTO blocks (start_index, count, start_prime, data) VALUES (?,?,?,?);",
+                  "INSERT INTO blocks (chunk_id, start_index, count, start_prime) VALUES (?,?,?,?);",
                   -1, &insert_stmt_, nullptr),
               "prepare insert");
+        check(sqlite3_prepare_v2(db_,
+                  "INSERT INTO block_data (block_id, data) VALUES (?,?);",
+                  -1, &insert_data_stmt_, nullptr),
+              "prepare insert data");
 
         writer_ = std::thread([this] { writer_loop(); });
     }
@@ -65,6 +90,7 @@ public:
             writer_.join();
         }
         if (insert_stmt_) sqlite3_finalize(insert_stmt_);
+        if (insert_data_stmt_) sqlite3_finalize(insert_data_stmt_);
         if (db_) sqlite3_close(db_);
     }
 
@@ -83,11 +109,21 @@ public:
     }
 
     // Call once, after every sieve thread has joined. Drains the writer
-    // thread, builds the lookup index (cheaper after bulk insert than
-    // maintained incrementally), writes meta, and checkpoints WAL back into
-    // a single clean file (no -wal/-shm sidecars) fit for shipping/copying.
+    // thread, corrects every block's start_index from chunk-relative to
+    // global (see fix_offsets), builds the lookup index (cheaper after bulk
+    // insert/fixup than maintained incrementally), writes meta, and
+    // checkpoints WAL back into a single clean file (no -wal/-shm sidecars)
+    // fit for shipping/copying.
+    //
+    // chunk_offset[i]: how many primes precede chunk i globally (a prefix
+    // sum over each chunk's real count, computed by the caller once every
+    // chunk has finished sieving -- see main.cpp's is_db_output block).
+    // chunk_offset[0] is always 0 by construction. Empty is fine (e.g.
+    // write_tiny_db's single implicit chunk 0, already at the right
+    // offset) -- fix_offsets then has nothing to correct.
     void finish(uint64_t total_primes, uint64_t limit, uint64_t wheel_mod,
-                uint64_t block_size, int zstd_level) {
+                uint64_t block_size, int zstd_level,
+                const std::vector<uint64_t>& chunk_offset) {
         {
             std::lock_guard<std::mutex> lk(mu_);
             done_ = true;
@@ -99,6 +135,10 @@ public:
 
         sqlite3_finalize(insert_stmt_);
         insert_stmt_ = nullptr;
+        sqlite3_finalize(insert_data_stmt_);
+        insert_data_stmt_ = nullptr;
+
+        fix_offsets(chunk_offset);
 
         exec("CREATE INDEX idx_blocks_start ON blocks(start_index);");
 
@@ -169,18 +209,62 @@ private:
 
     void insert_block(const PendingBlock& blk) {
         sqlite3_reset(insert_stmt_);
-        sqlite3_bind_int64(insert_stmt_, 1, static_cast<sqlite3_int64>(blk.start_index));
-        sqlite3_bind_int64(insert_stmt_, 2, static_cast<sqlite3_int64>(blk.count));
-        sqlite3_bind_int64(insert_stmt_, 3, static_cast<sqlite3_int64>(blk.start_prime));
-        sqlite3_bind_blob(insert_stmt_, 4, blk.compressed.data(),
-                           static_cast<int>(blk.compressed.size()), SQLITE_TRANSIENT);
+        sqlite3_bind_int64(insert_stmt_, 1, static_cast<sqlite3_int64>(blk.chunk_id));
+        sqlite3_bind_int64(insert_stmt_, 2, static_cast<sqlite3_int64>(blk.start_index));
+        sqlite3_bind_int64(insert_stmt_, 3, static_cast<sqlite3_int64>(blk.count));
+        sqlite3_bind_int64(insert_stmt_, 4, static_cast<sqlite3_int64>(blk.start_prime));
         if (sqlite3_step(insert_stmt_) != SQLITE_DONE) {
             throw std::runtime_error(std::string("sqlite: fallo insertando bloque: ") + sqlite3_errmsg(db_));
         }
+        sqlite3_int64 block_id = sqlite3_last_insert_rowid(db_);
+
+        sqlite3_reset(insert_data_stmt_);
+        sqlite3_bind_int64(insert_data_stmt_, 1, block_id);
+        sqlite3_bind_blob(insert_data_stmt_, 2, blk.compressed.data(),
+                           static_cast<int>(blk.compressed.size()), SQLITE_TRANSIENT);
+        if (sqlite3_step(insert_data_stmt_) != SQLITE_DONE) {
+            throw std::runtime_error(std::string("sqlite: fallo insertando datos de bloque: ") + sqlite3_errmsg(db_));
+        }
+    }
+
+    // Adds each chunk's global offset to its blocks' (still chunk-relative)
+    // start_index -- a handful of UPDATEs (one per non-zero-offset chunk),
+    // not one per block. Blocks from different chunks land interleaved in
+    // insertion order (many sieve threads racing into one queue), so a
+    // temporary index on chunk_id is what keeps each UPDATE's WHERE an
+    // indexed lookup instead of a full table scan; dropped again right
+    // after since only idx_blocks_start (built next, in finish()) is meant
+    // to outlive this function.
+    void fix_offsets(const std::vector<uint64_t>& chunk_offset) {
+        bool any = false;
+        for (uint64_t off : chunk_offset) if (off != 0) { any = true; break; }
+        if (!any) return;
+
+        exec("CREATE INDEX idx_blocks_chunk ON blocks(chunk_id);");
+        sqlite3_stmt* stmt = nullptr;
+        check(sqlite3_prepare_v2(db_,
+                  "UPDATE blocks SET start_index = start_index + ?1 WHERE chunk_id = ?2;",
+                  -1, &stmt, nullptr),
+              "prepare offset fixup");
+        exec("BEGIN;");
+        for (size_t i = 0; i < chunk_offset.size(); ++i) {
+            if (chunk_offset[i] == 0) continue; // chunk already at the right offset
+            sqlite3_reset(stmt);
+            sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(chunk_offset[i]));
+            sqlite3_bind_int64(stmt, 2, static_cast<sqlite3_int64>(i));
+            if (sqlite3_step(stmt) != SQLITE_DONE) {
+                sqlite3_finalize(stmt);
+                throw std::runtime_error(std::string("sqlite: fallo corrigiendo start_index: ") + sqlite3_errmsg(db_));
+            }
+        }
+        exec("COMMIT;");
+        sqlite3_finalize(stmt);
+        exec("DROP INDEX idx_blocks_chunk;");
     }
 
     sqlite3* db_ = nullptr;
     sqlite3_stmt* insert_stmt_ = nullptr;
+    sqlite3_stmt* insert_data_stmt_ = nullptr;
 
     // Caps how many compressed-but-not-yet-inserted blocks can queue up.
     // Generous enough to smooth out scheduling jitter between producer
