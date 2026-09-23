@@ -78,7 +78,7 @@ What this project is built from, one term each — follow the link for the conce
 
 - [Segmented sieve](https://en.wikipedia.org/wiki/Sieve_of_Eratosthenes#Segmented_sieve)
 - [Wheel factorization](https://en.wikipedia.org/wiki/Wheel_factorization)
-- [Bucket sieve]
+- [Bucket sieve](https://en.wikipedia.org/wiki/Bucket_queue)
 - [Memory pool](https://en.wikipedia.org/wiki/Memory_pool)
 - [CPU cache](https://en.wikipedia.org/wiki/CPU_cache)
 - [Load balancing (computing)](https://en.wikipedia.org/wiki/Load_balancing_(computing))
