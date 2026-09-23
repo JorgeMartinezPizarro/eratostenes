@@ -33,13 +33,15 @@
 //     This is where a bucket earns its keep -- most segments have nothing
 //     to do for most of these primes, so scheduling each one into the
 //     future segment where its next hit actually falls (a fixed-size
-//     ring, buckets_) means a segment's processing only ever looks at the
-//     (few) sparse primes actually due, not all of them. Steps forward the
-//     same qp*GAP_K[j] + ONFLY_CORRECTION[pr][j] way the medium tier does --
-//     no division by the runtime value p anywhere in this tier anymore
-//     (see attempt 5 below) -- with k and the wheel phase j packed into
-//     one word (sparse_kj_) instead of stored separately, so this costs
-//     the same 8 bytes/prime as storing plain k did.
+//     ring of block-pooled queues, see process_sparse_bucket's attempt-6
+//     comment) means a segment's processing only ever looks at the (few)
+//     sparse primes actually due, not all of them. Steps forward the same
+//     qp*GAP_K[j] + ONFLY_CORRECTION[pr][j] way the medium tier does -- no
+//     division by the runtime value p anywhere in this tier (see attempt 5
+//     below) -- with qp/pr/the wheel phase j packed into one word
+//     (erat::DenseState::qw, same layout as the dense tiers) alongside a
+//     `pos` relative to whichever segment the entry is due in, 8 bytes
+//     total per live entry.
 //
 //     Five changes to this tier's *stepping math* were tried and
 //     reverted as net regressions -- two predate splitting
@@ -119,16 +121,6 @@
 #include "presieve.hpp"
 #include "wheel.hpp"
 
-// Bits needed to hold a wheel phase j (0..wheel_size-1) -- see
-// SegmentSieve::sparse_kj_ for what this packs it into. A free function
-// (not a class member) because a constexpr member can't be used to
-// initialize another static member of the same still-incomplete class.
-constexpr int compute_sparse_j_bits(int wheel_size) {
-    int bits = 0;
-    while ((1 << bits) < wheel_size) ++bits;
-    return bits;
-}
-
 class SegmentSieve {
 public:
     // seg_k_width: wheel-index width of a normal (non-final) segment, same
@@ -177,7 +169,8 @@ public:
         uint64_t segments_ahead_max = delta_max / seg_k_width_ + 2;
         num_buckets_ = 1;
         while (num_buckets_ < (segments_ahead_max + 1) * 4) num_buckets_ <<= 1; // power of 2, 4x margin
-        bucket_head_.assign(num_buckets_, NPOS);
+        bucket_head_block_.assign(num_buckets_, NPOS);
+        bucket_tail_block_.assign(num_buckets_, NPOS);
     }
 
     // Must be called once before the first sieve_and_emit call for a new,
@@ -192,9 +185,14 @@ public:
         next_sparse_idx_ = 0;
         for (auto& v : small_) v.clear();
         medium_.clear();
-        sparse_kj_.clear();
-        sparse_next_.clear();
-        std::fill(bucket_head_.begin(), bucket_head_.end(), NPOS);
+        std::fill(bucket_head_block_.begin(), bucket_head_block_.end(), NPOS);
+        std::fill(bucket_tail_block_.begin(), bucket_tail_block_.end(), NPOS);
+        // Blocks aren't freed, just handed back to the pool: every block
+        // ever allocated for this SegmentSieve is reusable, so repopulate
+        // the free list from scratch rather than reallocate.
+        free_blocks_.clear();
+        free_blocks_.reserve(sparse_blocks_.size());
+        for (uint32_t i = 0; i < sparse_blocks_.size(); ++i) free_blocks_.push_back(i);
     }
 
     template <typename Writer>
@@ -233,17 +231,15 @@ public:
             if (r >= WHEEL_MOD) r -= WHEEL_MOD;
             uint64_t k = wheel_index(p * m);
             uint64_t j = static_cast<uint64_t>(WHEEL_POS[r]);
+            uint64_t pr = static_cast<uint64_t>(WHEEL_POS[p % WHEEL_MOD]);
+            uint64_t qp = p / WHEEL_MOD;
 
-            // sparse_kj_/sparse_next_ grow in lockstep with
-            // next_sparse_idx_ (see the pool comment near their
-            // declaration), so this index is exactly where this prime's
-            // permanent slot lives. sparse_kj_ packs k and the wheel phase
-            // j into one word (k << SPARSE_J_BITS | j) -- see
-            // process_sparse_bucket for the division-free stepping this
-            // enables at no extra memory cost.
-            sparse_kj_.push_back((k << SPARSE_J_BITS) | j);
-            sparse_next_.push_back(NPOS);
-            schedule_sparse(static_cast<uint32_t>(next_sparse_idx_), k, k_high);
+            // Same (qp<<6)|(pr<<3)|j packing as erat::DenseState (dense
+            // tiers) -- see schedule_sparse/process_sparse_bucket for why
+            // the sparse tier now carries qp/pr with the entry itself
+            // instead of looking p back up from sparse_primes by index.
+            erat::DenseState entry{static_cast<uint32_t>((qp << 6) | (pr << 3) | j), 0};
+            schedule_sparse(entry, k, k_low, k_high);
             ++next_sparse_idx_;
         }
 
@@ -281,7 +277,7 @@ public:
         // avoids paying a real (non-inlined) call's overhead every single
         // segment for N where this tier never has anything to do (every N
         // tested up to 1e12 on this machine, see README#benchmarks).
-        if (!sparse_primes.empty()) process_sparse_bucket(k_low, k_high, sparse_primes);
+        if (!sparse_primes.empty()) process_sparse_bucket(k_low, k_high);
         ++cur_segment_;
 
         // Extraction: bit=0 => prime candidate.
@@ -362,21 +358,10 @@ private:
         }
     }
 
-    // Exact minimum bits for the active WHEEL_SIZE (3 for mod 30's 8, 9
-    // for mod 2310's 480), not a fixed guess, so the k budget this leaves
-    // (64 minus this) only ever shrinks as much as the active wheel
-    // actually needs.
-    static constexpr int SPARSE_J_BITS = compute_sparse_j_bits(WHEEL_SIZE);
-    static constexpr uint64_t SPARSE_J_MASK = (uint64_t{1} << SPARSE_J_BITS) - 1;
-
     // Processes exactly the sparse-tier entries due this segment: mark,
     // advance, reschedule into whichever future bucket the next hit lands
-    // in. Each activated sparse prime owns exactly one permanent slot in
-    // sparse_kj_/sparse_next_ for the rest of the chunk (see the pool
-    // comment near their declaration) -- "the bucket" is just that slot's
-    // index appearing in this ring position's intrusive list, relinked
-    // into a new position by schedule_sparse, never allocated or freed
-    // again after activation.
+    // in -- see the block-pool comment right below (attempt 6) for how a
+    // due entry gets there and where it goes next.
     //
     // Pulled out of sieve_and_emit into its own function, and marked
     // noinline to make sure it stays that way even under -O3/-flto: with
@@ -401,75 +386,145 @@ private:
     // whole run (every N up to 1e12 tested on this machine), which is
     // what keeps the dense-only case's numbers unchanged from before this
     // split.
+    // Attempt 6 (this session): replaces the idx-indexed intrusive list
+    // (sparse_kj_/sparse_next_/sparse_primes, attempts 1-5 above) with
+    // fixed-size blocks of erat::DenseState pulled from a pool, one queue
+    // (linked list of blocks) per ring slot -- primesieve's own EratBig
+    // design. The entry itself now carries everything needed to process
+    // it (qp/pr/j packed into `qw`, `pos` relative to whichever segment
+    // it's due in, same layout as the dense tiers' DenseState), so
+    // rescheduling COPIES the entry into the target slot's tail block
+    // instead of relinking an index -- both the read (draining a slot's
+    // blocks front to back) and the write (appending to a tail) are
+    // sequential, unlike the old scheme's pointer-chase over sparse_kj_/
+    // sparse_next_/sparse_primes at effectively random idx values. This is
+    // NOT attempt 3's AoS relayout (which kept the idx-array pointer-chase
+    // and only repacked its fields, and lost to cache-footprint growth) --
+    // here nothing is indexed by idx at all any more, and a live entry
+    // costs exactly 8 bytes (sizeof(DenseState)) at any one time, less
+    // than attempt 5's 12 bytes/active-prime (8 for sparse_kj_ + 4 for
+    // sparse_next_, p amortized via the shared sparse_primes array).
+    //
+    // SPARSE_BLOCK_ENTRIES matters more than it looks: a first pass at
+    // 1024 (8 KiB/block, primesieve's own EratBig default) won cleanly at
+    // the *natural* N=1e13 cliff (cycles:u 23.16T->20.81T, -10.2%;
+    // wall-clock 506.64s->449.13s; IPC 1.25->1.41; cache-misses
+    // 22.00B->17.22B) but *lost* on this file's usual fast proxy (N=1e12,
+    // -s 500000, 84% sparse forced): cycles:u 3.484T->3.775T, +8.3%;
+    // wall-clock 75.43s->90.83s, +20.4% -- the opposite of every other
+    // attempt in this tier's history, where the proxy and the natural N
+    // agreed on direction even when they disagreed on magnitude. Root
+    // cause: the proxy's tiny forced segment width needs many more ring
+    // slots (num_buckets_ scales with 1/seg_k_width_), so its ~66k active
+    // sparse primes per chunk spread thin across ~64 slots -- ~86 live
+    // entries/slot, each getting its own mostly-empty 1024-entry block
+    // (cache-references 84.79B, next to all of it pool padding no prime
+    // ever occupies). The natural N=1e13 cliff has far fewer ring slots
+    // (a much wider auto segment) and a comparable population, so its
+    // blocks stay reasonably full and never hit this. Shrinking to 128
+    // (1 KiB/block) fixed the proxy without giving back the natural-N win
+    // -- both now agree: proxy cycles:u 3.484T->3.190T (-8.4%), cache-refs
+    // 84.79B->18.49B (-78%), cache-misses 2.10B->0.258B (-87.7%); natural
+    // N=1e13 cycles:u 23.16T->20.78T (-10.3%), wall-clock 506.64s->447.74s
+    // (-11.6%), cache-refs 400.5B->295.8B (-26.1%). Kept at 128 -- if this
+    // tier's population/ring-slot ratio changes a lot on a future
+    // machine or N, re-check both regimes again rather than assuming
+    // either one predicts the other for a block-size change specifically.
     __attribute__((noinline))
-    void process_sparse_bucket(uint64_t k_low, uint64_t k_high, const std::vector<uint64_t>& sparse_primes) {
+    void process_sparse_bucket(uint64_t k_low, uint64_t k_high) {
         uint32_t slot = static_cast<uint32_t>(cur_segment_ & (num_buckets_ - 1));
-        uint32_t idx = bucket_head_[slot];
-        bucket_head_[slot] = NPOS;
-        while (idx != NPOS) {
-            uint32_t next_idx = sparse_next_[idx]; // save: schedule_sparse below overwrites it
-            // Attempt 5 (see the tier's header comment for 1-4): same
-            // division-free stepping as the medium tier (qp*GAP_K[j] +
-            // ONFLY_CORRECTION[pr][j]), but qp/pr are recomputed from p
-            // here instead of stored -- p/WHEEL_MOD and p%WHEEL_MOD are
-            // divisions by the *compile-time* constant WHEEL_MOD (a cheap
-            // multiply-shift the compiler generates), not the runtime-p
-            // division attempt 4 already removed, so there's no real cost
-            // to redoing them per due-check instead of caching them.
-            // sparse_kj_ packs k and the phase j into one word -- same 8
-            // bytes/prime as attempt 4's plain k, avoiding attempt 3's
-            // actual failure mode (a 40-byte/prime total after adding a
-            // stored qp/pr struct *and* separate k/j/next arrays).
-            uint64_t p = sparse_primes[idx];
-            uint64_t packed = sparse_kj_[idx];
-            uint64_t k = packed >> SPARSE_J_BITS;
-            uint32_t j = static_cast<uint32_t>(packed & SPARSE_J_MASK);
-            uint64_t qp = p / WHEEL_MOD;
-            uint32_t pr = static_cast<uint32_t>(WHEEL_POS[p % WHEEL_MOD]);
-            while (k < k_high) {
-                uint64_t widx = k - k_low;
-                words_[widx >> 6] |= (1ULL << (widx & 63));
-                k += qp * GAP_K[j] + ONFLY_CORRECTION[pr][j];
-                if constexpr (WHEEL_SIZE_IS_POW2) {
-                    j = (j + 1) & (WHEEL_SIZE - 1);
-                } else {
-                    ++j;
-                    if (j == WHEEL_SIZE) j = 0;
+        uint32_t blk = bucket_head_block_[slot];
+        bucket_head_block_[slot] = NPOS;
+        bucket_tail_block_[slot] = NPOS;
+        while (blk != NPOS) {
+            // Index, not a reference: schedule_sparse below can push a new
+            // entry into a slot whose tail block needs allocating, which
+            // can grow (reallocate) sparse_blocks_ -- a SparseBlock&
+            // cached across that call would dangle on the next iteration.
+            uint32_t count = sparse_blocks_[blk].count;
+            uint32_t next_blk = sparse_blocks_[blk].next;
+            for (uint32_t i = 0; i < count; ++i) {
+                erat::DenseState e = sparse_blocks_[blk].entries[i];
+                uint64_t k = k_low + e.pos;
+                uint64_t qp = e.qw >> 6;
+                uint32_t pr = (e.qw >> 3) & 7;
+                uint32_t j = e.qw & 7;
+                // Usually exactly one hit (p >= seg_k_width_ by definition
+                // of this tier), but not guaranteed for every phase j right
+                // at the tier's cutoff -- keep the while, same as the old
+                // scheme, rather than assume it.
+                while (k < k_high) {
+                    uint64_t widx = k - k_low;
+                    words_[widx >> 6] |= (1ULL << (widx & 63));
+                    k += qp * GAP_K[j] + ONFLY_CORRECTION[pr][j];
+                    j = (j + 1) & 7;
                 }
+                e.qw = static_cast<uint32_t>((qp << 6) | (pr << 3) | j);
+                schedule_sparse(e, k, k_low, k_high);
             }
-            sparse_kj_[idx] = (k << SPARSE_J_BITS) | j;
-            schedule_sparse(idx, k, k_high);
-            idx = next_idx;
+            sparse_blocks_[blk].count = 0;
+            sparse_blocks_[blk].next = NPOS;
+            free_blocks_.push_back(blk);
+            blk = next_blk;
         }
     }
 
-    // Schedules (or reschedules) sparse prime `idx` into the bucket ring
-    // slot for whichever segment k falls into, given that the segment
-    // currently being processed ends at k_high. k < k_high means "due
-    // right now" (this segment's bucket); asserts rather than silently
-    // corrupting results if the ring ever turns out too small for the
-    // actual data (see constructor).
-    //
-    // No allocation here, ever, after activation: idx's slot in sparse_kj_/
-    // sparse_next_ already exists (see the pool comment near their
-    // declaration) -- this just relinks it onto the target ring slot's
-    // list (sparse_kj_[idx] is the caller's job to update first -- k here
-    // is only used to place the slot, never stored, since sparse_kj_ is now
-    // the persisted state -- see process_sparse_bucket). That's the actual
-    // memory-pool win over a std::vector<Entry> per bucket: no per-bucket
-    // heap allocation to begin with, and no reallocation on reschedule
-    // either, since a prime never needs more than the one slot it was
-    // given at activation.
-    void schedule_sparse(uint32_t idx, uint64_t k, uint64_t k_high) {
-        uint64_t segments_ahead = (k < k_high) ? 0 : (k - k_high) / seg_k_width_ + 1;
+    // Schedules (or reschedules) `entry` into the bucket ring slot for
+    // whichever segment k falls into, given that the segment currently
+    // being processed spans [k_low, k_high). k < k_high means "due right
+    // now" (this segment's own slot, already being drained by
+    // process_sparse_bucket -- see activate_dense-style callers above).
+    // entry.pos is overwritten here with k's offset relative to whichever
+    // segment's start it now belongs to -- entries always travel with a
+    // pos relative to their OWN due segment, never an absolute k, so this
+    // is the one place that conversion happens. Throws rather than
+    // silently corrupting results if the ring ever turns out too small
+    // (see constructor).
+    void schedule_sparse(erat::DenseState entry, uint64_t k, uint64_t k_low, uint64_t k_high) {
+        uint64_t segments_ahead, target_k_low;
+        if (k < k_high) {
+            segments_ahead = 0;
+            target_k_low = k_low;
+        } else {
+            segments_ahead = (k - k_high) / seg_k_width_ + 1;
+            target_k_low = k_high + (segments_ahead - 1) * seg_k_width_;
+        }
         if (segments_ahead >= num_buckets_) {
             throw std::runtime_error(
                 "bucket sieve: salto de un primo disperso mayor que el margen del anillo de "
                 "cubos (bug de dimensionamiento en el constructor de SegmentSieve)");
         }
+        entry.pos = static_cast<uint32_t>(k - target_k_low);
         uint32_t slot = static_cast<uint32_t>((cur_segment_ + segments_ahead) & (num_buckets_ - 1));
-        sparse_next_[idx] = bucket_head_[slot];
-        bucket_head_[slot] = idx;
+        push_sparse_entry(slot, entry);
+    }
+
+    // Pulls a block from the free list (or grows the pool -- indices, not
+    // pointers, so a std::vector<SparseBlock> reallocating never
+    // invalidates anything a caller's holding onto) and appends `entry` to
+    // ring slot `slot`'s tail block, starting a new one if the current
+    // tail is full or the slot is empty. Never walks the slot's list --
+    // bucket_tail_block_ makes append O(1) regardless of queue length.
+    void push_sparse_entry(uint32_t slot, erat::DenseState entry) {
+        uint32_t tail = bucket_tail_block_[slot];
+        if (tail == NPOS || sparse_blocks_[tail].count == SPARSE_BLOCK_ENTRIES) {
+            uint32_t nb;
+            if (!free_blocks_.empty()) {
+                nb = free_blocks_.back();
+                free_blocks_.pop_back();
+            } else {
+                nb = static_cast<uint32_t>(sparse_blocks_.size());
+                sparse_blocks_.emplace_back();
+            }
+            sparse_blocks_[nb].count = 0;
+            sparse_blocks_[nb].next = NPOS;
+            if (tail == NPOS) bucket_head_block_[slot] = nb;
+            else sparse_blocks_[tail].next = nb;
+            bucket_tail_block_[slot] = nb;
+            tail = nb;
+        }
+        SparseBlock& b = sparse_blocks_[tail];
+        b.entries[b.count++] = entry;
     }
 
     std::vector<uint64_t> words_;
@@ -483,35 +538,27 @@ private:
     std::vector<erat::DenseState> small_[8]; // one list per residue class p % 30
     std::vector<erat::DenseState> medium_;
 
-    // Sparse tier's bucket ring, as an intrusive linked list over a flat
-    // pool instead of one std::vector<Entry> per ring slot: sparse_kj_/
-    // sparse_next_ grow in lockstep with next_sparse_idx_ as primes
-    // activate (mirroring small_/medium_ above), so sparse_kj_[i] is
-    // always prime i's current (k, wheel phase j) packed into one word
-    // (see process_sparse_bucket's attempt-5 comment) and sparse_next_[i]
-    // chains it into whichever ring slot's list it's currently scheduled
-    // on.
-    // bucket_head_[slot] is that list's head index, or NPOS if empty. A
-    // prime is relinked (schedule_sparse) every time it's processed, but
-    // its slot in sparse_kj_/sparse_next_ is allocated exactly once, at
-    // activation -- no heap allocation on the hot path at all.
-    //
-    // An AoS layout (one {k, p, next} struct per prime, instead of these
-    // three parallel arrays) was tried here on the theory that it would
-    // turn up to 3 likely cache misses per hit into 1 -- measured *worse*
-    // (~2.25x slower at N=1e12 with a third of base primes forced sparse,
-    // on top of the plain-division baseline, which was already ~2x
-    // primesieve's own class of cost there). Second regression in a row
-    // from a locality-motivated change to this tier (see the division
-    // removal attempt above it in git history) -- the actual bottleneck
-    // here still isn't understood; see main.cpp's comment on this tier.
+    // Sparse tier's bucket ring (see process_sparse_bucket's attempt-6
+    // comment): fixed-size blocks of erat::DenseState pooled in
+    // sparse_blocks_, chained per ring slot via SparseBlock::next.
+    // bucket_head_block_[slot]/bucket_tail_block_[slot] are that queue's
+    // first/last block index, or NPOS if empty; free_blocks_ is a stack of
+    // block indices not currently in any queue. No heap allocation on the
+    // hot path past whatever pool growth a chunk's peak sparse population
+    // needed the first time it was seen (begin_chunk repopulates
+    // free_blocks_ from the existing pool for the next chunk, never
+    // shrinking it).
+    static constexpr uint32_t SPARSE_BLOCK_ENTRIES = 128; // 1 KiB/block
+    struct SparseBlock {
+        erat::DenseState entries[SPARSE_BLOCK_ENTRIES]; // uninitialized past `count`
+        uint32_t count = 0;
+        uint32_t next = NPOS;
+    };
     uint64_t num_buckets_ = 1;
-    std::vector<uint32_t> bucket_head_;
-    // k and the wheel phase j, packed into one word -- see
-    // process_sparse_bucket's attempt-5 comment for why, at no memory
-    // cost over storing plain k (same 8 bytes/prime either way).
-    std::vector<uint64_t> sparse_kj_;
-    std::vector<uint32_t> sparse_next_;
+    std::vector<uint32_t> bucket_head_block_;
+    std::vector<uint32_t> bucket_tail_block_;
+    std::vector<SparseBlock> sparse_blocks_;
+    std::vector<uint32_t> free_blocks_;
     uint64_t cur_segment_ = 0;
 
     size_t next_small_idx_ = 0;
