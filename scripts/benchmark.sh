@@ -25,9 +25,13 @@
 #      with, so that's what gets benchmarked. Set SEGMENT to force a
 #      specific width instead (e.g. to compare against the auto default).
 #
-#   2. Disk I/O: builds a real .db per N in 1e8..1e12 and shows a table
-#      with file size, bits/prime, write throughput and total time that the
-#      binary itself reports (previously scripts/test_io.sh, fused here).
+#   2. Disk I/O: builds a real .db per N in 1e8..1e11 and shows a table
+#      with file size, bits/prime, effective throughput and total time that
+#      the binary itself reports (previously scripts/test_io.sh, fused
+#      here). .db output is a single sieve+encode+write pass now (no
+#      separate count pre-pass, see git history), so "MB/s" here is
+#      throughput over that whole pass, not an isolated write phase --
+#      there isn't a separate one to isolate any more.
 #      WRITE_PATH/KEEP_DB below are only used by this sweep. WRITE_PATH
 #      must point at the Linux-native filesystem (not a /mnt/c... mount,
 #      much slower) -- default: $HOME/eratostenes-io-bench.
@@ -40,8 +44,8 @@
 # there's real run-to-run noise on this kind of box, see BENCHMARK section
 # of the README/commit history), WRITE_PATH/KEEP_DB (see above; KEEP_DB
 # defaults to 0 -- each .db is deleted right after it's measured, since
-# the ~26 GB the I/O sweep accumulates otherwise (mostly the N=1e12 row at
-# ~23 GB) isn't something to leave lying around by default. Set KEEP_DB=1
+# the several GB the I/O sweep accumulates otherwise (mostly the N=1e11
+# row) isn't something to leave lying around by default. Set KEEP_DB=1
 # to keep them for inspection instead. A trap also cleans up the
 # in-progress file if the script is interrupted or errors out partway
 # (not on a hard SIGKILL, which can't be trapped -- see git history for
@@ -153,9 +157,9 @@ esac
 mkdir -p "$WRITE_PATH"
 
 # N -> pi(N) conocido, misma escala x10 que el barrido manual (1k..1t).
-IO_SIZES=(100m 1b 10b 100b 1t)
-IO_LIMITS=(100000000 1000000000 10000000000 100000000000 1000000000000)
-IO_EXPECTED=(5761455 50847534 455052511 4118054813 37607912018)
+IO_SIZES=(100m 1b 10b 100b)
+IO_LIMITS=(100000000 1000000000 10000000000 100000000000)
+IO_EXPECTED=(5761455 50847534 455052511 4118054813)
 
 # bytes -> "X.XX UUU" (KiB/MiB/GiB/TiB), sin depender de numfmt.
 human_size() {
@@ -174,7 +178,7 @@ commas() {
     printf '%d' "$1" | sed -E ':a; s/([0-9])([0-9]{3})(,|$)/\1,\2\3/; ta'
 }
 
-declare -A IO_SIZE_BYTES IO_WRITE_S IO_TOTAL_S IO_COUNT
+declare -A IO_SIZE_BYTES IO_TOTAL_S IO_COUNT
 
 fail=0
 for i in "${!IO_SIZES[@]}"; do
@@ -192,7 +196,6 @@ for i in "${!IO_SIZES[@]}"; do
     }
 
     count=$(echo "$out" | sed -nE 's/.*Listo\. ([0-9,]+) primos.*/\1/p' | tr -d ',')
-    write_s=$(echo "$out" | sed -nE 's/.*escritura: *([0-9.]+)s.*/\1/p')
     total_s=$(echo "$out" | sed -nE 's/.*total: *([0-9.]+)s.*/\1/p')
 
     if [ "$count" != "$expected" ]; then
@@ -201,8 +204,8 @@ for i in "${!IO_SIZES[@]}"; do
         fail=1
         break
     fi
-    if [ -z "$write_s" ] || [ -z "$total_s" ]; then
-        echo "FAIL N=$n: no se pudo parsear el tiempo de escritura/total de la salida" >&2
+    if [ -z "$total_s" ]; then
+        echo "FAIL N=$n: no se pudo parsear el tiempo total de la salida" >&2
         echo "$out" >&2
         fail=1
         break
@@ -211,11 +214,10 @@ for i in "${!IO_SIZES[@]}"; do
     bytes=$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file")
 
     IO_SIZE_BYTES[$n]="$bytes"
-    IO_WRITE_S[$n]="$write_s"
     IO_TOTAL_S[$n]="$total_s"
     IO_COUNT[$n]="$count"
 
-    echo "  pi(N)=$count  tamano=$(human_size "$bytes")  escritura=${write_s}s  total=${total_s}s" >&2
+    echo "  pi(N)=$count  tamano=$(human_size "$bytes")  total=${total_s}s" >&2
 
     if [ "$KEEP_DB" = "0" ]; then
         rm -f "$file"
@@ -241,7 +243,6 @@ for i in "${!IO_SIZES[@]}"; do
 	n="${IO_SIZES[$i]}"
     limit="${IO_LIMITS[$i]}"
     bytes="${IO_SIZE_BYTES[$n]}"
-    write_s="${IO_WRITE_S[$n]}"
     total_s="${IO_TOTAL_S[$n]}"
     count="${IO_COUNT[$n]}"
 
@@ -252,7 +253,7 @@ for i in "${!IO_SIZES[@]}"; do
     limit_exp="1E$(( ${#limit} - 1 ))"
 
     bitpp=$(awk -v b="$bytes" -v c="$count" 'BEGIN{printf "%.2f", b*8/c}')
-    mbps=$(awk -v b="$bytes" -v s="$write_s" 'BEGIN{printf "%.1f", (s>0)?(b/1e6/s):0}')
+    mbps=$(awk -v b="$bytes" -v s="$total_s" 'BEGIN{printf "%.1f", (s>0)?(b/1e6/s):0}')
 
     printf "|%-6s | %14s | %-10s | %9s | %6s | %8s |\n" \
         "$limit_exp" "$(commas "$count")" \

@@ -58,6 +58,7 @@
 #include <fstream>
 #include <stdexcept>
 #include <fcntl.h>
+#include <sched.h>
 #include <unistd.h>
 
 #include "arg_parser.hpp"
@@ -113,8 +114,58 @@ const uint64_t SMALL_PRIMES_BYTES = SMALL_PRIMES_TEXT.size();
 const uint64_t SMALL_PRIMES_COUNT = WHEEL_PRIMES.size();
 
 // L1-sized slice the small dense tier is crossed off in (SegmentSieve);
-// set once in main() from the detected L1d size.
+// set once in main() from the detected L1d size. This (and seg_k_width,
+// passed separately) is the FALLBACK/classification value -- see
+// g_thread_cache below for the per-CPU refinement actually used to size
+// each thread's own SegmentSieve, when available.
 static uint64_t SUB_BLOCK_BYTES = 32 * 1024;
+
+// Per-CPU segment width / L1 sub-block (arg_parser.hpp's
+// CpuCacheTopology, converted to ready-to-use sizes), populated once in
+// main() before any worker thread starts. Empty vectors (the default)
+// mean "not available here" -- pick_thread_cache falls back to the
+// single global value every thread used before this existed. Why this
+// exists: on a hybrid P-core/E-core CPU, a single machine-wide L1/L2
+// guess (detect_cache_bytes(), always reading cpu0) sizes every thread
+// for whichever core type cpu0 happens to be -- measured on an i5-13500
+// (2026-09) as a real ~25% oversized L2 budget applied to E-core threads
+// specifically (see arg_parser.hpp's CpuCacheTopology comment for the
+// numbers). Prime tier CLASSIFICATION (small/medium/sparse, main()) still
+// uses the single global value regardless -- that's a performance
+// decision, not a correctness one (every tier's marking loop is correct
+// for any segment/sub-block size it's actually given, see
+// segment_sieve.hpp), so duplicating classification per CPU domain would
+// add real complexity for a secondary effect; only the sizing that
+// actually determines how much memory a thread touches per segment
+// (this) needs to track the CPU it's really running on.
+struct ThreadCacheTables {
+    std::vector<uint64_t> seg_k_width_by_cpu;    // index = logical CPU id, 0 = fall back
+    std::vector<uint64_t> sub_block_bytes_by_cpu;
+};
+static ThreadCacheTables g_thread_cache;
+
+// Picks this thread's own segment width and L1 sub-block from wherever
+// it's actually running right now (sched_getcpu(), a cheap vDSO call --
+// no affinity/pinning needed) -- called once per chunk (sieve_chunk
+// constructs a fresh SegmentSieve per chunk already), not per segment, so
+// a mid-chunk migration to a different core type is at worst a one-chunk
+// mismatch, not a correctness issue (see the struct comment above for
+// why size never affects correctness, only performance). Falls back to
+// the caller's global default when per-CPU data isn't available for this
+// CPU id, or wasn't collected at all (non-Linux, sysfs unavailable, or
+// the user forced -s/--l1-bytes/--l2-bytes explicitly -- see main()).
+static void pick_thread_cache(uint64_t fallback_seg_k_width, uint64_t fallback_sub_block,
+                               uint64_t& seg_k_width, uint64_t& sub_block_bytes) {
+    seg_k_width = fallback_seg_k_width;
+    sub_block_bytes = fallback_sub_block;
+    int cpu = sched_getcpu();
+    if (cpu < 0) return;
+    size_t idx = static_cast<size_t>(cpu);
+    if (idx < g_thread_cache.seg_k_width_by_cpu.size() && g_thread_cache.seg_k_width_by_cpu[idx])
+        seg_k_width = g_thread_cache.seg_k_width_by_cpu[idx];
+    if (idx < g_thread_cache.sub_block_bytes_by_cpu.size() && g_thread_cache.sub_block_bytes_by_cpu[idx])
+        sub_block_bytes = g_thread_cache.sub_block_bytes_by_cpu[idx];
+}
 
 struct ChunkRange {
     uint64_t low;   // first wheel index of the chunk (inclusive)
@@ -154,7 +205,10 @@ static std::vector<ChunkRange> split_ranges(uint64_t limit, unsigned threads) {
 
 // Runs a chunk through SegmentSieve, segment by segment, feeding every
 // found prime to 'out'. Shared by every pass (count-only, byte-counting,
-// writing) -- they only differ in which Writer they pass in.
+// writing) -- they only differ in which Writer they pass in. seg_k_width
+// here is the fallback/classification value (see g_thread_cache); the
+// actual width and sub-block this call uses come from wherever this
+// thread is really running (pick_thread_cache).
 template <typename Writer>
 static void sieve_chunk(ChunkRange range, uint64_t seg_k_width, uint64_t base_prime_max,
                          const std::vector<uint64_t>& small_primes,
@@ -163,10 +217,13 @@ static void sieve_chunk(ChunkRange range, uint64_t seg_k_width, uint64_t base_pr
                          const Presieve& presieve,
                          Writer& out, uint64_t& local_count,
                          std::atomic<uint64_t>& progress) {
-    SegmentSieve sieve(seg_k_width, base_prime_max, presieve, SUB_BLOCK_BYTES);
+    uint64_t thread_seg_k_width, thread_sub_block;
+    pick_thread_cache(seg_k_width, SUB_BLOCK_BYTES, thread_seg_k_width, thread_sub_block);
+
+    SegmentSieve sieve(thread_seg_k_width, base_prime_max, presieve, thread_sub_block);
     sieve.begin_chunk();
-    for (uint64_t k_low = range.low; k_low < range.high; k_low += seg_k_width) {
-        uint64_t k_high = std::min(k_low + seg_k_width, range.high);
+    for (uint64_t k_low = range.low; k_low < range.high; k_low += thread_seg_k_width) {
+        uint64_t k_high = std::min(k_low + thread_seg_k_width, range.high);
         sieve.sieve_and_emit(k_low, k_high, small_primes, medium_primes, sparse_primes, out, local_count);
         progress.fetch_add(k_high - k_low, std::memory_order_relaxed);
     }
@@ -418,6 +475,35 @@ int main(int argc, char** argv) {
     SUB_BLOCK_BYTES = std::max<uint64_t>(8, l1_bytes / 8 * 8);
     uint64_t small_limit = SUB_BLOCK_BYTES / 2;
 
+    // Per-CPU refinement of the two sizes above (see g_thread_cache's own
+    // comment for why): skipped independently per axis when the user
+    // already forced a single value on that axis on purpose (-s for
+    // segment width, --l1-bytes for the sub-block), or when detection
+    // itself found nothing (non-Linux, sysfs unavailable). max_seg_k_width
+    // below has to cover whichever width any thread might actually use,
+    // not just the classification value above, or the presieve buffers
+    // (sized once, shared read-only across every thread) could be too
+    // small for a thread whose own domain calls for a wider segment.
+    uint64_t max_seg_k_width = seg_k_width;
+    if (!opt.segment_width_set || !opt.l1_bytes_override) {
+        CpuCacheTopology topo = detect_cpu_cache_topology();
+        if (!topo.l1_share.empty()) {
+            if (!opt.segment_width_set && !opt.l2_bytes_override) {
+                g_thread_cache.seg_k_width_by_cpu.resize(topo.l2_share.size());
+                for (size_t i = 0; i < topo.l2_share.size(); ++i) {
+                    uint64_t w = seg_k_width_from_l2_bytes(topo.l2_share[i]);
+                    g_thread_cache.seg_k_width_by_cpu[i] = w;
+                    max_seg_k_width = std::max(max_seg_k_width, w);
+                }
+            }
+            if (!opt.l1_bytes_override) {
+                g_thread_cache.sub_block_bytes_by_cpu.resize(topo.l1_share.size());
+                for (size_t i = 0; i < topo.l1_share.size(); ++i)
+                    g_thread_cache.sub_block_bytes_by_cpu[i] = sub_block_from_l1_bytes(topo.l1_share[i]);
+            }
+        }
+    }
+
     // Primes also covered by the pre-sieve pattern (see presieve.hpp) are
     // skipped here: they're never scheduled as active markers, their
     // multiples come pre-marked from the pattern buffer instead. They
@@ -461,17 +547,19 @@ int main(int argc, char** argv) {
 
     uint64_t total_span = ranges.back().high - ranges.front().low;
 
-    Presieve presieve = build_presieve(PRESIEVE_GROUPS, seg_k_width);
+    Presieve presieve = build_presieve(PRESIEVE_GROUPS, max_seg_k_width);
 
+    bool per_cpu_active = !g_thread_cache.seg_k_width_by_cpu.empty() || !g_thread_cache.sub_block_bytes_by_cpu.empty();
     std::fprintf(stderr, "Iniciando %u hilos, limite=%llu, segmento=%llu, rueda mod %llu (%zu primos), "
-                 "%zu primos base pequenos (sub-bloque %llu KiB), %zu medianos, %zu dispersos...\n",
+                 "%zu primos base pequenos (sub-bloque %llu KiB), %zu medianos, %zu dispersos%s...\n",
                  actual_threads,
                  static_cast<unsigned long long>(opt.limit),
                  static_cast<unsigned long long>(opt.segment_width),
                  static_cast<unsigned long long>(WHEEL_MOD),
                  WHEEL_PRIMES.size(),
                  small_primes.size(), static_cast<unsigned long long>(SUB_BLOCK_BYTES / 1024),
-                 medium_primes.size(), sparse_primes.size());
+                 medium_primes.size(), sparse_primes.size(),
+                 per_cpu_active ? " (cache por CPU detectada, ancho/sub-bloque por hilo)" : "");
 
     // Every pass below runs worker threads that can throw (pwrite() on a
     // full disk, or the bucket-sieve sizing check) -- see run_parallel_chunks

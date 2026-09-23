@@ -96,7 +96,16 @@ What this project is built from, one term each — follow the link for the conce
 | 1e12 | 31.93s | 24.885s | 1.3x |
 | 1e13 | 377.75s | 291.243s | 1.3x |
 
-Under an i5-11400F (dev PC, two generations older) the best-of-3 times achieved for 1e11-1e13 are 2.95s, 35.70s, 456.88s -- kept as a baseline for this weaker machine, not a fair ratio comparison (no primesieve run alongside it here).
+Under an i5-11400F (dev PC, two generations older), `-c` with primesieve alongside it, same machine, after the 2026-09-24 segment-width/presieve/accumulator changes (see git history for `arg_parser.hpp`/`presieve.hpp`/`segment_sieve.hpp`):
+
+| N | eratostenes | primesieve | ratio |
+|---|---:|---:|---:|
+| 1e10 | 0.233s | 0.200s | 1.17x |
+| 1e11 | 2.608s | 2.366s | 1.10x |
+| 1e12 | 33.206s | 29.906s | 1.11x |
+| 1e13 | 430.412s | 418.034s | 1.03x |
+
+Down from a flat ~1.3x before those changes. The i5-13500 table above predates them and needs re-measuring; it's kept as the last real server numbers until then, not as current.
 
 Writting primes to a `.db` file results in the following ratios per prime:
 
