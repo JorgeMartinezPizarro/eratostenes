@@ -14,7 +14,6 @@
 #include <fstream>
 #include <algorithm>
 
-#include "base_sieve.hpp"
 #include "wheel.hpp"
 
 // Best-effort cache size (bytes) for a given level (1 = L1 data, 2 = L2), Linux
@@ -241,40 +240,52 @@ inline Options parse_args(int argc, char** argv) {
         opt.threads = std::max(1u, std::thread::hardware_concurrency());
     }
     if (!opt.segment_width_set) {
-        // Smallest segment width whose k-width still covers isqrt(limit)
-        // (see the field comment): WHEEL_MOD/WHEEL_SIZE converts a k-width
-        // back to a numeric width, rounded up (ceiling of that ratio) as a
-        // margin so integer rounding never lets a prime right at the
-        // boundary slip into the sparse tier. Measured ~16% faster than a
-        // fixed default at 1e12 on an i5-11400F -- see README.
-        constexpr uint64_t MARGIN_MULT = (WHEEL_MOD + WHEEL_SIZE - 1) / WHEEL_SIZE;
-        uint64_t sqrt_based = isqrt(opt.limit) * MARGIN_MULT;
-
-        // This grows with sqrt(limit), same as the "no sparse primes at
-        // all" goal above -- fine up to a point, but the per-thread bit
-        // array (segment_width/WHEEL_MOD*WHEEL_SIZE bytes) grows right
-        // along with it, and past some N that array stops fitting L2 (or,
-        // multiplied by thread count, even L3) regardless of how good
-        // "zero sparse primes" sounds -- exactly the cache-pressure
-        // problem this project spent a whole prior round chasing, just
-        // caused by the opposite extreme. Capping the width at a fraction
-        // of the machine's actual L2 (detected, not guessed) accepts some
-        // sparse primes past that point in exchange for a cache-resident
-        // array -- the sparse tier's own bucket ring is pool-allocated
-        // (see SegmentSieve), so that tradeoff is cheap once it's needed.
-        // 1/2 of L2 leaves room for a hyperthread sibling sharing the same
-        // L2 (typical topology) plus whatever else is running; falls back
-        // to a conservative 256KiB if L2 can't be detected (see
-        // detect_l2_cache_bytes) -- or use --l2-bytes if that fallback is
-        // wrong for this machine (see the Options field comment).
+        // Size the segment to fill a fraction of the machine's actual,
+        // detected L2 (not guessed) -- 1/2 leaves room for a hyperthread
+        // sibling sharing the same L2 (typical topology) plus whatever else
+        // is running; falls back to a conservative 256KiB if L2 can't be
+        // detected (see detect_l2_cache_bytes), or use --l2-bytes if that
+        // fallback is wrong for this machine (see the Options field
+        // comment). Past this width some base primes fall into the
+        // costlier sparse/bucket tier instead of staying dense -- that's
+        // an accepted tradeoff, not a bug: the bucket ring is pool-
+        // allocated (see SegmentSieve), so it's cheap once it's needed, far
+        // cheaper than an L2-blowing segment.
+        //
+        // An earlier version additionally capped this at isqrt(limit) --
+        // the smallest width that keeps EVERY base prime dense, avoiding
+        // the sparse tier altogether below the N where that width exceeds
+        // the L2 budget above. That's still correct, but it stopped being
+        // the right default once the small tier's L1 sub-block (see
+        // erat_small.hpp) was decoupled from segment size: before that
+        // change, a smaller segment directly meant less L2 traffic for
+        // every tier, so "smaller is better below the cap" made sense; the
+        // small tier is now already confined to L1 regardless of segment
+        // size, so shrinking the segment below the L2 budget no longer
+        // helps it and only adds fixed per-segment cost (walking every
+        // active prime's state, entering/exiting each tier's loop,
+        // presieve fill) more often than necessary, for the medium and
+        // sparse tiers that DO still scale with segment count. Measured
+        // (perf stat cycles:u, i5-11400F): dropping the isqrt cap and
+        // always using the L2 budget is 12.4% faster at N=1e11, 6.0%
+        // faster at N=1e12 -- both regimes where isqrt(limit) used to be
+        // the smaller (binding) value (isqrt gave ~41KiB/~130KiB arrays
+        // there, versus the 256KiB this L2 budget allows). Past the N
+        // where isqrt(limit) alone would already exceed the L2 budget
+        // (roughly 1e13+ on this machine), this change is a no-op: the L2
+        // budget was already the smaller, binding value even with the old
+        // min(), so dropping isqrt from the comparison doesn't change the
+        // result there. That's a DIFFERENT question from how big the
+        // budget itself should be in that regime -- this project already
+        // measured removing the /2 halving (using the full L2 instead of
+        // L2/2) as a regression at N=1e13 (see this file's git history) --
+        // so the /2 stays.
         uint64_t l2_bytes = opt.l2_bytes_override ? opt.l2_bytes_override : detect_l2_cache_bytes();
         if (l2_bytes == 0) l2_bytes = 256 * 1024;
         uint64_t l2_target_bytes = l2_bytes / 2;
         // Inverse of array_bytes = segment_width * WHEEL_SIZE / WHEEL_MOD / 8
         // (see README#tuning-for-your-machine).
-        uint64_t l2_based_width = l2_target_bytes * 8 * WHEEL_MOD / WHEEL_SIZE;
-
-        opt.segment_width = std::min(sqrt_based, l2_based_width);
+        opt.segment_width = l2_target_bytes * 8 * WHEEL_MOD / WHEEL_SIZE;
     }
 
     // The segment stays L2-sized (it is also the medium/sparse tier

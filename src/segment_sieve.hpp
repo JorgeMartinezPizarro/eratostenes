@@ -280,7 +280,15 @@ public:
         if (!sparse_primes.empty()) process_sparse_bucket(k_low, k_high);
         ++cur_segment_;
 
-        // Extraction: bit=0 => prime candidate.
+        // Extraction: bit=0 => prime candidate. Accumulated locally and
+        // added to prime_count once at the end, instead of read-modify-
+        // writing through the reference every word (count-only) or every
+        // single prime (value extraction) -- prime_count is a reference
+        // into the caller's frame, so the compiler can't always prove
+        // nothing else aliases it and keep it in a register across this
+        // loop; a local can't be aliased by anything, so it stays in a
+        // register for the whole function.
+        uint64_t local_prime_count = 0;
         for (size_t w = 0; w < words_needed; ++w) {
             uint64_t bits = ~words_[w];
             uint64_t base_idx = w * 64ULL;
@@ -294,7 +302,7 @@ public:
             // skip straight to how many bits are set instead of decoding
             // each one (ctz + wheel-index math) just to discard it below.
             if constexpr (!Writer::WANTS_VALUES) {
-                prime_count += static_cast<uint64_t>(__builtin_popcountll(bits));
+                local_prime_count += static_cast<uint64_t>(__builtin_popcountll(bits));
                 continue;
             }
 
@@ -318,10 +326,11 @@ public:
 
                 uint64_t value = q * WHEEL_MOD + WHEEL_R[r];
                 out.write_uint64(value);
-                ++prime_count;
+                ++local_prime_count;
                 bits &= bits - 1; // clear the lowest set bit
             }
         }
+        prime_count += local_prime_count;
     }
 
 private:

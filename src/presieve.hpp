@@ -40,6 +40,7 @@
 // composite according to *any* table's primes is composite overall -- OR.)
 
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 #include "wheel.hpp"
@@ -131,36 +132,55 @@ struct Presieve {
     // Fills the first `count` bits of dst (word-granular, dst must have
     // room for ceil(count/64) words) with the pre-sieve pattern for the
     // segment starting at wheel-index k_low: the bitwise OR of every
-    // table's own (independently shifted) pattern. Replaces
+    // table's own (independently offset) pattern. Replaces
     // zero-initializing the segment's bit array: bucket-scheduled and flat
     // primes above the pre-sieve depth then OR their own marks on top,
     // same as before.
+    //
+    // k_low is always a multiple of 64 (every chunk and segment start is,
+    // see main.cpp/split_ranges), and every table's period_k is always a
+    // multiple of WHEEL_SIZE=8 (build_presieve_table). So bit_start =
+    // k_low % period_k is always a multiple of 8 -- never just any bit,
+    // always a whole byte -- even though it's essentially never a multiple
+    // of 64 (a whole word). That means each table's window can be read
+    // with one unaligned 8-byte load per output word instead of two
+    // aligned word loads shifted and OR'd together to reassemble it
+    // (`memcpy` here isn't a function call -- with a compile-time-constant
+    // size 8, the compiler folds it into a single unaligned mov, which x86
+    // takes no penalty for outside crossing a cache line). Tables are also
+    // grouped 4 at a time, so `dst` is written once per group of 4 instead
+    // of once per table (16 tables -> 4 writes instead of 16); each
+    // group's 4 loads plus 3 ORs per output word is still simple enough
+    // for the compiler to auto-vectorize across words, same as before.
     void fill(uint64_t* dst, uint64_t k_low, uint64_t count) const {
         uint64_t words_needed = (count + 63) / 64;
-        for (size_t t = 0; t < tables.size(); ++t) {
-            const PresieveTable& tbl = tables[t];
-            uint64_t bit_start = k_low % tbl.period_k;
-            uint64_t src_word = bit_start >> 6;
-            uint64_t shift = bit_start & 63;
-            const uint64_t* src = tbl.words.data();
-            if (t == 0) {
-                if (shift == 0) {
-                    for (uint64_t i = 0; i < words_needed; ++i) dst[i] = src[src_word + i];
-                } else {
-                    for (uint64_t i = 0; i < words_needed; ++i) {
-                        dst[i] = (src[src_word + i] >> shift) | (src[src_word + i + 1] << (64 - shift));
-                    }
-                }
+        size_t t = 0;
+        bool first = true;
+
+        for (; t + 4 <= tables.size(); t += 4) {
+            const uint8_t* s0 = byte_ptr(tables[t + 0], k_low);
+            const uint8_t* s1 = byte_ptr(tables[t + 1], k_low);
+            const uint8_t* s2 = byte_ptr(tables[t + 2], k_low);
+            const uint8_t* s3 = byte_ptr(tables[t + 3], k_low);
+            if (first) {
+                for (uint64_t i = 0; i < words_needed; ++i) dst[i] = load_u64(s0, i) | load_u64(s1, i) | load_u64(s2, i) | load_u64(s3, i);
+                first = false;
             } else {
-                if (shift == 0) {
-                    for (uint64_t i = 0; i < words_needed; ++i) dst[i] |= src[src_word + i];
-                } else {
-                    for (uint64_t i = 0; i < words_needed; ++i) {
-                        dst[i] |= (src[src_word + i] >> shift) | (src[src_word + i + 1] << (64 - shift));
-                    }
-                }
+                for (uint64_t i = 0; i < words_needed; ++i) dst[i] |= load_u64(s0, i) | load_u64(s1, i) | load_u64(s2, i) | load_u64(s3, i);
             }
         }
+        // Tail: fewer than 4 tables left (PRESIEVE_GROUPS is 16 long, an
+        // exact multiple of 4, but a smaller/custom group list wouldn't be).
+        for (; t < tables.size(); ++t) {
+            const uint8_t* s = byte_ptr(tables[t], k_low);
+            if (first) {
+                for (uint64_t i = 0; i < words_needed; ++i) dst[i] = load_u64(s, i);
+                first = false;
+            } else {
+                for (uint64_t i = 0; i < words_needed; ++i) dst[i] |= load_u64(s, i);
+            }
+        }
+
         // self_k is tiny (one entry per pre-sieve prime) and only ever
         // actually falls inside k_low==0's segment, but checking
         // unconditionally is cheap and doesn't need that assumption.
@@ -170,6 +190,17 @@ struct Presieve {
                 dst[idx >> 6] &= ~(1ULL << (idx & 63));
             }
         }
+    }
+
+private:
+    static const uint8_t* byte_ptr(const PresieveTable& tbl, uint64_t k_low) {
+        uint64_t bit_start = k_low % tbl.period_k; // always a multiple of 8, see fill()'s comment
+        return reinterpret_cast<const uint8_t*>(tbl.words.data()) + (bit_start >> 3);
+    }
+    static uint64_t load_u64(const uint8_t* base, uint64_t word_idx) {
+        uint64_t v;
+        std::memcpy(&v, base + word_idx * 8, sizeof(v));
+        return v;
     }
 };
 
