@@ -103,7 +103,15 @@ inline int count_cpu_list(const std::string& s) {
 // cpu0's own cache-sharing situation regardless of which physical core it
 // actually lands on. Returns 0 on any failure (same fallback contract as
 // detect_cache_bytes).
-inline uint64_t detect_cpu_cache_share(int cpu_id, int target_level) {
+// A logical CPU's own cache-level total size (bytes) and how many
+// logical CPUs share that instance (its "shared_cpu_list" cardinality).
+// Returns {0, 0} on any failure (same fallback contract as
+// detect_cache_bytes).
+struct CpuCacheInfo {
+    uint64_t total_bytes = 0;
+    int sharers = 0;
+};
+inline CpuCacheInfo detect_cpu_cache_info(int cpu_id, int target_level) {
     std::string cpu_dir = "/sys/devices/system/cpu/cpu" + std::to_string(cpu_id);
     for (int idx = 0; idx < 8; ++idx) {
         std::string base = cpu_dir + "/cache/index" + std::to_string(idx);
@@ -138,29 +146,46 @@ inline uint64_t detect_cpu_cache_share(int cpu_id, int target_level) {
         if (!(shared_f >> shared_list)) continue;
         int sharers = count_cpu_list(shared_list);
         if (sharers <= 0) continue;
-        return total_bytes / static_cast<uint64_t>(sharers);
+        return {total_bytes, sharers};
     }
-    return 0;
+    return {};
 }
 
-// Per-logical-CPU effective L1d/L2 share (see detect_cpu_cache_share),
-// indexed by CPU id, for every online CPU sysfs will admit to. Empty
-// (both vectors) if CPU 0 alone can't be read, so callers can tell
-// "topology detection isn't available here" from "this machine only has
-// one CPU" without a special case: a single-CPU vector of size 1 is a
-// valid, if trivial, per-CPU table.
+// A logical CPU's own EFFECTIVE share (bytes) of a given cache level:
+// that cache instance's total size divided by how many logical CPUs
+// actually share it (e.g. 2 for a hyperthread pair, 4 for an E-core
+// cluster). This is what detect_cache_bytes() (above) can't tell apart on
+// a hybrid P-core/E-core CPU: it always reads cpu0, so every thread gets
+// sized for cpu0's own cache-sharing situation regardless of which
+// physical core it actually lands on. Returns 0 on any failure.
+inline uint64_t detect_cpu_cache_share(int cpu_id, int target_level) {
+    CpuCacheInfo info = detect_cpu_cache_info(cpu_id, target_level);
+    if (info.sharers <= 0) return 0;
+    return info.total_bytes / static_cast<uint64_t>(info.sharers);
+}
+
+// Per-logical-CPU cache sizing, indexed by CPU id, for every online CPU
+// sysfs will admit to. Empty (both vectors) if CPU 0 alone can't be read,
+// so callers can tell "topology detection isn't available here" from
+// "this machine only has one CPU" without a special case: a single-CPU
+// vector of size 1 is a valid, if trivial, per-CPU table.
 //
-// Why this exists at all: on a hybrid P-core/E-core CPU (e.g. Raptor
-// Lake), a P-core's L2 is private to just its own hyperthread pair, but
-// several E-cores share one larger L2 between them -- reading only cpu0
-// (a P-core, typically enumerated first) and applying that one number to
-// every thread, as detect_cache_bytes() does, sizes E-core threads' work
-// for cache they don't actually have that much of. Measured on an
-// i5-13500 (2026-09): cpu0 (P-core) reports 1280K/2 sharers = 640K/thread;
-// an E-core cluster reports 2048K/4 sharers = 512K/thread -- a ~25%
-// mismatch applied uniformly to every E-core thread before this existed.
+// L2 and L1d get different treatment here, on purpose: L2 genuinely is a
+// capacity multiple threads draw from at once, so its per-thread fair
+// share (l2_share) is total/sharers -- on an i5-13500 (2026-09), cpu0
+// (a P-core) reports 1280K/2 sharers = 640K/thread, while an E-core
+// cluster reports 2048K/4 sharers = 512K/thread, a ~25% mismatch applied
+// uniformly to every E-core thread before this existed. L1d on a
+// hyperthread pair isn't reserved/split that way -- SMT time-slices which
+// logical thread is actually running, not a strict half held aside up
+// front -- and this project's own tuning already settled on using the
+// RAW detected L1d size directly with no halving for the single-value
+// fallback (see main.cpp's SUB_BLOCK_BYTES comment); l1_raw keeps that
+// same, already-validated philosophy per CPU instead of inventing a new
+// one, only splitting by CPU to catch a P-core/E-core L1d size difference
+// if there is one, not to model HT sharing a second, different way.
 struct CpuCacheTopology {
-    std::vector<uint64_t> l1_share; // index = logical CPU id, 0 = undetected
+    std::vector<uint64_t> l1_raw;   // index = logical CPU id, 0 = undetected
     std::vector<uint64_t> l2_share;
 };
 inline CpuCacheTopology detect_cpu_cache_topology() {
@@ -168,19 +193,22 @@ inline CpuCacheTopology detect_cpu_cache_topology() {
     for (int cpu = 0; ; ++cpu) {
         std::ifstream probe("/sys/devices/system/cpu/cpu" + std::to_string(cpu) + "/cache/index0/level");
         if (!probe) break;
-        topo.l1_share.push_back(detect_cpu_cache_share(cpu, 1));
+        topo.l1_raw.push_back(detect_cpu_cache_info(cpu, 1).total_bytes);
         topo.l2_share.push_back(detect_cpu_cache_share(cpu, 2));
     }
-    if (topo.l1_share.empty() || topo.l1_share[0] == 0) return {};
+    if (topo.l1_raw.empty() || topo.l1_raw[0] == 0) return {};
     return topo;
 }
 
 // Wheel-index segment width (word-aligned to 64, ready for SegmentSieve)
 // that fills half of `l2_bytes` -- same derivation as the auto -s formula
 // below, but returning k-width directly instead of the CLI-facing
-// "numeric width" -s uses, and callable per-CPU at runtime (see
-// pick_thread_cache in main.cpp) instead of only once globally. 0 falls
-// back to the same conservative 256KiB the global path uses.
+// "numeric width" -s uses. Used for the single-value global/classification
+// path, which still takes the RAW (undivided) L2 size and applies its own
+// /2 headroom -- see seg_k_width_from_per_thread_l2_share below for the
+// per-CPU path, which must NOT apply this /2 again on top of an input
+// that's already a per-thread share. 0 falls back to the same
+// conservative 256KiB the global path uses.
 inline uint64_t seg_k_width_from_l2_bytes(uint64_t l2_bytes) {
     if (l2_bytes == 0) l2_bytes = 256 * 1024;
     uint64_t l2_target_bytes = l2_bytes / 2;
@@ -188,9 +216,26 @@ inline uint64_t seg_k_width_from_l2_bytes(uint64_t l2_bytes) {
     return std::max<uint64_t>(64, (numeric_width * WHEEL_SIZE / WHEEL_MOD) / 64 * 64);
 }
 
+// Same derivation as seg_k_width_from_l2_bytes, but for a per-CPU L2
+// share (detect_cpu_cache_share/CpuCacheTopology::l2_share) that's
+// ALREADY divided by however many logical CPUs share that L2 -- applying
+// another /2 on top, as seg_k_width_from_l2_bytes does for the RAW
+// machine-wide value, would double-count the same headroom and undersize
+// every thread's segment (measured: this was a real bug, not just a
+// theoretical one -- see main.cpp's git history for the regression it
+// caused on a uniform, non-hybrid CPU before being caught and fixed). 0
+// falls back to half of the 256KiB raw fallback above, for the same
+// undetectable-topology case.
+inline uint64_t seg_k_width_from_per_thread_l2_share(uint64_t share_bytes) {
+    if (share_bytes == 0) share_bytes = 128 * 1024;
+    uint64_t numeric_width = share_bytes * 8 * WHEEL_MOD / WHEEL_SIZE;
+    return std::max<uint64_t>(64, (numeric_width * WHEEL_SIZE / WHEEL_MOD) / 64 * 64);
+}
+
 // L1-sized sub-block (bytes, word-aligned to 8) for the small tier -- same
-// derivation as main.cpp's SUB_BLOCK_BYTES, callable per-CPU. 0 falls back
-// to the same conservative 32KiB the global path uses.
+// derivation as main.cpp's SUB_BLOCK_BYTES, callable per-CPU with a RAW
+// (undivided -- see CpuCacheTopology's comment on l1_raw) L1d size. 0
+// falls back to the same conservative 32KiB the global path uses.
 inline uint64_t sub_block_from_l1_bytes(uint64_t l1_bytes) {
     if (l1_bytes == 0) l1_bytes = 32 * 1024;
     return std::max<uint64_t>(8, l1_bytes / 8 * 8);

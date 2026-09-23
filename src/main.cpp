@@ -487,19 +487,19 @@ int main(int argc, char** argv) {
     uint64_t max_seg_k_width = seg_k_width;
     if (!opt.segment_width_set || !opt.l1_bytes_override) {
         CpuCacheTopology topo = detect_cpu_cache_topology();
-        if (!topo.l1_share.empty()) {
+        if (!topo.l1_raw.empty()) {
             if (!opt.segment_width_set && !opt.l2_bytes_override) {
                 g_thread_cache.seg_k_width_by_cpu.resize(topo.l2_share.size());
                 for (size_t i = 0; i < topo.l2_share.size(); ++i) {
-                    uint64_t w = seg_k_width_from_l2_bytes(topo.l2_share[i]);
+                    uint64_t w = seg_k_width_from_per_thread_l2_share(topo.l2_share[i]);
                     g_thread_cache.seg_k_width_by_cpu[i] = w;
                     max_seg_k_width = std::max(max_seg_k_width, w);
                 }
             }
             if (!opt.l1_bytes_override) {
-                g_thread_cache.sub_block_bytes_by_cpu.resize(topo.l1_share.size());
-                for (size_t i = 0; i < topo.l1_share.size(); ++i)
-                    g_thread_cache.sub_block_bytes_by_cpu[i] = sub_block_from_l1_bytes(topo.l1_share[i]);
+                g_thread_cache.sub_block_bytes_by_cpu.resize(topo.l1_raw.size());
+                for (size_t i = 0; i < topo.l1_raw.size(); ++i)
+                    g_thread_cache.sub_block_bytes_by_cpu[i] = sub_block_from_l1_bytes(topo.l1_raw[i]);
             }
         }
     }
