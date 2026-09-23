@@ -16,10 +16,12 @@ RUN make portable nth_prime
 # compile from source themselves (release build, -march=native against the
 # container's own CPU) rather than just running prebuilt binaries, so this
 # stage keeps gcc/make instead of shipping only the runtime image below.
-# primesieve is added on top for benchmark.sh's comparison column.
+# primesieve is added on top for benchmark.sh's comparison column;
+# primecount-bin is what scripts/test.sh checks pi(N)/nth-prime against
+# instead of hardcoded constants -- required for `make test` to even start.
 FROM builder AS dev
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        primesieve \
+        primesieve primecount-bin \
     && rm -rf /var/lib/apt/lists/*
 COPY scripts ./scripts
 CMD ["make", "test"]

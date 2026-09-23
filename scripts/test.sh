@@ -1,15 +1,19 @@
 #!/bin/bash
 # Prueba de regresion, tres partes:
-#   1. Compara pi(N) contra el valor de referencia conocido para
+#   1. Compara pi(N) contra primecount (--nth-prime/plain, independiente de
+#      este proyecto -- ver https://github.com/kimwalisch/primecount) para
 #      N = 1e8..1e11, usando --count-only (sin E/S a disco).
-#   2. Construye un .db real en N=1e10 y comprueba unos cuantos primos
-#      conocidos por posicion via nth_prime (ver README, seccion
-#      ".db output").
+#   2. Construye un .db real en N=1e10 y comprueba unos cuantos primos por
+#      posicion via nth_prime contra primecount --nth-prime (ver README,
+#      seccion ".db output").
 #   3. Round-trip texto vs .db en N=1e5..1e7: mismo pi(N) y, posicion por
 #      posicion (todas en el N mas chico, una muestra aleatoria en los
 #      demas -- comprobar cada posicion via nth_prime implica un proceso
 #      por consulta, caro a partir de cientos de miles de primos), el mismo
 #      primo en ambos formatos (antes scripts/verify_db.sh, fusionado aqui).
+# Los valores esperados en 1 y 2 salen de primecount, no de constantes
+# hardcodeadas -- necesita estar instalado (Debian/Ubuntu: paquete
+# primecount-bin; ver docker/Dockerfile, etapa "dev").
 # Pensado para `make test`, pero tambien se puede correr suelto
 # (./scripts/test.sh) siempre que los binarios ya esten compilados.
 set -u
@@ -17,10 +21,16 @@ cd "$(dirname "$0")/.."
 
 BIN=./eratostenes
 NTH_BIN=./nth_prime
+PRIMECOUNT=${PRIMECOUNT:-primecount}
 THREADS=${THREADS:-$(nproc 2>/dev/null || echo 4)}
 
 if [ ! -x "$BIN" ] || [ ! -x "$NTH_BIN" ]; then
     echo "Error: no se encuentra $BIN o $NTH_BIN compilados. Ejecuta 'make' primero." >&2
+    exit 1
+fi
+if ! command -v "$PRIMECOUNT" >/dev/null 2>&1; then
+    echo "Error: no se encuentra '$PRIMECOUNT' (paquete primecount-bin) -- los valores" >&2
+    echo "       esperados de este test salen de ahi, no de constantes hardcodeadas." >&2
     exit 1
 fi
 
@@ -29,13 +39,12 @@ trap 'rm -rf "$WORKDIR"' EXIT
 
 fail=0
 
-# --- 1: pi(N) por --count-only ---
+# --- 1: pi(N) por --count-only, contra primecount ---
 NS=(100000000 1000000000 10000000000 100000000000)
-EXPECTED=(5761455 50847534 455052511 4118054813)
 
 for i in "${!NS[@]}"; do
     n="${NS[$i]}"
-    expected="${EXPECTED[$i]}"
+    expected=$("$PRIMECOUNT" "$n")
 
     start=$(date +%s.%N)
     output=$("$BIN" "$n" -t "$THREADS" --count-only 2>&1)
@@ -55,17 +64,15 @@ for i in "${!NS[@]}"; do
     fi
 done
 
-# --- 2: .db en N=1e10, primos conocidos por posicion ---
+# --- 2: .db en N=1e10, primos por posicion contra primecount --nth-prime ---
 DB="$WORKDIR/n1e10.db"
 "$BIN" 10000000000 -t "$THREADS" -o "$DB" >/dev/null 2>&1
 
-# posicion (1-indexada, N=1 -> 2) -> primo N-esimo conocido
-POS=(1 1000 10000 200000000 455052511)
-PRIMES=(2 7919 104729 4222234741 9999999967)
+expected_pi_1e10=$("$PRIMECOUNT" 10000000000)
+POS=(1 1000 10000 200000000 "$expected_pi_1e10")
 
-for i in "${!POS[@]}"; do
-    pos="${POS[$i]}"
-    expected="${PRIMES[$i]}"
+for pos in "${POS[@]}"; do
+    expected=$("$PRIMECOUNT" "$pos" --nth-prime)
     actual=$("$NTH_BIN" "$DB" "$pos" 2>&1)
 
     if [ "$actual" == "$expected" ]; then
@@ -77,10 +84,10 @@ for i in "${!POS[@]}"; do
 done
 
 count=$("$NTH_BIN" "$DB" --count 2>&1)
-if [ "$count" == "455052511" ]; then
+if [ "$count" == "$expected_pi_1e10" ]; then
     printf "OK   .db N=1e10 --count=%s\n" "$count"
 else
-    printf "FAIL .db N=1e10 --count esperado=455052511 obtenido=%s\n" "${count:-<sin salida>}"
+    printf "FAIL .db N=1e10 --count esperado=%s obtenido=%s\n" "$expected_pi_1e10" "${count:-<sin salida>}"
     fail=1
 fi
 rm -f "$DB"

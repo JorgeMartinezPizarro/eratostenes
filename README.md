@@ -10,6 +10,12 @@ Requires a C++20 compiler, POSIX `pwrite`/`ftruncate` (Linux or WSL; does not bu
 sudo apt-get install libsqlite3-dev libzstd-dev   # Debian/Ubuntu/WSL
 ```
 
+`make test` additionally needs [primecount](https://github.com/kimwalisch/primecount) on `PATH` -- it's the source of truth for every expected pi(N)/nth-prime value the test checks against (no hardcoded constants):
+
+```sh
+sudo apt-get install primecount-bin   # Debian/Ubuntu/WSL
+```
+
 ```sh
 make            # release build: -O3 -march=native -flto, plus nth_prime
 make portable   # no -march=native, for a binary you'll copy to another machine
@@ -17,7 +23,8 @@ make debug      # ASan/UBSan, for debugging
 make test       # checks pi(N) for N=1e8..1e11, known primes by position
                 # in a real .db (N=1e10, via nth_prime), and round-trips
                 # smaller N through .db output checked against text output,
-                # position by position
+                # position by position -- pi(N)/nth-prime expectations come
+                # from primecount, not hardcoded constants
 ```
 
 ## Docker
