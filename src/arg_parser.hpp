@@ -203,32 +203,22 @@ inline CpuCacheTopology detect_cpu_cache_topology() {
 // Wheel-index segment width (word-aligned to 64, ready for SegmentSieve)
 // that fills half of `l2_bytes` -- same derivation as the auto -s formula
 // below, but returning k-width directly instead of the CLI-facing
-// "numeric width" -s uses. Used for the single-value global/classification
-// path, which still takes the RAW (undivided) L2 size and applies its own
-// /2 headroom -- see seg_k_width_from_per_thread_l2_share below for the
-// per-CPU path, which must NOT apply this /2 again on top of an input
-// that's already a per-thread share. 0 falls back to the same
-// conservative 256KiB the global path uses.
+// "numeric width" -s uses. Also used, deliberately, in main.cpp's
+// per-CPU-minimum step with an already-per-thread L2 share (not just the
+// RAW machine-wide value the single-CPU fallback passes): applying this
+// same /2 on top of a share that's already divided by how many logical
+// CPUs share that L2 looked like double-counting the same headroom at
+// first (and briefly was fixed away as a bug) -- but measured, on the
+// actual target hardware (i5-13500, many real threads contending for
+// shared L3/memory bandwidth), the smaller resulting segment is reliably
+// faster than the "fair share, no extra margin" version, not slower --
+// see main.cpp's own comment on the per-CPU-minimum step, and git history
+// for the full A/B trail behind reversing that "fix". 0 falls back to a
+// conservative 256KiB.
 inline uint64_t seg_k_width_from_l2_bytes(uint64_t l2_bytes) {
     if (l2_bytes == 0) l2_bytes = 256 * 1024;
     uint64_t l2_target_bytes = l2_bytes / 2;
     uint64_t numeric_width = l2_target_bytes * 8 * WHEEL_MOD / WHEEL_SIZE;
-    return std::max<uint64_t>(64, (numeric_width * WHEEL_SIZE / WHEEL_MOD) / 64 * 64);
-}
-
-// Same derivation as seg_k_width_from_l2_bytes, but for a per-CPU L2
-// share (detect_cpu_cache_share/CpuCacheTopology::l2_share) that's
-// ALREADY divided by however many logical CPUs share that L2 -- applying
-// another /2 on top, as seg_k_width_from_l2_bytes does for the RAW
-// machine-wide value, would double-count the same headroom and undersize
-// every thread's segment (measured: this was a real bug, not just a
-// theoretical one -- see main.cpp's git history for the regression it
-// caused on a uniform, non-hybrid CPU before being caught and fixed). 0
-// falls back to half of the 256KiB raw fallback above, for the same
-// undetectable-topology case.
-inline uint64_t seg_k_width_from_per_thread_l2_share(uint64_t share_bytes) {
-    if (share_bytes == 0) share_bytes = 128 * 1024;
-    uint64_t numeric_width = share_bytes * 8 * WHEEL_MOD / WHEEL_SIZE;
     return std::max<uint64_t>(64, (numeric_width * WHEEL_SIZE / WHEEL_MOD) / 64 * 64);
 }
 
