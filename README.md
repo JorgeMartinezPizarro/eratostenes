@@ -20,11 +20,8 @@ sudo apt-get install primecount-bin   # Debian/Ubuntu/WSL
 make            # release build: -O3 -march=native -flto, plus nth_prime
 make portable   # no -march=native, for a binary you'll copy to another machine
 make debug      # ASan/UBSan, for debugging
-make test       # checks pi(N) for N=1e8..1e11, known primes by position
-                # in a real .db (N=1e10, via nth_prime), and round-trips
-                # smaller N through .db output checked against text output,
-                # position by position -- pi(N)/nth-prime expectations come
-                # from primecount, not hardcoded constants
+make test       # checks output against primecount across N and across
+                # several parameter combinations, plus .db vs text output
 ```
 
 ## Docker
@@ -113,7 +110,7 @@ Writting primes to a `.db` file results in the following ratios per prime:
 
 ## Verification
 
-`make test` checks pi(N) against the known value for N=1e8..1e11, plus a handful of known primes by position in a real `.db` built at N=1e10, read back with `nth_prime`. It also checks the `.db` output mode against plain text output: matching pi(N), and every (or, past a few hundred thousand primes, a random sample of) position agreeing between the two. Output has also been checked to be byte-for-byte identical across thread counts, segment widths, and wheels for the same N.
+`make test` checks pi(N) and primes by position against [primecount](https://github.com/kimwalisch/primecount) across several N and parameter combinations (threads, segment width, cache-size overrides, `.db` block size, zstd level), and checks `.db` output against plain text output position by position. Raw sieve performance is checked separately against [primesieve](https://github.com/kimwalisch/primesieve) (see [Benchmarks](#benchmarks)).
 
 ## WSL disk reclaim
 
