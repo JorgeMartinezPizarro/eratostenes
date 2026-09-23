@@ -430,6 +430,26 @@ private:
     // tier's population/ring-slot ratio changes a lot on a future
     // machine or N, re-check both regimes again rather than assuming
     // either one predicts the other for a block-size change specifically.
+    //
+    // Attempt 7 (tried, reverted): schedule_sparse's ring-slot placement
+    // divides by seg_k_width_, a runtime value -- rounding main.cpp's
+    // *auto*-computed width down to the nearest power of 2 (leaving an
+    // explicit -s exactly as given) turns that into a shift. Measured at
+    // both natural N this tier's history already tracks: N=1e12 cycles:u
+    // 1.6571T->1.6646T (+0.45%, noise-level), cache-refs 14.30B->13.45B
+    // (-5.9%); N=1e13 cycles:u 20.776T->20.818T (+0.2%, also noise-level)
+    // but cache-refs 295.8B->333.9B (+12.9%) and cache-misses 16.20B->
+    // 18.04B (+11.4%) -- worse, and in the OPPOSITE direction from N=1e12.
+    // Net: no consistent win on the metric this tier's history actually
+    // trusts (cycles:u flat both times, within noise), and the cache
+    // impact of rounding the *width itself* down doesn't even agree in
+    // sign between the two N tried, let alone offset what the shift
+    // saves. Whatever the auto-tuned width was doing (see arg_parser.hpp's
+    // own comment on the sqrt/L2 tradeoff) is sensitive enough that even
+    // rounding it *down* -- the safe direction, unlike Finding 2's already-
+    // reverted rounding-up-to-fill-L2 attempt -- isn't free. Reverted;
+    // the division itself was never shown to cost anything on its own
+    // here, only entangled with a width change that didn't pay for itself.
     __attribute__((noinline))
     void process_sparse_bucket(uint64_t k_low, uint64_t k_high) {
         uint32_t slot = static_cast<uint32_t>(cur_segment_ & (num_buckets_ - 1));
