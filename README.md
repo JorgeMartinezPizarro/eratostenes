@@ -87,7 +87,7 @@ What this project is built from, one term each — follow the link for the conce
 
 ## Benchmarks
 
-`-c` on an Intel Core i5-13500, primesieve alongside it for reference, same machine:
+`./eratostenenes N -c` on an Intel Core i5-13500, primesieve alongside it for reference:
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
@@ -96,18 +96,16 @@ What this project is built from, one term each — follow the link for the conce
 | 1e12 | 31.93s | 24.885s | 1.3x |
 | 1e13 | 377.75s | 291.243s | 1.3x |
 
-Under an i5-11400F (dev PC, two generations older), `-c` with primesieve alongside it, same machine, after the 2026-09-24 segment-width/presieve/accumulator changes (see git history for `arg_parser.hpp`/`presieve.hpp`/`segment_sieve.hpp`):
+Below the same for i5-11400F:
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
-| 1e10 | 0.233s | 0.200s | 1.17x |
-| 1e11 | 2.608s | 2.366s | 1.10x |
-| 1e12 | 33.206s | 29.906s | 1.11x |
-| 1e13 | 430.412s | 418.034s | 1.03x |
+| 1e10 | 0.22s | 0.187s | 1.2x |
+| 1e11 | 2.63s | 2.342s | 1.1x |
+| 1e12 | 32.88s | 27.944s | 1.2x |
+| 1e13 | 457.88s | 411.433s | 1.1x |
 
-Down from a flat ~1.3x before those changes. The i5-13500 table above predates them and needs re-measuring; it's kept as the last real server numbers until then, not as current.
-
-Writting primes to a `.db` file results in the following ratios per prime:
+Below the results for `./eratostenes limit -o base.db`:
 
 | limit  |          pi(N) | db size    | bit/prime |   MB/s | total(s) |
 |--------|---------------:|------------|----------:|-------:|---------:|
@@ -119,7 +117,7 @@ Writting primes to a `.db` file results in the following ratios per prime:
 
 ## Verification
 
-`make test` checks pi(N) and primes by position against [primecount](https://github.com/kimwalisch/primecount) across several N and parameter combinations (threads, segment width, cache-size overrides, `.db` block size, zstd level), and checks `.db` output against plain text output position by position. Raw sieve performance is checked separately against [primesieve](https://github.com/kimwalisch/primesieve) (see [Benchmarks](#benchmarks)).
+`make test` checks pi(N) and primes by position against [primecount](https://github.com/kimwalisch/primecount) across several N and parameter combinations (threads, segment width, cache-size overrides, `.db` block size, zstd level), and checks `.db` output against plain text output position by position.
 
 ## WSL disk reclaim
 
