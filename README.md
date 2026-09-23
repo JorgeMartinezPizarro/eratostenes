@@ -92,7 +92,7 @@ What this project is built from, one term each — follow the link for the conce
 | 1e12 | 32.11s | 25.082s | 1.3x |
 | 1e13 | 379.97s | 291.917s | 1.3x |
 
-Under an i5-11400F (dev PC, two generations older) the best-of-3 times achieved for 1e11-1e13 are 2.95s, 40.34s, 591.09s -- kept as a baseline for this weaker machine, not a fair ratio comparison (no primesieve run alongside it here).
+Under an i5-11400F (dev PC, two generations older) the best-of-3 times achieved for 1e11-1e13 are 2.95s, 35.70s, 456.88s -- kept as a baseline for this weaker machine, not a fair ratio comparison (no primesieve run alongside it here).
 
 Writting primes to a `.db` file results in the following ratios per prime:
 
