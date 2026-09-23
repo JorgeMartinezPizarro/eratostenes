@@ -457,23 +457,32 @@ int main(int argc, char** argv) {
     // unavailable).
     if ((!opt.segment_width_set && !opt.l2_bytes_override) || !opt.l1_bytes_override) {
         CpuCacheTopology topo = detect_cpu_cache_topology();
-        if (!opt.segment_width_set && !opt.l2_bytes_override) {
-            uint64_t min_l2_share = 0;
-            for (uint64_t s : topo.l2_share) if (s && (!min_l2_share || s < min_l2_share)) min_l2_share = s;
-            if (min_l2_share) {
-                uint64_t w = seg_k_width_from_l2_bytes(min_l2_share);
-                if (w < seg_k_width) {
-                    seg_k_width = w;
-                    opt.segment_width = seg_k_width * WHEEL_MOD / WHEEL_SIZE; // keep the startup log's "segmento=" accurate
-                }
+        // Gate on GENUINE heterogeneity (some other CPU's share is smaller
+        // than cpu0's own) rather than always recomputing from the
+        // minimum: on a uniform machine every share is equal, so the
+        // minimum trivially equals cpu0's, and re-deriving through
+        // seg_k_width_from_l2_bytes -- whose own /2 margin is deliberately
+        // extra-conservative, validated for real P/E-core contention, see
+        // that function's comment -- would apply that SAME extra margin
+        // machine-wide for no reason, even where it's only ever been
+        // measured to help (i5-13500) and was NOT re-validated to help
+        // (this project's own i5-11400F data on this margin question is
+        // mixed -- see git history). Only touch anything when the
+        // machine actually has more than one cache domain.
+        if (!opt.segment_width_set && !opt.l2_bytes_override && !topo.l2_share.empty() && topo.l2_share[0]) {
+            uint64_t min_l2_share = topo.l2_share[0];
+            for (uint64_t s : topo.l2_share) if (s && s < min_l2_share) min_l2_share = s;
+            if (min_l2_share < topo.l2_share[0]) {
+                seg_k_width = seg_k_width_from_l2_bytes(min_l2_share);
+                opt.segment_width = seg_k_width * WHEEL_MOD / WHEEL_SIZE; // keep the startup log's "segmento=" accurate
             }
         }
-        if (!opt.l1_bytes_override) {
-            uint64_t min_l1_raw = 0;
-            for (uint64_t s : topo.l1_raw) if (s && (!min_l1_raw || s < min_l1_raw)) min_l1_raw = s;
-            if (min_l1_raw) {
-                uint64_t sb = sub_block_from_l1_bytes(min_l1_raw);
-                if (sb < SUB_BLOCK_BYTES) { SUB_BLOCK_BYTES = sb; small_limit = SUB_BLOCK_BYTES / 2; }
+        if (!opt.l1_bytes_override && !topo.l1_raw.empty() && topo.l1_raw[0]) {
+            uint64_t min_l1_raw = topo.l1_raw[0];
+            for (uint64_t s : topo.l1_raw) if (s && s < min_l1_raw) min_l1_raw = s;
+            if (min_l1_raw < topo.l1_raw[0]) {
+                SUB_BLOCK_BYTES = sub_block_from_l1_bytes(min_l1_raw);
+                small_limit = SUB_BLOCK_BYTES / 2;
             }
         }
     }
