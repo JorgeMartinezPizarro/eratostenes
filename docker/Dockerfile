@@ -1,6 +1,8 @@
 # Build multi-stage: compila con g++ y deja una imagen final ligera.
-# Se usa "make portable" (sin -march=native) porque la imagen puede
-# ejecutarse en una CPU distinta a la que la construyo.
+# Release (-march=native) porque se construye y se ejecuta en la misma
+# maquina -- si algun dia el build host y el runtime host difieren, volver
+# a "make portable" (ver Makefile) para no arriesgar SIGILL en la CPU de
+# destino.
 
 FROM gcc:13-bookworm AS builder
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -9,7 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /src
 COPY Makefile ./
 COPY src ./src
-RUN make portable nth_prime
+RUN make
 
 # dev: full toolchain image for `make test`/`benchmark` inside Docker (see
 # the `dev` service in docker-compose.yml). Those targets
