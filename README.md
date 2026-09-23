@@ -1,6 +1,6 @@
 # Eratostenes
 
-A segmented, parallel, wheel-based Sieve of Eratosthenes (C++20) for generating or counting primes up to very large N (10^12+), with a compact, randomly-indexable `.db` output format for storing dense prime tables at scale. [primesieve](https://github.com/kimwalisch/primesieve) is this project's reference, both for performance (see [Benchmarks](#benchmarks)) and for technique -- several of the ideas below come directly from reading its source.
+A segmented, parallel, wheel-based Sieve of Eratosthenes (C++20) for generating or counting primes up to very large N (10^12+), with a compact, randomly-indexable `.db` output format for storing dense prime tables at scale. [primesieve](https://github.com/kimwalisch/primesieve) is this project's reference, both for performance (see [Benchmarks](#benchmarks)) and for technique -- several of the ideas below come directly from reading its source. See [docs/ALGORITHM.md](docs/ALGORITHM.md) for how the pieces fit together.
 
 ## Build
 
@@ -74,7 +74,7 @@ The `.db` format is a indexed sqlite file (max 256TB size), so it is suitable up
 
 ## Techniques
 
-What this project is built from, one term each — follow the link for the concept itself:
+What this project is built from, one term each — follow the link for the concept itself. See [docs/ALGORITHM.md](docs/ALGORITHM.md) for how they combine.
 
 - [Segmented sieve](https://en.wikipedia.org/wiki/Sieve_of_Eratosthenes#Segmented_sieve)
 - [Wheel factorization](https://en.wikipedia.org/wiki/Wheel_factorization)
