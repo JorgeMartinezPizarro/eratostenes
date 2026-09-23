@@ -141,6 +141,28 @@ inline void cross_off_class(uint8_t* s, uint64_t end, DenseState* first, DenseSt
 // despite 38% fewer instructions). Generic one-hit-per-iteration stepping
 // instead, division-free via the shared ONFLY_CORRECTION table (wheel.hpp),
 // on bit positions; mispredicts only once per prime (the loop exit).
+//
+// Attempt (tried, reverted): a 4-way interleaved version -- each prime's
+// own chain (k -> next k) is a serial dependency, but four DIFFERENT
+// primes' chains are independent, so the idea was to give out-of-order
+// execution other ready work while one lane stalls on a branch-
+// misprediction recovery or dependent load, instead of stalling through
+// each prime fully before starting the next (the actual bit-set is a
+// strided-free scatter, so there was nothing for the compiler to
+// auto-vectorize the way presieve.hpp's fill() does -- this was meant as
+// latency-hiding via interleaving, not SIMD; AVX-512 gather/scatter was
+// ruled out up front too, since the target server, i5-13500/Raptor Lake,
+// has AVX-512 fused off for having E-cores, unlike this dev PC). Measured
+// with perf stat cycles:u (not wall-clock): +13.2% at N=1e11 (141.2G ->
+// 159.8G), +14.3% at N=1e12 (1639.1G -> 1873.2G). IPC went up both times
+// (1.37->1.52, 1.41->1.61) but instruction count rose even more
+// (+25.6%/+30.8%) and branch-miss rate barely moved (7.97%->7.75%,
+// 6.95%->6.45%) -- the hypothesized latency-hiding either didn't happen
+// or didn't matter, while the real, measured cost was structural: the
+// inner while loop runs until the LAST of the 4 lanes finishes, so a
+// lane with fewer hits this segment still pays an `if (aN)` check every
+// remaining iteration instead of retiring early like the scalar version's
+// single while does per prime. Reverted.
 inline void cross_off_medium(uint64_t* words, uint64_t end_bit, DenseState* first, DenseState* last, uint64_t rebase_bits) {
     for (DenseState* st = first; st != last; ++st) {
         uint64_t k = st->pos;
