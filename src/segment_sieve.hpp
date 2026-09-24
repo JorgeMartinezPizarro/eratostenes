@@ -578,6 +578,80 @@ private:
     // reverted rounding-up-to-fill-L2 attempt -- isn't free. Reverted;
     // the division itself was never shown to cost anything on its own
     // here, only entangled with a width change that didn't pay for itself.
+    //   - attempt 8 (dev PC, N=1e12 forced-sparse proxy, -s 500000, 84%
+    //     sparse, two reps): software-prefetched s[(it+4)->pos] in
+    //     process_big()'s hit loop below, on the theory that it's this
+    //     tier's one genuinely scattered access and the target is already
+    //     knowable (it+N's pos was written when it was scheduled last
+    //     segment, so it's valid data, not something this iteration has to
+    //     compute first). Regressed on both metrics, both reps: cycles:u
+    //     2.2092T->2.2858T (+3.5%) then 2.2262T->2.2603T (+1.5%);
+    //     cache-misses:u 377.1M->1182.3M (+213%!) then 676.9M->777.3M
+    //     (+14.8%) -- worse in the SAME direction both times, unlike
+    //     attempt 7's sign flip, so not noise. Root cause (inferred, not
+    //     independently confirmed): the segment array is L2-sized by
+    //     design (see this file's top header), so a byte scattered across
+    //     it isn't the long-latency miss a software prefetch usually hides
+    //     -- the extra prefetch is then just added memory traffic, and
+    //     with 12 threads all issuing it at once, contends for MSHRs/L2
+    //     bandwidth instead of hiding anything. Reverted.
+    //   - attempt 9 (dev PC, same forced-sparse proxy, two reps): 4-way
+    //     software-pipelined process_big()'s hit loop below -- load/table-
+    //     lookup all 4 entries first, then all 4 writes, then all 4
+    //     reschedules (pushes kept in original 0,1,2,3 order for block-
+    //     chain correctness). perf annotate on the scalar version showed
+    //     ~65% of this function's own cycles in one dependent chain per
+    //     hit (load DenseState -> index big::TABLE -> compute next pos/
+    //     slot -> check head_[slot]); unlike cross_off_medium's while loop
+    //     (data-dependent trip count, why ITS 4-lane attempt lost -- see
+    //     erat_small.hpp), this for loop always does exactly one pass per
+    //     entry, so no lane can finish early and idle waiting on the
+    //     others -- that specific failure mode genuinely doesn't apply
+    //     here. IPC did improve (1.33-1.34->1.36-1.37) and cache-misses:u
+    //     didn't get worse (757.7M-835.0M -> 764.7M-773.9M, flat to
+    //     better) -- the ILP hypothesis wasn't wrong. But instructions:u
+    //     rose 3.1% (3.0413T->3.1366T, both reps identically -- the
+    //     remainder loop for block sizes not a multiple of 4, plus extra
+    //     live registers/moves from unrolling) and that outweighed the ILP
+    //     gain: cycles:u 2.2791T->2.3050T (+1.1%) then 2.2705T->2.2960T
+    //     (+1.1%) -- small but consistent both reps, not noise. Reverted;
+    //     if ever revisited, the remainder-loop overhead (not the
+    //     pipelining idea itself) is the part that would need to shrink,
+    //     e.g. by only pipelining when a block is known full-size (it's
+    //     the LAST block in a chain, per push_sparse_entry's alignment
+    //     trick, that's ever partial).
+    //   - attempt 10 (dev PC): replaced head_/tail_'s modular ring
+    //     (power-of-2 size, 2x margin, `(cur_segment_+ahead) & bmask` on
+    //     every push) with a SLIDING WINDOW, matching how primesieve's own
+    //     EratBig::crossOff does it (read from its actual v12.7 source,
+    //     not from memory -- include/primesieve/Bucket.hpp,
+    //     src/EratBig.cpp): slot 0 always means "due this segment", a push
+    //     uses `ahead` directly (no AND-mask, no absolute segment
+    //     counter), and once slot 0 is fully drained the whole window
+    //     shifts left by one (std::copy) instead. On the usual forced-
+    //     sparse proxy (N=1e12, -s 500000, 84% sparse, two reps) this
+    //     looked like a real if modest win: cycles:u 2.2689T->2.2632T
+    //     (-0.25%) then 2.2766T->2.2691T (-0.33%), instructions:u down
+    //     1.79% both reps. But at the *natural* N=1e13 cliff it reversed:
+    //     cycles:u 19.738T->20.118T (+1.93%), cache-misses:u 20.49B->
+    //     21.67B (+5.8%), cache-references:u +5.0% -- a real regression,
+    //     not noise. Root cause: the shift is unconditional, paid on
+    //     EVERY process_big() call regardless of whether anything was
+    //     actually due that segment -- and at natural N, sparse density is
+    //     low (this tier was only ~2.66% of total cycles at 1e13, see
+    //     erat_small.hpp's session notes), so most calls have nothing due
+    //     at all. The old modular ring's equivalent no-op case was one
+    //     `while (head_[slot])` check against false -- cheap and highly
+    //     predictable. The forced-sparse proxy hides this because it's
+    //     deliberately built to make nearly every segment have something
+    //     due, so the shift's fixed cost gets amortized against real work
+    //     almost every call there -- the exact same proxy-vs-natural sign
+    //     flip attempt 6 already hit once before in this tier's history,
+    //     which is why both are always checked here before keeping
+    //     anything. Reverted; if ever revisited, the shift would need to
+    //     be skipped (or made cheaper than a full-window copy) on segments
+    //     where the window is already all-nullptr, which is the common
+    //     case at realistic N.
     // Drains this segment's ring slot: for each due entry, mark its one
     // hit (byte marking, mod-210 table lookup for mask/step -- see
     // wheel210_big.hpp), advance to the next hit, and re-file it (usually
