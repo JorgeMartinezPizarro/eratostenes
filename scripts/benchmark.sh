@@ -140,7 +140,10 @@ printf "|---|---:|---:|---:|\n"
 for n in "${NS[@]}"; do
     te="${ERATO_TIME[$n]}"
     tp="${PRIMESIEVE_TIME[$n]}"
-    ratio=$(awk -v a="$te" -v b="$tp" 'BEGIN{printf "%.1f", a/b}')
+    # %.1f rounds anything in [0.95, 1.05) up to "1.0x", which hides a real
+    # few-percent win under primesieve (e.g. 0.97 -> "1.0x" reads as a tie).
+    # Two decimals keeps that visible as "0.97x" instead.
+    ratio=$(awk -v a="$te" -v b="$tp" 'BEGIN{printf "%.2f", a/b}')
     printf "| %s | %ss | %ss | %sx |\n" "$n" "$te" "$tp" "$ratio"
 done
 

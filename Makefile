@@ -29,10 +29,18 @@ LDLIBS := -lsqlite3 -lzstd
 OBJ_DIR_RELEASE  := obj/release
 OBJ_DIR_PORTABLE := obj/portable
 OBJ_DIR_DEBUG    := obj/debug
+OBJ_DIR_PGO      := obj/pgo
 
 OBJS_RELEASE  := $(SRCS:$(SRC_DIR)/%.cpp=$(OBJ_DIR_RELEASE)/%.o)
 OBJS_PORTABLE := $(SRCS:$(SRC_DIR)/%.cpp=$(OBJ_DIR_PORTABLE)/%.o)
 OBJS_DEBUG    := $(SRCS:$(SRC_DIR)/%.cpp=$(OBJ_DIR_DEBUG)/%.o)
+
+# pgo only ever builds main.cpp (nth_prime isn't a hot loop, see NTH_BIN
+# below) and both phases reuse this exact object path -- gcc names each
+# .gcda after the .o that produced it, so generate and use must agree on
+# that path for -fprofile-use to find the right file under PROF_DIR.
+PROF_DIR := $(OBJ_DIR_PGO)/prof
+PGO_OBJ  := $(OBJ_DIR_PGO)/main.o
 
 # nth_prime (the .db reader): its own binary, release profile only -- it's
 # not a hot loop, so -march=native/portable/debug variants aren't needed.
@@ -42,7 +50,7 @@ NTH_OBJ := $(OBJ_DIR_RELEASE)/nth_prime.o
 OUT_DIR := $(CURDIR)/output
 COMPOSE := docker compose -f docker/docker-compose.yml
 
-.PHONY: all portable debug clean fclean re docker run test benchmark \
+.PHONY: all portable debug pgo clean fclean re docker run test benchmark \
         docker-dev docker-test docker-benchmark
 
 # --- release (default) ---
@@ -71,7 +79,36 @@ debug: $(OBJS_DEBUG)
 $(OBJ_DIR_DEBUG)/%.o: $(SRC_DIR)/%.cpp $(HEADERS) | $(OBJ_DIR_DEBUG)
 	$(CXX) $(CXXFLAGS_DEBUG) -c $< -o $@
 
-$(OBJ_DIR_RELEASE) $(OBJ_DIR_PORTABLE) $(OBJ_DIR_DEBUG):
+# --- pgo: profile-guided release build, same flags as release plus two
+# full compiles of main.cpp around a training run. Trained on --count-only
+# at N=1e9/1e10/1e11 (crosses the small/medium/sparse tier thresholds,
+# see erat_small.hpp) -- .db output's write path isn't exercised, so this
+# profile doesn't inform it. -fprofile-update=prefer-atomic on the
+# instrumented build: plain (non-atomic) counters race and undercount
+# under this program's own thread pool. -fprofile-correction +
+# -Wno-coverage-mismatch on the final build: the CFG built from
+# -flto=auto isn't byte-identical to the instrumented run's, which GCC
+# otherwise treats as a hard mismatch instead of just missing coverage.
+# Measured on the dev PC (perf stat cycles:u, count-only, N=1e10..1e13):
+# ~2-4% fewer cycles, consistent in direction across the whole range --
+# see README#benchmarks. Overwrites $(BIN) in place, like `portable`
+# does; run `make re` afterwards to get back a plain release build.
+pgo: $(NTH_BIN)
+	rm -rf $(OBJ_DIR_PGO)
+	mkdir -p $(PROF_DIR)
+	$(CXX) $(CXXFLAGS_RELEASE) -fprofile-generate -fprofile-update=prefer-atomic \
+	    -fprofile-dir=$(PROF_DIR) -c $(SRC_DIR)/main.cpp -o $(PGO_OBJ)
+	$(CXX) $(CXXFLAGS_RELEASE) -fprofile-generate -fprofile-update=prefer-atomic \
+	    -fprofile-dir=$(PROF_DIR) -o $(BIN) $(PGO_OBJ) $(LDLIBS)
+	./$(BIN) 1e9  -c >/dev/null
+	./$(BIN) 1e10 -c >/dev/null
+	./$(BIN) 1e11 -c >/dev/null
+	$(CXX) $(CXXFLAGS_RELEASE) -fprofile-use -fprofile-correction -Wno-coverage-mismatch \
+	    -fprofile-dir=$(PROF_DIR) -c $(SRC_DIR)/main.cpp -o $(PGO_OBJ)
+	$(CXX) $(CXXFLAGS_RELEASE) -fprofile-use -fprofile-correction -Wno-coverage-mismatch \
+	    -fprofile-dir=$(PROF_DIR) -o $(BIN) $(PGO_OBJ) $(LDLIBS)
+
+$(OBJ_DIR_RELEASE) $(OBJ_DIR_PORTABLE) $(OBJ_DIR_DEBUG) $(OBJ_DIR_PGO):
 	mkdir -p $@
 
 clean:
