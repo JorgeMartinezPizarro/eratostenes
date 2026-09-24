@@ -422,6 +422,18 @@ int main(int argc, char** argv) {
     // at every size -- a lower cutoff leaves too many hits on the slower
     // medium loop, a higher one pays the unrolled loop's unpredictable
     // entry/exit on primes with too few hits to amortize it.
+    //
+    // Re-checked (2026-09-24) after the medium tier's mod-210 stepping
+    // (erat_small.hpp::cross_off_medium) made medium ~14% cheaper per hit:
+    // hypothesis was that a cheaper medium tier should pull small_limit
+    // down (fewer primes classified small, more ceded to the now-cheaper
+    // medium). Measured (i5-11400F, perf stat cycles:u, N=1e12, single run
+    // at a time): /2 (current, 1.4753T) vs /3 (1.4842T, +0.6%,
+    // instructions:u +4.3%) vs *2/3 i.e. K=1.5 (1.4920T, +1.1%, despite
+    // instructions:u -2.2%) -- both directions lost. The per-hit gap
+    // between small (~2 instructions) and medium (~8-9, even after the
+    // mod-210 cut) is still ~4x, far bigger than medium's 14% improvement,
+    // so the optimal cutoff didn't move. /2 confirmed still optimal.
     uint64_t l1_bytes = opt.l1_bytes_override ? opt.l1_bytes_override : detect_l1d_cache_bytes();
     if (l1_bytes == 0) l1_bytes = 32 * 1024;
     SUB_BLOCK_BYTES = std::max<uint64_t>(8, l1_bytes / 8 * 8);
