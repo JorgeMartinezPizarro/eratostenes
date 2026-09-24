@@ -102,7 +102,7 @@ for i in "${!NS[@]}"; do
         # --- eratostenes ---
         seg_args=()
         [ -n "$SEGMENT" ] && seg_args=(-s "$SEGMENT")
-        out=$("$BIN" "$n" -t "$THREADS" "${seg_args[@]}" --count-only 2>&1)
+        out=$("$BIN" "$n" -t "$THREADS" "${seg_args[@]}" 2>&1)
         t_e=$(echo "$out" | sed -nE 's/.*primos\), .*total: *([0-9.]+)s.*/\1/p')
         # sed above only matches the "Iniciando..." + "total:" combined
         # blob in edge cases; fall back to a plain total: match.

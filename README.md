@@ -43,12 +43,12 @@ outside the container.
   N                      Upper bound (inclusive), positional (no flag --
                           primesieve-style). Accepts suffixes:
                           k=1e3  m=1e6  b=1e9 (short-scale billion)  t=1e12
-  -o, --output PATH      Output file (default: primes.txt). .db suffix
-                          switches to the compact SQLite format (see below).
+  -o, --output PATH      Output file. Without it, only counts primes --
+                          no file is written. .db suffix switches to the
+                          compact SQLite format (see below).
   -t, --threads N        Thread count (default: available cores)
   -s, --segment-width N  Numeric width per segment
                           (default: auto, sized from N)
-  -c, --count-only       Only count primes, skip writing the file
       --db-block-size N  Primes per compressed block in .db mode (default: 65536)
       --zstd-level N     zstd compression level in .db mode (default: 3)
   -h, --help             Help
@@ -57,7 +57,7 @@ outside the container.
 ```sh
 ./eratostenes 10000 -o primes_1M.txt
 ./eratostenes 100m -o ~/primes_100b.txt -t 12
-./eratostenes 10b -t 12 --count-only
+./eratostenes 10b -t 12          # no -o: counts only, writes nothing
 ./eratostenes 1t -o ~/primes_100b.db
 ```
 
@@ -71,6 +71,16 @@ The `.db` format is a indexed sqlite file (max 256TB size), so it is suitable up
 ```
 
 `nth_prime` looks up the one block containing the requested position (indexed by `start_index`, not a table scan) and decodes just that block — lookups stay fast regardless of file size.
+
+Below the results for `./eratostenes limit -o base.db`:
+
+| limit  | db size    | bit/prime |   MB/s | total(s) |
+|--------|------------|----------:|-------:|---------:|
+|1E8    | 3.31 MiB   |      4.82 |   28.9 |     0.12 |
+|1E9    | 28.77 MiB  |      4.75 |  120.7 |     0.25 |
+|1E10   | 269.41 MiB |      4.97 |  328.5 |     0.86 |
+|1E11   | 2.42 GiB   |      5.04 |  374.0 |     6.94 |
+|1E12   | 22.47 GiB  |      5.13 |  355.0 |    67.96 |
 
 ## Techniques
 
@@ -87,7 +97,7 @@ What this project is built from, one term each — follow the link for the conce
 
 ## Benchmarks
 
-`./eratostenenes N -c` on an Intel Core i5-13500, primesieve alongside it for reference:
+`./eratostenes N` (no `-o`: counts only) on an Intel Core i5-13500, primesieve alongside it for reference:
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
@@ -95,19 +105,9 @@ What this project is built from, one term each — follow the link for the conce
 | 1e11 | 1.57s | 1.644s | 0.95x |
 | 1e12 | 24.51s | 24.938s | 0.98x |
 | 1e13 | 330.38s | 291.826s | 1.13x |
-| 1e14 | 4101.29s | 3349.907 | 1.22x |
+| 1e14 | 3996.47s | 3349.907 | 1.19x |
 
-Below the results for `./eratostenes limit -o base.db`:
-
-| limit  | db size    | bit/prime |   MB/s | total(s) |
-|--------|------------|----------:|-------:|---------:|
-|1E8    | 3.31 MiB   |      4.82 |   28.9 |     0.12 |
-|1E9    | 28.77 MiB  |      4.75 |  120.7 |     0.25 |
-|1E10   | 269.41 MiB |      4.97 |  328.5 |     0.86 |
-|1E11   | 2.42 GiB   |      5.04 |  374.0 |     6.94 |
-|1E12   | 22.47 GiB  |      5.13 |  355.0 |    67.96 |
-
-Below `./eratostenes N -c` in a i5-11400F:
+The same results on an Intel Core i5-11400F:
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
@@ -116,11 +116,11 @@ Below `./eratostenes N -c` in a i5-11400F:
 | 1e12 | 31.13s | 28.232s | 1.10x |
 | 1e13 | 404.78s | 361.748s | 1.12x |
 
-## Verification
+## Tests
 
 `make test` checks pi(N) and primes by position against [primecount](https://github.com/kimwalisch/primecount) across several N and parameter combinations (threads, segment width, cache-size overrides, `.db` block size, zstd level), and checks `.db` output against plain text output position by position.
 
-## WSL disk reclaim
+## WSL issues
 
 WSL2's virtual disk doesn't shrink back automatically after deleting large files inside it. From PowerShell:
 

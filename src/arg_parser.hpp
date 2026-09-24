@@ -1,6 +1,7 @@
 #pragma once
 // Command-line argument parsing: sizes with suffixes (k/m/b/t), thread
-// count, output path, segment width, count-only mode.
+// count, output path (empty means count-only -- there's no default file,
+// see Options::output below), segment width.
 //
 // The wheel (which primes to skip up front) is NOT here: it's a
 // compile-time constant in wheel.hpp, on purpose -- see that file.
@@ -234,7 +235,10 @@ inline uint64_t sub_block_from_l1_bytes(uint64_t l1_bytes) {
 struct Options {
     uint64_t limit = 0;                 // N: sieve up to N (inclusive)
     unsigned threads = 0;                // 0 => auto (hardware_concurrency)
-    std::string output = "primes.txt";   // final file
+    // Empty (the default) means count-only: no file, no -o needed to just
+    // get pi(N). Set via -o/--output; ".db" switches to the compact SQLite
+    // format, anything else is plain text.
+    std::string output;
     // Numeric width per segment (must be even). 0 means "auto": sized from
     // N once it's known (see parse_args) so that no base prime ever
     // falls below the dense/sparse cutoff into the (bucketed, costlier)
@@ -244,7 +248,6 @@ struct Options {
     // explicit -s overrides this and is used as given, no adjustment.
     uint64_t segment_width = 0;
     bool segment_width_set = false;      // true once -s/--segment-width is parsed
-    bool count_only = false;             // skip the write pass entirely
     bool show_help = false;
 
     // Only used when --output ends in ".db" (SQLite + zstd gap encoding,
@@ -317,23 +320,24 @@ inline void print_usage(const char* prog) {
     std::fprintf(stderr,
         "Uso: %s N [opciones]\n"
         "\n"
-        "Criba de Eratostenes segmentada y paralela. Escribe todos los primos\n"
-        "hasta N (inclusive) en un fichero de texto, uno por linea -- o, si\n"
-        "--output termina en .db, en un fichero SQLite compacto (gaps entre\n"
-        "primos consecutivos, codificados a 1 byte y comprimidos con zstd por\n"
+        "Criba de Eratostenes segmentada y paralela. Sin -o/--output, solo\n"
+        "cuenta los primos hasta N (inclusive) -- no escribe ningun fichero.\n"
+        "Con -o, los escribe uno por linea en texto plano, o si PATH termina\n"
+        "en .db, en un fichero SQLite compacto (gaps entre primos\n"
+        "consecutivos, codificados a 1 byte y comprimidos con zstd por\n"
         "bloques), consultable por posicion con el binario nth_prime.\n"
         "\n"
         "Opciones:\n"
         "  N                      Limite superior. Acepta sufijos\n"
         "                         k/m/b/t (b = billon ingles = 1e9).\n"
         "                         Ej: 100b = 1e11.\n"
-        "  -o, --output PATH      Fichero de salida (default: primes.txt).\n"
-        "                         Si PATH termina en .db, escribe SQLite en\n"
-        "                         vez de texto plano (ver arriba).\n"
+        "  -o, --output PATH      Fichero de salida. Sin esta opcion, solo\n"
+        "                         cuenta (no escribe nada). Si PATH termina\n"
+        "                         en .db, escribe SQLite en vez de texto\n"
+        "                         plano (ver arriba).\n"
         "  -t, --threads N        Numero de hilos (default: nucleos disponibles)\n"
         "  -s, --segment-width N  Ancho numerico de cada segmento\n"
         "                         (default: auto, calculado a partir de N)\n"
-        "  -c, --count-only       Solo cuenta los primos, sin escribir el fichero\n"
         "      --db-block-size N  Primos por bloque comprimido en modo .db\n"
         "                         (default: 65536)\n"
         "      --zstd-level N     Nivel de compresion zstd en modo .db\n"
@@ -354,7 +358,7 @@ inline void print_usage(const char* prog) {
         "Ejemplos:\n"
         "  %s 1000000 -o primos_1M.txt\n"
         "  %s 100b -o primos_100b.txt -t 12\n"
-        "  %s 100b -t 12 -c\n"
+        "  %s 100b -t 12\n"
         "  %s 100b -o primos_100b.db -t 12\n",
         prog, prog, prog, prog, prog);
 }
@@ -378,8 +382,6 @@ inline Options parse_args(int argc, char** argv) {
         } else if (a == "-s" || a == "--segment-width") {
             opt.segment_width = parse_size(need_value(i, a.c_str()));
             opt.segment_width_set = true;
-        } else if (a == "-c" || a == "--count-only") {
-            opt.count_only = true;
         } else if (a == "--db-block-size") {
             opt.db_block_size = parse_size(need_value(i, a.c_str()));
         } else if (a == "--zstd-level") {

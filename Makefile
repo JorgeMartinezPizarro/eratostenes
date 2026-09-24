@@ -80,19 +80,20 @@ $(OBJ_DIR_DEBUG)/%.o: $(SRC_DIR)/%.cpp $(HEADERS) | $(OBJ_DIR_DEBUG)
 	$(CXX) $(CXXFLAGS_DEBUG) -c $< -o $@
 
 # --- pgo: profile-guided release build, same flags as release plus two
-# full compiles of main.cpp around a training run. Trained on --count-only
-# at N=1e9/1e10/1e11 (crosses the small/medium/sparse tier thresholds,
-# see erat_small.hpp) -- .db output's write path isn't exercised, so this
-# profile doesn't inform it. -fprofile-update=prefer-atomic on the
-# instrumented build: plain (non-atomic) counters race and undercount
-# under this program's own thread pool. -fprofile-correction +
-# -Wno-coverage-mismatch on the final build: the CFG built from
-# -flto=auto isn't byte-identical to the instrumented run's, which GCC
-# otherwise treats as a hard mismatch instead of just missing coverage.
-# Measured on the dev PC (perf stat cycles:u, count-only, N=1e10..1e13):
-# ~2-4% fewer cycles, consistent in direction across the whole range --
-# see README#benchmarks. Overwrites $(BIN) in place, like `portable`
-# does; run `make re` afterwards to get back a plain release build.
+# full compiles of main.cpp around a training run. Trained without -o
+# (count-only) at N=1e9/1e10/1e11 (crosses the small/medium/sparse tier
+# thresholds, see erat_small.hpp) -- .db output's write path isn't
+# exercised, so this profile doesn't inform it.
+# -fprofile-update=prefer-atomic on the instrumented build: plain
+# (non-atomic) counters race and undercount under this program's own
+# thread pool. -fprofile-correction + -Wno-coverage-mismatch on the final
+# build: the CFG built from -flto=auto isn't byte-identical to the
+# instrumented run's, which GCC otherwise treats as a hard mismatch
+# instead of just missing coverage. Measured on the dev PC (perf stat
+# cycles:u, count-only, N=1e10..1e13): ~2-4% fewer cycles, consistent in
+# direction across the whole range -- see README#benchmarks. Overwrites
+# $(BIN) in place, like `portable` does; run `make re` afterwards to get
+# back a plain release build.
 pgo: $(NTH_BIN)
 	rm -rf $(OBJ_DIR_PGO)
 	mkdir -p $(PROF_DIR)
@@ -100,9 +101,9 @@ pgo: $(NTH_BIN)
 	    -fprofile-dir=$(PROF_DIR) -c $(SRC_DIR)/main.cpp -o $(PGO_OBJ)
 	$(CXX) $(CXXFLAGS_RELEASE) -fprofile-generate -fprofile-update=prefer-atomic \
 	    -fprofile-dir=$(PROF_DIR) -o $(BIN) $(PGO_OBJ) $(LDLIBS)
-	./$(BIN) 1e9  -c >/dev/null
-	./$(BIN) 1e10 -c >/dev/null
-	./$(BIN) 1e11 -c >/dev/null
+	./$(BIN) 1e9  >/dev/null
+	./$(BIN) 1e10 >/dev/null
+	./$(BIN) 1e11 >/dev/null
 	$(CXX) $(CXXFLAGS_RELEASE) -fprofile-use -fprofile-correction -Wno-coverage-mismatch \
 	    -fprofile-dir=$(PROF_DIR) -c $(SRC_DIR)/main.cpp -o $(PGO_OBJ)
 	$(CXX) $(CXXFLAGS_RELEASE) -fprofile-use -fprofile-correction -Wno-coverage-mismatch \
@@ -134,8 +135,8 @@ run:
 	mkdir -p $(OUT_DIR)
 	$(COMPOSE) run --rm eratostenes $(ARGS)
 
-# Compara pi(N) contra el valor conocido para N=1e8..1e11 (--count-only,
-# sin E/S); un .db real en N=1e10 con primos conocidos por posicion via
+# Compara pi(N) contra el valor conocido para N=1e8..1e11 (sin -o, modo
+# conteo, sin E/S); un .db real en N=1e10 con primos conocidos por posicion via
 # nth_prime; y round-trip texto vs .db en N=1e5..1e7, posicion por posicion
 # (ver scripts/test.sh). THREADS=N make test para fijar el numero de hilos.
 test: $(BIN) $(NTH_BIN)

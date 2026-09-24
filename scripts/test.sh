@@ -2,14 +2,14 @@
 # Prueba de regresion, cuatro partes:
 #   1. Compara pi(N) contra primecount (--nth-prime/plain, independiente de
 #      este proyecto -- ver https://github.com/kimwalisch/primecount) para
-#      N = 1e8..1e11, usando --count-only (sin E/S a disco).
+#      N = 1e8..1e11, sin -o (modo conteo, sin E/S a disco).
 #   2. Construye un .db real en N=1e10 y comprueba un puñado de posiciones
 #      ancla mas varios cientos de posiciones aleatorias, todas contra
 #      primecount --nth-prime (ver README, seccion ".db output").
 #   3. Varias combinaciones de -t/-s/--l1-bytes/--l2-bytes/--db-block-size/
 #      --zstd-level a la vez (no una por una) en un N pequeño (1e7), cada
-#      una en --count-only y en .db: ninguna deberia cambiar el resultado,
-#      solo como se calcula o se empaqueta.
+#      una sin -o (modo conteo) y en .db: ninguna deberia cambiar el
+#      resultado, solo como se calcula o se empaqueta.
 #   4. Round-trip texto vs .db en N=1e5..1e7: mismo pi(N) y, posicion por
 #      posicion (todas en el N mas chico, una muestra aleatoria en los
 #      demas -- comprobar cada posicion via nth_prime implica un proceso
@@ -49,12 +49,12 @@ random_positions() {
         awk -v n="$n" -v s="$count" 'BEGIN { srand(); for (i = 0; i < s; i++) print int(rand() * n) + 1 }'
 }
 
-# Corre eratostenes N --count-only (con args extra, p.ej. -t/-s) y compara
-# contra primecount. Usado por las partes 1 y 3.
+# Corre eratostenes N sin -o (modo conteo, con args extra, p.ej. -t/-s) y
+# compara contra primecount. Usado por las partes 1 y 3.
 check_count_only() {
     local n="$1" expected="$2" label="$3"; shift 3
     local output actual
-    output=$("$BIN" "$n" "$@" --count-only 2>&1)
+    output=$("$BIN" "$n" "$@" 2>&1)
     actual=$(echo "$output" | sed -nE 's/Listo\. ([0-9,]+) primos.*/\1/p' | tr -d ',')
     if [ "$actual" == "$expected" ]; then
         printf "OK   %-40s pi(N)=%s\n" "$label" "$actual"
@@ -106,7 +106,7 @@ check_db_positions() {
     fi
 }
 
-# --- 1: pi(N) por --count-only, contra primecount ---
+# --- 1: pi(N) sin -o (modo conteo), contra primecount ---
 NS=(100000000 1000000000 10000000000 100000000000)
 
 for n in "${NS[@]}"; do
@@ -127,19 +127,19 @@ rm -f "$DB"
 # --- 3: combinaciones de parametros en un N pequeño (1e7) -- no busca N
 # mas grande, busca que una buena variedad de combinaciones de -t/-s/
 # --l1-bytes/--l2-bytes/--db-block-size/--zstd-level, TODAS A LA VEZ (no
-# una por una), sigan dando el resultado correcto tanto en --count-only
-# como en .db. Una sola linea por combinacion.
+# una por una), sigan dando el resultado correcto tanto sin -o (modo
+# conteo) como en .db. Una sola linea por combinacion.
 N3=10000000
 expected_pi_1e7=$("$PRIMECOUNT" "$N3")
 
-# Corre una combinacion de flags en --count-only y en .db (con 10
+# Corre una combinacion de flags sin -o (modo conteo) y en .db (con 10
 # posiciones aleatorias via nth_prime), ambas contra primecount; una sola
 # linea de resultado por combinacion.
 check_combo() {
     local label="$1"; shift
     local out actual db actual_count ok=1
 
-    out=$("$BIN" "$N3" "$@" --count-only 2>&1)
+    out=$("$BIN" "$N3" "$@" 2>&1)
     actual=$(echo "$out" | sed -nE 's/Listo\. ([0-9,]+) primos.*/\1/p' | tr -d ',')
     [ "$actual" == "$expected_pi_1e7" ] || ok=0
 

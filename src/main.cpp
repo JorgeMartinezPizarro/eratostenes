@@ -10,7 +10,7 @@
 //      wheel.hpp -- is split into many more contiguous chunks than threads;
 //      threads pull chunks from a shared queue instead of owning one each
 //      (see run_parallel_chunks for why: work isn't uniform across chunks).
-//   3. Text output (-o *.txt, the default) needs two passes, because
+//   3. Text output (-o *.txt) needs two passes, because
 //      pwrite() needs an exact byte OFFSET per thread up front:
 //        a. COUNT PASS: each thread sieves its chunk and counts how many
 //           bytes of text its primes will take (writes nothing to disk).
@@ -35,8 +35,9 @@
 //      SqlitePrimeStore::finish/fix_offsets for how start_index gets
 //      corrected from chunk-relative to global after the fact.
 //
-// --count-only skips the write/emit pass (and the file) entirely: a single
-// pass (like .db's) already yields the total, so nothing else needs to run.
+// No -o (the default) skips the write/emit pass (and the file) entirely: a
+// single pass (like .db's) already yields the total, so nothing else needs
+// to run.
 //
 // The wheel's own primes (WHEEL_PRIMES) are special-cased in thread 0 --
 // they don't take part in the wheel numbering, so they're just emitted
@@ -366,7 +367,7 @@ int main(int argc, char** argv) {
     auto t_start = std::chrono::steady_clock::now();
 
     if (opt.limit < 2) {
-        if (opt.count_only) {
+        if (opt.output.empty()) {
             std::fprintf(stderr, "Listo. 0 primos encontrados hasta %llu.\n",
                          static_cast<unsigned long long>(opt.limit));
         } else if (is_db_output(opt.output)) {
@@ -384,7 +385,7 @@ int main(int argc, char** argv) {
         // resolved directly, without the parallel machinery.
         std::vector<uint64_t> small;
         for (uint64_t p : WHEEL_PRIMES) if (opt.limit >= p) small.push_back(p);
-        if (opt.count_only) {
+        if (opt.output.empty()) {
             std::fprintf(stderr, "Listo. %zu primo(s) encontrado(s) hasta %llu.\n",
                          small.size(), static_cast<unsigned long long>(opt.limit));
         } else if (is_db_output(opt.output)) {
@@ -606,7 +607,7 @@ int main(int argc, char** argv) {
     // for why that needs this try/catch rather than main()'s existing one
     // around parse_args.
     try {
-        if (opt.count_only) {
+        if (opt.output.empty()) {
             // Single pass, no I/O of any kind: NullSink skips even the
             // to_chars conversion, since we only need the running count that
             // sieve_and_emit already tracks internally.
