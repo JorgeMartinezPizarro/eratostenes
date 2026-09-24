@@ -509,6 +509,34 @@ int main(int argc, char** argv) {
     // prime) -- when it's false, no prime is classified sparse below and
     // the width is left exactly as auto-tuned, same as before this
     // experiment. small_limit/the small-vs-medium cutoff are untouched.
+    //
+    // Attempt (tried, reverted): idea 1 from the same review's second
+    // round, 2026-09-24 -- decouple the medium/sparse cutoff from the
+    // segment width itself (sparse_limit = seg_k_width/4 instead of always
+    // p >= seg_k_width), on the theory that primesieve's own EratMedium/
+    // EratBig split (FACTOR_ERATMEDIUM=3.0 in its config.hpp) keeps a
+    // wider flat tier and pushes only the very sparsest hits (<1/segment
+    // on average) to the bucket ring, and that our medium tier's worst
+    // offenders -- per the reviewer's rdtsc-per-tier breakdown at N=1e14,
+    // 64% of cycles -- are exactly those closest to seg_k_width, paying a
+    // full DenseState touch most segments for zero hits.
+    // Measured (i5-11400F, perf stat cycles:u, single run at a time,
+    // natural auto -s): N=1e12 -- 1.4674T -> 1.4523T cycles:u (-1.0%,
+    // medianos 75773->40665, dispersos 0->35108); N=1e13 -- 19.583T ->
+    // 20.325T cycles:u (+3.8%, a real regression, medianos 152886->40665,
+    // dispersos 72036->184257 (2.6x)), cache-misses:u 15.26B -> 29.35B
+    // (+92%). The sparse tier's own bucket-ring sizing (BLK_BYTES,
+    // SPARSE_BLOCK_ENTRIES=128 in segment_sieve.hpp) was tuned for the
+    // EXISTING population, not one 2.6x bigger -- this project's own
+    // history already has one documented case of that exact tradeoff
+    // flipping sign with population size (segment_sieve.hpp's own
+    // SPARSE_BLOCK_ENTRIES 1024-vs-128 writeup). A gain at 1e12 that
+    // reverses at 1e13 is directionally the same failure mode as the
+    // reverted 64-list medium attempt (erat_small.hpp), just in a
+    // different tier -- reverted for the same reason: real at the N
+    // tested, but the wrong direction for this project's actual E14+
+    // target. If ever revisited, re-tune SPARSE_BLOCK_ENTRIES/ring margin
+    // for the larger population FIRST, and measure at 1e13+ before 1e12.
     if (base_limit >= seg_k_width) {
         uint64_t sb = seg_k_width / 8, p2 = 1;
         while (p2 * 2 <= sb) p2 *= 2;

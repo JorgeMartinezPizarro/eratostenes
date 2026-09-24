@@ -238,7 +238,7 @@ fi
 echo
 printf "| %-6s | %-10s | %9s | %6s | %8s |\n" \
     "limit" "db size" "bit/prime" "MB/s" "total(s)"
-printf "|--------|---------------:|------------|----------:|-------:|---------:|\n"
+printf "|--------|------------|----------:|-------:|---------:|\n"
 for i in "${!IO_SIZES[@]}"; do
 	n="${IO_SIZES[$i]}"
     limit="${IO_LIMITS[$i]}"

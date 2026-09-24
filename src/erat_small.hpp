@@ -54,13 +54,6 @@ struct DenseState {
 
 constexpr uint64_t QP_LIMIT = uint64_t{1} << 26;
 
-// Medium tier's mod-210 packing (see cross_off_medium below) needs 9 bits
-// for the (residue class, mod-210 phase) index instead of the small
-// tier's 6 (3 for pr + 3 for j), so qp only gets 23 bits here, not 26.
-// Checked against the actual max medium-tier prime (bounded by segment
-// width, not by base_prime_max) in SegmentSieve's constructor.
-constexpr uint64_t QP_LIMIT_MEDIUM210 = uint64_t{1} << 23;
-
 // Crosses off p = 30*qp + R[PR] in s[0, end), starting at the pending hit
 // (i, j); on return (i, j) is the first hit at or past `end`.
 template <int PR>
@@ -217,30 +210,51 @@ inline void cross_off_class(uint8_t* s, uint64_t end, DenseState* first, DenseSt
 // lane with fewer hits this segment still pays an `if (aN)` check every
 // remaining iteration instead of retiring early like the scalar version's
 // single while does per prime. Reverted.
-// qw here packs (qp << 9) | (ri*48 + w) -- a different layout from the
-// small tier's DenseState (qw = (qp<<6)|(pr<<3)|j) above; activate_dense
-// (segment_sieve.hpp) packs medium entries this way from the start, never
-// mixed with small-tier state. ri is split out once per prime (it's fixed
-// for the whole call, like the old code's `pr`); w is a loop-carried
-// index updated by plain increment-and-wrap, NOT by loading a "next"
-// field out of the table -- see wheel210_big.hpp's comment on
-// GAP_K210/ONFLY_CORRECTION210 for why that distinction is the whole
-// difference between a win and a regression here.
+// Class-specialized (2026-09-24, matching primesieve's own EratMedium
+// split into crossOff_7/11/13/.../31, one per residue class): PR is now a
+// compile-time template parameter, one list per class (medium_[8] in
+// segment_sieve.hpp, same shape as the small tier's small_[8]) instead of
+// one flat list carrying a runtime `ri`. big::ONFLY_CORRECTION210[PR] is
+// now a compile-time-constant row offset (foldable into the load's
+// displacement) instead of a per-prime runtime-computed pointer
+// (ONFLY_CORRECTION210[ri].data()) -- removes one multiply-by-row-size
+// per prime per segment (not per hit; the real per-hit cost, qp*gap_k[w],
+// is unavoidable here -- primesieve's own EratMedium avoids it by
+// precomputing distinct per-prime deltas, but that's sized for its 8-phase
+// mod-30 wheel; with 48 phases here, precomputing all of them costs more
+// than the 1-3 hits/segment typical of this tier would recoup -- see
+// wheel210_big.hpp's comment for the numbers behind that tradeoff).
+//
+// qw packs (qp << 6) | w now (w alone needs 6 bits, 0..47, same budget as
+// the small tier's (pr<<3)|j) -- back to the small tier's own QP_LIMIT
+// budget (2^26), not the tighter QP_LIMIT_MEDIUM210 the old (qp<<9)|
+// (ri*48+w) packing needed.
+//
+// This DOES split medium_ into 8 lists, the same shape as the reverted
+// 64-list attempt that lost to cache-footprint growth -- but 8 lists is a
+// much smaller fragmentation than 64, and each still holds every prime of
+// its OWN class permanently (no per-segment migration between lists, since
+// a prime's class never changes) -- structurally identical to how small_[8]
+// already works without issue. Measure at 1e12 AND 1e13 before trusting
+// either alone (this tier's population saturates at its permanent max
+// once sqrt(N) exceeds seg_k_width, somewhere between those two N on this
+// machine -- see git history/session notes for the exact threshold), since
+// this tier's own history has already produced opposite-signed results at
+// those two N more than once.
+template <int PR>
 inline void cross_off_medium(uint64_t* words, uint64_t end_bit, DenseState* first, DenseState* last, uint64_t rebase_bits) {
+    const uint32_t* gap_k = big::GAP_K210.data();
+    const uint32_t* corr = big::ONFLY_CORRECTION210[PR].data();
     for (DenseState* st = first; st != last; ++st) {
         uint64_t k = st->pos;
-        uint64_t qp = st->qw >> 9;
-        uint32_t idx = st->qw & 511;
-        uint32_t ri = idx / 48;
-        uint32_t w = idx % 48;
-        const uint32_t* gap_k = big::GAP_K210.data();
-        const uint32_t* corr = big::ONFLY_CORRECTION210[ri].data();
+        uint64_t qp = st->qw >> 6;
+        uint32_t w = st->qw & 63;
         while (k < end_bit) {
             words[k >> 6] |= uint64_t{1} << (k & 63);
             k += qp * gap_k[w] + corr[w];
             w = (w + 1 == 48) ? 0 : w + 1;
         }
-        st->qw = static_cast<uint32_t>((qp << 9) | (ri * 48 + w));
+        st->qw = static_cast<uint32_t>((qp << 6) | w);
         st->pos = static_cast<uint32_t>(k - rebase_bits);
     }
 }

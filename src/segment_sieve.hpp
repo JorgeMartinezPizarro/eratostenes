@@ -34,6 +34,37 @@
 //     than the instruction savings) that argues against it holding up at
 //     this project's actual E14/E15 target range; see the full writeup on
 //     erat_small.hpp::cross_off_medium.
+//
+//     Retried (2026-09-24, idea 2 from an external review, Opus 5.5,
+//     second round): same 64-list idea, but backed by this class's own
+//     block-pool allocator (Blk, BLK_BYTES=1KiB, shared with the sparse
+//     ring below) instead of a std::vector per list, an entry re-filed
+//     into a different (pr, phase) slot every segment via cross_off<PR>'s
+//     own exit state -- structurally the sparse ring's own pattern, just
+//     keyed by (class, phase) instead of (future segment). Hypothesis was
+//     that pooled, promptly-recycled blocks would avoid the footprint
+//     growth that sank the std::vector version. It didn't: at N=1e12,
+//     instructions:u dropped 26.7% (1.9355T -> 1.4187T) but cycles:u was
+//     flat (1.4595T -> 1.4558T, -0.25%, noise) because IPC fell 1.33 ->
+//     0.97 and cache-misses:u roughly doubled (317M -> 533M); at N=1e13 a
+//     real regression (cycles:u 19.603T -> 21.238T, +8.3%, cache-misses:u
+//     16.10B -> 32.47B, +102%). The decisive test: at N=1e10, where the
+//     medium population is small enough that cache-misses:u are already
+//     near zero for BOTH versions (662K vs 290K -- med64 actually HALVES
+//     them here), instructions:u still dropped 23.8% (9.83B -> 7.49B) but
+//     cycles:u didn't move AT ALL (9.2236B -> 9.2263B, +0.03%) -- IPC fell
+//     1.07 -> 0.81 anyway. With cache-misses already negligible in both
+//     directions, this isolates the real bottleneck: NOT cache/memory
+//     footprint (the failure mode both this attempt and the original
+//     std::vector one were diagnosed against) but branch misprediction
+//     from cross_off<PR>'s own unpredictable entry/exit switch on primes
+//     with only a few hits per segment -- precisely what this tier's very
+//     first design note (just above) already said ruled out the unrolled
+//     loop here, restated with a number: it's a front-end/control-flow
+//     cost that no memory-layout change (vector or pool) can fix, because
+//     it was never a memory problem. Reverted; if ever revisited, the
+//     switch itself -- not the entries' storage -- is what would need to
+//     change.
 //     Both flat tiers keep 8 bytes/prime of state (erat::DenseState),
 //     walked every segment in place -- there is never a segment these
 //     primes "skip", so a bucket would buy nothing.
@@ -201,12 +232,6 @@ public:
         if (seg_k_width / WHEEL_MOD >= erat::QP_LIMIT || seg_k_width >= (uint64_t{1} << 30)) {
             throw std::runtime_error("SegmentSieve: segmento demasiado grande para el estado denso empaquetado");
         }
-        // Medium tier's mod-210 packing needs 9 index bits (see
-        // erat_small.hpp::cross_off_medium), leaving qp only 23 -- tighter
-        // than the small tier's 26-bit budget checked just above.
-        if (seg_k_width / WHEEL_MOD >= erat::QP_LIMIT_MEDIUM210) {
-            throw std::runtime_error("SegmentSieve: segmento demasiado grande para el empaquetado mod-210 del tier medium");
-        }
         uint64_t sb = seg_k_width_ / 8; // segment width in bytes
         if (has_sparse && (sb & (sb - 1))) {
             throw std::runtime_error("SegmentSieve: el tier disperso (EratBig) necesita un segmento potencia de 2 (bytes)");
@@ -237,7 +262,7 @@ public:
         next_medium_idx_ = 0;
         next_sparse_idx_ = 0;
         for (auto& v : small_) v.clear();
-        medium_.clear();
+        for (auto& v : medium_) v.clear();
         std::fill(head_.begin(), head_.end(), nullptr);
         std::fill(tail_.begin(), tail_.end(), nullptr);
         // Blocks aren't freed, just handed back to the pool: every block
@@ -270,7 +295,7 @@ public:
         // exactly once for the whole chunk, not once per segment.
         //
         activate_dense(small_primes, next_small_idx_, small_, true, high_n, low_n, k_low);
-        activate_dense(medium_primes, next_medium_idx_, &medium_, false, high_n, low_n, k_low);
+        activate_medium(medium_primes, next_medium_idx_, medium_, high_n, low_n, k_low);
 
         // EratBig-style activation (see header comment): find the smallest
         // multiplier m coprime to 210 (not just 30) with p*m >= max(p*p,
@@ -324,9 +349,18 @@ public:
         // Wheel index 0 is the number 1: not prime, and nothing marks it.
         if (k_low == 0) words_[0] |= 1;
 
-        // Medium tier: few hits per sub-block, so one pass over the whole
-        // segment each.
-        erat::cross_off_medium(words_.data(), count, medium_.data(), medium_.data() + medium_.size(), count);
+        // Medium tier: one pass over the whole segment each, one list per
+        // residue class (medium_[pr]) so PR is a compile-time template
+        // parameter in cross_off_medium<PR>, same reasoning as the small
+        // tier's cross_off_class<PR> calls just above.
+        erat::cross_off_medium<0>(words_.data(), count, medium_[0].data(), medium_[0].data() + medium_[0].size(), count);
+        erat::cross_off_medium<1>(words_.data(), count, medium_[1].data(), medium_[1].data() + medium_[1].size(), count);
+        erat::cross_off_medium<2>(words_.data(), count, medium_[2].data(), medium_[2].data() + medium_[2].size(), count);
+        erat::cross_off_medium<3>(words_.data(), count, medium_[3].data(), medium_[3].data() + medium_[3].size(), count);
+        erat::cross_off_medium<4>(words_.data(), count, medium_[4].data(), medium_[4].data() + medium_[4].size(), count);
+        erat::cross_off_medium<5>(words_.data(), count, medium_[5].data(), medium_[5].data() + medium_[5].size(), count);
+        erat::cross_off_medium<6>(words_.data(), count, medium_[6].data(), medium_[6].data() + medium_[6].size(), count);
+        erat::cross_off_medium<7>(words_.data(), count, medium_[7].data(), medium_[7].data() + medium_[7].size(), count);
 
         // Sparse tier: see process_sparse_bucket below (pulled out of this
         // function on purpose -- see its own comment). sparse_primes is
@@ -405,38 +439,49 @@ private:
             if (p * p >= high_n) break;
             uint64_t start_val = std::max(p * p, low_n);
             uint64_t pr = static_cast<uint64_t>(WHEEL_POS[p % WHEEL_MOD]);
+            (void)by_class; // small tier only now; kept for call-site symmetry with activate_medium
 
-            if (by_class) {
-                // Small tier: smallest m coprime with WHEEL_MOD (30) with
-                // p*m >= start_val -- byte position, (qp<<6)|(pr<<3)|j
-                // packing (erat_small.hpp::cross_off_class).
-                uint64_t m = (start_val + p - 1) / p;
-                uint64_t r = m % WHEEL_MOD;
-                uint64_t step = STEP_TO_COPRIME[r];
-                m += step;
-                r += step;
-                if (r >= WHEEL_MOD) r -= WHEEL_MOD;
-                uint64_t pos = (p * m) / WHEEL_MOD - k_low / 8;
-                uint64_t j = static_cast<uint64_t>(WHEEL_POS[r]);
-                state[pr].push_back({static_cast<uint32_t>(((p / WHEEL_MOD) << 6) | (pr << 3) | j),
-                                     static_cast<uint32_t>(pos)});
-            } else {
-                // Medium tier: smallest m coprime with 210 (not just 30)
-                // with p*m >= start_val -- every medium prime is > 163, so
-                // multiples of 7 are always redundant here (see
-                // erat_small.hpp::cross_off_medium). Bit position,
-                // (qp<<9)|(ri*48+w) packing into big::MEDIUM_TABLE
-                // (wheel210_big.hpp), same t/w decomposition as the sparse
-                // tier's own EratBig-style activation just below.
-                uint64_t m0 = (start_val + p - 1) / p;
-                uint64_t t = m0 / 210, sres = m0 % 210;
-                uint32_t w = big::NEXT_W[sres];
-                if (w == 48) { ++t; w = 0; }
-                uint64_t m = t * 210 + big::M210[w];
-                uint64_t pos = wheel_index(p * m) - k_low;
-                state[0].push_back({static_cast<uint32_t>(((p / WHEEL_MOD) << 9) | (pr * 48 + w)),
-                                     static_cast<uint32_t>(pos)});
-            }
+            // Small tier: smallest m coprime with WHEEL_MOD (30) with
+            // p*m >= start_val -- byte position, (qp<<6)|(pr<<3)|j
+            // packing (erat_small.hpp::cross_off_class).
+            uint64_t m = (start_val + p - 1) / p;
+            uint64_t r = m % WHEEL_MOD;
+            uint64_t step = STEP_TO_COPRIME[r];
+            m += step;
+            r += step;
+            if (r >= WHEEL_MOD) r -= WHEEL_MOD;
+            uint64_t pos = (p * m) / WHEEL_MOD - k_low / 8;
+            uint64_t j = static_cast<uint64_t>(WHEEL_POS[r]);
+            state[pr].push_back({static_cast<uint32_t>(((p / WHEEL_MOD) << 6) | (pr << 3) | j),
+                                 static_cast<uint32_t>(pos)});
+            ++next;
+        }
+    }
+
+    // Medium tier: smallest m coprime with 210 (not just 30) with
+    // p*m >= start_val -- every medium prime is > 163, so multiples of 7
+    // are always redundant here (see erat_small.hpp::cross_off_medium).
+    // Bit position, (qp<<6)|w packing, one list per residue class
+    // (medium_[pr]) so cross_off_medium<PR> gets PR as a compile-time
+    // template parameter -- same shape as activate_dense's small-tier
+    // branch above, just mod-210 stepping instead of mod-30. Same t/w
+    // decomposition as the sparse tier's own EratBig-style activation.
+    static void activate_medium(const std::vector<uint64_t>& primes, size_t& next,
+                                 std::vector<erat::DenseState>* medium,
+                                 uint64_t high_n, uint64_t low_n, uint64_t k_low) {
+        while (next < primes.size()) {
+            uint64_t p = primes[next];
+            if (p * p >= high_n) break;
+            uint64_t start_val = std::max(p * p, low_n);
+            uint64_t pr = static_cast<uint64_t>(WHEEL_POS[p % WHEEL_MOD]);
+            uint64_t m0 = (start_val + p - 1) / p;
+            uint64_t t = m0 / 210, sres = m0 % 210;
+            uint32_t w = big::NEXT_W[sres];
+            if (w == 48) { ++t; w = 0; }
+            uint64_t m = t * 210 + big::M210[w];
+            uint64_t pos = wheel_index(p * m) - k_low;
+            medium[pr].push_back({static_cast<uint32_t>(((p / WHEEL_MOD) << 6) | w),
+                                   static_cast<uint32_t>(pos)});
             ++next;
         }
     }
@@ -633,7 +678,7 @@ private:
     // small_primes/medium_primes as they activate -- no bucket, walked
     // every segment (small: every sub-block).
     std::vector<erat::DenseState> small_[8]; // one list per residue class p % 30
-    std::vector<erat::DenseState> medium_;
+    std::vector<erat::DenseState> medium_[8]; // one list per residue class p % 30
 
     uint32_t log2_sb_ = 0; // log2(segment width in bytes) -- see constructor
     uint64_t num_buckets_ = 1;
