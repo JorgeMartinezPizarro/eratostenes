@@ -236,8 +236,8 @@ fi
 # y filas usan exactamente los mismos anchos por columna para que la tabla
 # quede alineada.
 echo
-printf "| %-6s | %14s | %-10s | %9s | %6s | %8s |\n" \
-    "limit" "pi(N)" "db size" "bit/prime" "MB/s" "total(s)"
+printf "| %-6s | %-10s | %9s | %6s | %8s |\n" \
+    "limit" "db size" "bit/prime" "MB/s" "total(s)"
 printf "|--------|---------------:|------------|----------:|-------:|---------:|\n"
 for i in "${!IO_SIZES[@]}"; do
 	n="${IO_SIZES[$i]}"
@@ -255,7 +255,7 @@ for i in "${!IO_SIZES[@]}"; do
     bitpp=$(awk -v b="$bytes" -v c="$count" 'BEGIN{printf "%.2f", b*8/c}')
     mbps=$(awk -v b="$bytes" -v s="$total_s" 'BEGIN{printf "%.1f", (s>0)?(b/1e6/s):0}')
 
-    printf "|%-6s | %14s | %-10s | %9s | %6s | %8s |\n" \
-        "$limit_exp" "$(commas "$count")" \
+    printf "|%-6s | %-10s | %9s | %6s | %8s |\n" \
+        "$limit_exp" \
         "$(human_size "$bytes")" "$bitpp" "$mbps" "$total_s"
 done

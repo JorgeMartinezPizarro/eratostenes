@@ -172,7 +172,7 @@ static void sieve_chunk(ChunkRange range, uint64_t seg_k_width, uint64_t base_pr
                          const Presieve& presieve,
                          Writer& out, uint64_t& local_count,
                          std::atomic<uint64_t>& progress) {
-    SegmentSieve sieve(seg_k_width, base_prime_max, presieve, SUB_BLOCK_BYTES);
+    SegmentSieve sieve(seg_k_width, base_prime_max, presieve, SUB_BLOCK_BYTES, !sparse_primes.empty());
     sieve.begin_chunk();
     for (uint64_t k_low = range.low; k_low < range.high; k_low += seg_k_width) {
         uint64_t k_high = std::min(k_low + seg_k_width, range.high);
@@ -487,6 +487,25 @@ int main(int argc, char** argv) {
         }
     }
 
+    // EXPERIMENT IN PROGRESS (isolated test of point 1 from an external
+    // review, Opus 5.5, 2026-09-24, see segment_sieve.hpp's sparse-tier
+    // header comment): that tier's EratBig-style rewrite needs the segment
+    // width in BYTES to be a power of 2 for its bucket-slot math to be a
+    // shift/mask instead of a division. base_limit >= seg_k_width is a
+    // conservative check for "will any base prime actually end up sparse"
+    // (base_limit is isqrt(limit), an upper bound on the largest base
+    // prime) -- when it's false, no prime is classified sparse below and
+    // the width is left exactly as auto-tuned, same as before this
+    // experiment. small_limit/the small-vs-medium cutoff are untouched.
+    if (base_limit >= seg_k_width) {
+        uint64_t sb = seg_k_width / 8, p2 = 1;
+        while (p2 * 2 <= sb) p2 *= 2;
+        if (p2 != sb) {
+            seg_k_width = std::max<uint64_t>(64, p2 * 8);
+            opt.segment_width = seg_k_width * WHEEL_MOD / WHEEL_SIZE; // keep the startup log's "segmento=" accurate
+        }
+    }
+
     // Primes also covered by the pre-sieve pattern (see presieve.hpp) are
     // skipped here: they're never scheduled as active markers, their
     // multiples come pre-marked from the pattern buffer instead. They
@@ -501,7 +520,7 @@ int main(int argc, char** argv) {
     //   - medium_primes (small_limit <= p < seg_k_width): a few hits per
     //     segment, one pass over the whole segment each.
     //   - sparse_primes (p >= seg_k_width): at most ~1 hit/segment, bucket
-    //     ring (see process_sparse_bucket).
+    //     ring, EratBig-style (see segment_sieve.hpp's process_big).
     std::vector<uint64_t> presieve_primes_flat;
     for (const auto& group : PRESIEVE_GROUPS)
         presieve_primes_flat.insert(presieve_primes_flat.end(), group.begin(), group.end());
