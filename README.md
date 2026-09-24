@@ -93,18 +93,18 @@ What this project is built from, one term each — follow the link for the conce
 |---|---:|---:|---:|
 | 1e10 | 0.14s | 0.126s | 1.1x |
 | 1e11 | 1.71s | 1.638s | 1.0x |
-| 1e12 | 25.74s | 24.962s | 1.0x |
+| 1e12 | 27.28s | 24.962s | 1.1x |
 | 1e13 | 348.17s | 290.697s | 1.2x |
-| 1e14 | 4780.51s | 3349.907 | 1.42x |
+| 1e14 | 4179.76s | 3349.907 | 1.24x |
 
 Below the same for i5-11400F:
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
-| 1e10 | 0.22s | 0.187s | 1.2x |
-| 1e11 | 2.63s | 2.342s | 1.1x |
-| 1e12 | 32.88s | 27.944s | 1.2x |
-| 1e13 | 457.88s | 411.433s | 1.1x |
+| 1e10 | 0.21s | 0.188s | 1.1x |
+| 1e11 | 2.56s | 2.314s | 1.1x |
+| 1e12 | 32.08s | 27.347s | 1.2x |
+| 1e13 | 418.29s | 378.012s | 1.1x |
 
 Below the results for `./eratostenes limit -o base.db`:
 
