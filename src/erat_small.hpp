@@ -179,4 +179,39 @@ inline void cross_off_medium(uint64_t* words, uint64_t end_bit, DenseState* firs
     }
 }
 
+// Attempt (tried, reverted): "EratMedium"-style 64-list restructuring --
+// reuse cross_off<PR> above (byte marking, constant masks) instead of this
+// on-the-fly bit loop, split into WHEEL_SIZE*WHEEL_SIZE lists keyed by
+// (class PR, entry phase J) instead of one flat list, so switch(j) above
+// becomes a compile-time-constant jump per list rather than a runtime
+// dispatch. Idea from an external review (Opus 5.5, 2-vCPU VM, no perf
+// access) predicting this would help MORE as N grows, since the medium
+// tier's share of total cycles grows with N.
+//
+// Measured (dev PC, i5-11400F, perf stat cycles:u, natural auto -s):
+//   N=1e12: cycles:u 1.509T -> 1.335T (-11.5%), instructions:u -39.8%
+//     (matching the ~2-instructions-per-hit claim above), cache-miss rate
+//     1.97%->5.16%, IPC 1.32->0.90.
+//   N=1e13: cycles:u 20.671T -> 19.582T (-5.3%), instructions:u -32.7%,
+//     cache-miss rate 5.57%->12.04%, IPC 1.36->0.97.
+// A real, reproducible win at both N (independently re-verified: 1e12
+// reproduced at -11.2% cycles:u, cache-miss 2.19%->5.09%, near-exact match)
+// -- but the OPPOSITE trend from the one predicted: the win roughly halves
+// from 1e12 to 1e13 while the cache-miss rate roughly doubles, because 64
+// lists (vs one flat array) cost extra memory footprint/locality that grows
+// with the medium-tier population -- the same failure mode as the sparse
+// tier's own attempt 3 (segment_sieve.hpp): trading instructions for cache
+// misses, on a codebase whose actual wins so far have all come from the
+// opposite trade (reducing cache misses, see L1 sub-block decoupling and
+// the segment-width fix). Instruction savings stayed roughly flat (-39.8%
+// -> -32.7%) while the miss-rate cost roughly doubled -- extrapolating that
+// divergence past 1e13 toward this project's actual E14/E15 target range
+// (see project roadmap), the miss-rate cost plausibly overtakes the
+// instruction savings and flips this from a win to a regression well before
+// reaching the N that matters here. Reverted for that reason -- not because
+// it measured as a loss at the N actually tested, but because the trend
+// argues against it holding up at the N this project targets. If ever
+// revisited, re-derive at N=1e14+ first rather than trusting the 1e12/1e13
+// trend to extrapolate favorably.
+
 } // namespace erat

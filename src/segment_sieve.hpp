@@ -20,7 +20,14 @@
 //     stepping via ONFLY_CORRECTION (wheel.hpp: one multiply by qp=p/30,
 //     one shared-table lookup, one add). The unrolled loop was measured
 //     slower here: with only a few hits per segment it can't amortize its
-//     unpredictable entry/exit (see erat_small.hpp::cross_off_medium).
+//     unpredictable entry/exit (see erat_small.hpp::cross_off_medium). An
+//     EratMedium-style 64-list restructuring (byte marking like the small
+//     tier, keyed by (class, entry phase) so the entry point is a
+//     compile-time constant per list) was tried and reverted -- real win at
+//     N=1e12/1e13 tested but on a trend (cache-miss cost growing faster
+//     than the instruction savings) that argues against it holding up at
+//     this project's actual E14/E15 target range; see the full writeup on
+//     erat_small.hpp::cross_off_medium.
 //     Both flat tiers keep 8 bytes/prime of state (erat::DenseState),
 //     walked every segment in place -- there is never a segment these
 //     primes "skip", so a bucket would buy nothing.
