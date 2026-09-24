@@ -93,8 +93,8 @@ What this project is built from, one term each — follow the link for the conce
 |---|---:|---:|---:|
 | 1e10 | 0.14s | 0.126s | 1.1x |
 | 1e11 | 1.71s | 1.638s | 1.0x |
-| 1e12 | 27.01s | 24.962s | 1.1x |
-| 1e13 | 353.41s | 290.697s | 1.2x |
+| 1e12 | 25.74s | 24.962s | 1.0x |
+| 1e13 | 348.17s | 290.697s | 1.2x |
 | 1e14 | 4780.51s | 3349.907 | 1.42x |
 
 Below the same for i5-11400F:
