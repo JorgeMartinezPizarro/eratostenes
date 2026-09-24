@@ -511,7 +511,7 @@ int main(int argc, char** argv) {
     // the width is left exactly as auto-tuned, same as before this
     // experiment. small_limit/the small-vs-medium cutoff are untouched.
     //
-    // Attempt (tried, reverted): idea 1 from the same review's second
+    // Attempt (first try, reverted): idea 1 from the same review's second
     // round, 2026-09-24 -- decouple the medium/sparse cutoff from the
     // segment width itself (sparse_limit = seg_k_width/4 instead of always
     // p >= seg_k_width), on the theory that primesieve's own EratMedium/
@@ -536,8 +536,18 @@ int main(int argc, char** argv) {
     // reverted 64-list medium attempt (erat_small.hpp), just in a
     // different tier -- reverted for the same reason: real at the N
     // tested, but the wrong direction for this project's actual E14+
-    // target. If ever revisited, re-tune SPARSE_BLOCK_ENTRIES/ring margin
-    // for the larger population FIRST, and measure at 1e13+ before 1e12.
+    // target.
+    //
+    // Retry (2026-09-25): re-ran the exact same sparse_limit = seg_k_width/4
+    // cutoff WITHOUT re-tuning the ring first (wanted to re-confirm the
+    // baseline number on this machine before spending time on BLK_BYTES) --
+    // as expected, reproduced the same population split (medianos
+    // 152886->40665, dispersos 72036->184257) and the same-shaped
+    // regression, slightly worse this time: cycles:u 19.139T->20.713T
+    // (+8.2%), cache-misses:u 19.16B->31.09B (+62%). Reverted again.
+    // Re-tuning segment_sieve.hpp's BLK_BYTES/CHUNK_BLOCKS for this 2.6x
+    // bigger sparse population is still the untaken next step -- do that
+    // BEFORE re-measuring this cutoff again, not after.
     if (base_limit >= seg_k_width) {
         uint64_t sb = seg_k_width / 8, p2 = 1;
         while (p2 * 2 <= sb) p2 *= 2;

@@ -3,6 +3,7 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
+      target: eratostenes
     image: eratostenes:latest
     volumes:
       - ../output:/output
@@ -15,3 +16,18 @@ services:
       dockerfile: docker/Dockerfile
       target: dev
     image: eratostenes:dev
+
+  # Profile-guided build, baked in at image-build time (see Dockerfile's
+  # pgo-builder/eratostenes-pgo stages and Makefile's docker-pgo/run-pgo
+  # targets) -- for a machine with only Docker, no gcc/make of its own.
+  # MUST be built on the machine it will run on (see Dockerfile's own
+  # warning on pgo-builder): `docker compose build eratostenes-pgo` run
+  # directly on that machine, not built elsewhere and shipped in.
+  eratostenes-pgo:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: eratostenes-pgo
+    image: eratostenes:pgo
+    volumes:
+      - ../output:/output

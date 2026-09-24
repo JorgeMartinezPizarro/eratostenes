@@ -50,8 +50,8 @@ NTH_OBJ := $(OBJ_DIR_RELEASE)/nth_prime.o
 OUT_DIR := $(CURDIR)/output
 COMPOSE := docker compose -f docker/docker-compose.yml
 
-.PHONY: all portable debug pgo clean fclean re docker run test benchmark \
-        docker-dev docker-test docker-benchmark
+.PHONY: all portable debug pgo clean fclean re docker run docker-pgo run-pgo \
+        test benchmark docker-dev docker-test docker-benchmark
 
 # --- release (default) ---
 all: $(BIN) $(NTH_BIN)
@@ -81,19 +81,37 @@ $(OBJ_DIR_DEBUG)/%.o: $(SRC_DIR)/%.cpp $(HEADERS) | $(OBJ_DIR_DEBUG)
 
 # --- pgo: profile-guided release build, same flags as release plus two
 # full compiles of main.cpp around a training run. Trained without -o
-# (count-only) at N=1e9/1e10/1e11 (crosses the small/medium/sparse tier
-# thresholds, see erat_small.hpp) -- .db output's write path isn't
-# exercised, so this profile doesn't inform it.
+# (count-only) at N=1e9/1e10/1e11 (natural auto -s, crosses the small/
+# medium tier thresholds as population grows, see erat_small.hpp) plus
+# two forced-width runs so the sparse/bucket tier (process_big,
+# segment_sieve.hpp) gets real profile data too -- none of the natural
+# passes reach it (auto -s only pushes primes into that tier well past
+# 1e12 on typical hardware; see git history for how that crossover was
+# found). -o output (.db/text write paths) isn't exercised by any pass
+# here, so this profile doesn't inform them.
+#   - `1e10 -s 300000`: on THIS dev PC gives a real mix of all three
+#     tiers (2687 small / 3817 medium / 3050 sparse) -- kept mainly for
+#     the medium+sparse combination, but the exact split is a function of
+#     this machine's detected L1 size (small_limit) vs this -s, so a
+#     different machine (e.g. the server) may land closer to one tier or
+#     the other. That's fine -- it's not required to reproduce this exact
+#     split, only to give the sparse tier SOME real samples.
+#   - `1e9 -s 16000`: deliberately tiny relative to N (base_limit=31623)
+#     so it reliably exercises the sparse tier even if the first run
+#     happens to land mostly on one tier on a given machine -- robust
+#     across machines because it depends only on N and -s, not on
+#     detected cache sizes the way small_limit does.
 # -fprofile-update=prefer-atomic on the instrumented build: plain
 # (non-atomic) counters race and undercount under this program's own
 # thread pool. -fprofile-correction + -Wno-coverage-mismatch on the final
 # build: the CFG built from -flto=auto isn't byte-identical to the
 # instrumented run's, which GCC otherwise treats as a hard mismatch
 # instead of just missing coverage. Measured on the dev PC (perf stat
-# cycles:u, count-only, N=1e10..1e13): ~2-4% fewer cycles, consistent in
-# direction across the whole range -- see README#benchmarks. Overwrites
-# $(BIN) in place, like `portable` does; run `make re` afterwards to get
-# back a plain release build.
+# cycles:u, count-only, N=1e10..1e13, BEFORE the two forced-sparse runs
+# were added): ~2-4% fewer cycles, consistent in direction across the
+# whole range -- see README#benchmarks; not yet re-measured with the
+# sparse-tier training added. Overwrites $(BIN) in place, like `portable`
+# does; run `make re` afterwards to get back a plain release build.
 pgo: $(NTH_BIN)
 	rm -rf $(OBJ_DIR_PGO)
 	mkdir -p $(PROF_DIR)
@@ -104,6 +122,8 @@ pgo: $(NTH_BIN)
 	./$(BIN) 1e9  >/dev/null
 	./$(BIN) 1e10 >/dev/null
 	./$(BIN) 1e11 >/dev/null
+	./$(BIN) 1e10 -s 300000 >/dev/null
+	./$(BIN) 1e9  -s 16000  >/dev/null
 	$(CXX) $(CXXFLAGS_RELEASE) -fprofile-use -fprofile-correction -Wno-coverage-mismatch \
 	    -fprofile-dir=$(PROF_DIR) -c $(SRC_DIR)/main.cpp -o $(PGO_OBJ)
 	$(CXX) $(CXXFLAGS_RELEASE) -fprofile-use -fprofile-correction -Wno-coverage-mismatch \
@@ -120,8 +140,10 @@ fclean: clean
 
 re: fclean all
 
+# eratostenes-pgo is NOT built here -- see docker-pgo below for why it's
+# a separate, explicit opt-in instead of part of the default set.
 docker:
-	$(COMPOSE) build
+	$(COMPOSE) build eratostenes dev
 
 # Ejecuta el binario dentro de la imagen. El directorio ./output del host
 # se monta en /output dentro del contenedor (definido en
@@ -134,6 +156,26 @@ docker:
 run:
 	mkdir -p $(OUT_DIR)
 	$(COMPOSE) run --rm eratostenes $(ARGS)
+
+# PGO image: two-phase profile-guided build (see Makefile's own `pgo`
+# target for the flags/training rationale) baked in at `docker build`
+# time inside docker/Dockerfile's pgo-builder stage -- for a machine with
+# only Docker installed, no gcc/make of its own (the reason this exists:
+# some deployment targets, e.g. the production server, are exactly that).
+# NOT part of plain `make docker`/`docker-dev` -- explicit opt-in on
+# purpose, because unlike the other images this one is tied to the exact
+# machine `docker compose build eratostenes-pgo` runs on (-march=native,
+# baked in at both the instrumented AND the final compile -- see
+# Dockerfile's own warning on pgo-builder) and takes noticeably longer to
+# build (the training passes run during the image build itself).
+docker-pgo:
+	$(COMPOSE) build eratostenes-pgo
+
+# Same calling convention as `run` above, against the PGO image instead.
+# Ejemplo: make run-pgo ARGS="1e11 -t 8"
+run-pgo:
+	mkdir -p $(OUT_DIR)
+	$(COMPOSE) run --rm eratostenes-pgo $(ARGS)
 
 # Compara pi(N) contra el valor conocido para N=1e8..1e11 (sin -o, modo
 # conteo, sin E/S); un .db real en N=1e10 con primos conocidos por posicion via
