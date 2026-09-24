@@ -40,9 +40,12 @@
 # Env overrides: THREADS (default: nproc, used for both eratostenes and
 # primesieve -- an apples-to-apples comparison needs the same thread
 # count), SEGMENT (default: unset, i.e. the CLI's own auto -s), REPS
-# (default: 1, keeps the fastest of REPS runs per N in the CPU sweep --
-# there's real run-to-run noise on this kind of box, see BENCHMARK section
-# of the README/commit history), WRITE_PATH/KEEP_DB (see above; KEEP_DB
+# (default: 1, keeps the fastest of REPS eratostenes runs per N in the CPU
+# sweep -- there's real run-to-run noise on this kind of box, see BENCHMARK
+# section of the README/commit history; primesieve itself always runs once
+# per N regardless of REPS -- it's the fixed reference, not what's being
+# tuned, and at N=1e13 a single run already costs several minutes),
+# WRITE_PATH/KEEP_DB (see above; KEEP_DB
 # defaults to 0 -- each .db is deleted right after it's measured, since
 # the several GB the I/O sweep accumulates otherwise (mostly the N=1e11
 # row) isn't something to leave lying around by default. Set KEEP_DB=1
@@ -96,8 +99,21 @@ for i in "${!NS[@]}"; do
     n="${NS[$i]}"
     expected="${EXPECTED[$i]}"
 
+    # --- primesieve: run once regardless of REPS. It's the fixed reference,
+    # not what's being tuned here -- REPS exists to smooth out eratostenes'
+    # own run-to-run noise, and at N=1e13 a single primesieve run already
+    # costs several minutes, so paying that REPS times over just to also
+    # smooth the reference isn't worth it.
+    out=$(primesieve "$n" --count -t "$THREADS" --time -q 2>&1)
+    t_p=$(echo "$out" | sed -nE 's/^Seconds: *([0-9.]+)$/\1/p')
+    count_p=$(echo "$out" | grep -oE '^[0-9]+$' | head -1)
+    if [ "$count_p" != "$expected" ]; then
+        echo "n=$n: primesieve MAL: obtenido $count_p, esperado $expected" >&2
+        exit 1
+    fi
+    echo "  n=$n primesieve=${t_p}s [ok]" >&2
+
     best_e=""
-    best_p=""
     for ((r = 1; r <= REPS; r++)); do
         # --- eratostenes ---
         seg_args=()
@@ -116,22 +132,10 @@ for i in "${!NS[@]}"; do
             best_e="$t_e"
         fi
 
-        # --- primesieve ---
-        out=$(primesieve "$n" --count -t "$THREADS" --time -q 2>&1)
-        t_p=$(echo "$out" | sed -nE 's/^Seconds: *([0-9.]+)$/\1/p')
-        count_p=$(echo "$out" | grep -oE '^[0-9]+$' | head -1)
-        if [ "$count_p" != "$expected" ]; then
-            echo "n=$n rep=$r: primesieve MAL: obtenido $count_p, esperado $expected" >&2
-            exit 1
-        fi
-        if [ -z "$best_p" ] || awk -v a="$t_p" -v b="$best_p" 'BEGIN{exit !(a<b)}'; then
-            best_p="$t_p"
-        fi
-
-        echo "  n=$n rep=$r eratostenes=${t_e}s primesieve=${t_p}s [ok]" >&2
+        echo "  n=$n rep=$r eratostenes=${t_e}s [ok]" >&2
     done
     ERATO_TIME["$n"]="$best_e"
-    PRIMESIEVE_TIME["$n"]="$best_p"
+    PRIMESIEVE_TIME["$n"]="$t_p"
 done
 
 echo >&2
