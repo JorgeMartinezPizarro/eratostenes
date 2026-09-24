@@ -49,4 +49,80 @@ constexpr std::array<uint8_t, 211> make_next() {
     return a;
 }
 inline constexpr std::array<uint8_t, 211> NEXT_W = make_next();
+
+// Wheel-index (k-space, bit granularity) stepping tables for the medium
+// tier's mod-210 multiplier stepping (erat_small.hpp::cross_off_medium).
+// Every medium-tier prime is > 163 (presieve's own {7,23,37} group always
+// covers 7 first, see presieve.hpp), so any hit whose multiplier is a
+// multiple of 7 lands on a composite 7 already marked -- pure redundant
+// work for this tier specifically, same reasoning as the sparse tier's own
+// TABLE above (that one is byte-granularity for the bucket sieve; this one
+// is bit-granularity for the medium tier's flat one-hit-per-iteration
+// loop, but it's the same 48/210-vs-8/30 saving, ~14% fewer candidate
+// hits).
+//
+// Same delta split as wheel.hpp's ONFLY_CORRECTION/GAP_K (delta = qp *
+// gap_k + corr), re-derived with M210 (48 mod-210-coprime multiplier
+// phases) standing in for WHEEL_R (8 mod-30-coprime phases): writing
+// p = qp*30 + R30[ri] and letting a hit's multiplier step from M210[w] to
+// M210[w+1] (mod 210, +210 on wraparound), the wheel-index advance is
+//   delta = qp*30 * gap210(w) + R30[ri]*gap210(w)   [n advances by p*gap210(w)]
+// and the first term is an exact multiple of 30, so (exactly like
+// wheel_delta_at's own derivation) it becomes qp*(gap210(w)*8) plus a
+// (ri, w)-only correction -- independent of qp, i.e. independent of the
+// prime's actual magnitude. Both terms are tiny, shared, read-only tables
+// (48 + 8*48 entries) -- unlike the reverted 64-list attempt
+// (erat_small.hpp), this doesn't touch DenseState's layout or split the
+// medium tier's own flat list at all, so there's no per-prime memory or
+// locality cost to trade against the instruction savings.
+//
+// Deliberately kept as two flat arrays indexed by (ri fixed per prime,
+// outside the loop) and w (a plain incrementing loop variable), NOT as one
+// struct-with-a-"next"-field table indexed by a `w`/`idx` that's itself
+// loaded from the previous lookup: a first version did that (mirroring
+// big::TABLE/Entry above, which the byte-marking sparse tier can afford
+// since it's only ever called once per prime per *segment*), and it
+// regressed cycles:u despite ~15% fewer instructions:u -- the "next"
+// field's load-to-use chain serializes one table load behind the previous
+// one every hit, whereas the old mod-30 code's `j = (j + 1) & 7` (and this
+// version's `w` wraparound) is pure register arithmetic with no such
+// dependency, so independent loop iterations' table loads can issue
+// without waiting on each other. Measured (dev PC, i5-11400F, perf stat
+// cycles:u, N=1e12 natural auto -s): "next"-field version 1.5105T ->
+// 1.5453T cycles:u (+2.3%, regression) despite instructions:u 2.002T ->
+// 1.700T (-15.1%, roughly the expected ~14% hit reduction) -- IPC dropped
+// 1.33 -> 1.10, confirming a latency, not throughput, problem. Reverted to
+// this two-array form before it was ever committed.
+constexpr std::array<uint32_t, 48> make_gap_k210() {
+    std::array<uint32_t, 48> g{};
+    for (int w = 0; w < 48; ++w) {
+        uint32_t m1 = M210[w];
+        uint32_t m2 = (w == 47) ? M210[0] + 210 : M210[w + 1];
+        g[w] = (m2 - m1) * 8;
+    }
+    return g;
+}
+inline constexpr std::array<uint32_t, 48> GAP_K210 = make_gap_k210();
+
+constexpr std::array<std::array<uint32_t, 48>, 8> make_onfly_correction210() {
+    std::array<std::array<uint32_t, 48>, 8> tbl{};
+    for (int ri = 0; ri < 8; ++ri) {
+        uint32_t p_mod30 = R30[ri];
+        for (int w = 0; w < 48; ++w) {
+            uint32_t m1 = M210[w];
+            uint32_t m2 = (w == 47) ? M210[0] + 210 : M210[w + 1];
+            uint32_t gap210 = m2 - m1;
+            uint32_t rp = (p_mod30 * (m1 % 30)) % 30;
+            uint64_t d = static_cast<uint64_t>(p_mod30) * gap210;
+            uint64_t c1 = (rp + d) / 30;
+            uint32_t rem = static_cast<uint32_t>((rp + d) % 30);
+            int pos_before = pos30(rp);
+            int pos_after = pos30(rem);
+            int64_t corr = static_cast<int64_t>(c1) * 8 + (pos_after - pos_before);
+            tbl[ri][w] = static_cast<uint32_t>(corr);
+        }
+    }
+    return tbl;
+}
+inline constexpr std::array<std::array<uint32_t, 48>, 8> ONFLY_CORRECTION210 = make_onfly_correction210();
 }

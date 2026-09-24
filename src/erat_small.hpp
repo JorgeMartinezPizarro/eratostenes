@@ -25,6 +25,7 @@
 #include <cstdint>
 
 #include "wheel.hpp"
+#include "wheel210_big.hpp"
 
 static_assert(WHEEL_MOD == 30 && WHEEL_SIZE == 8,
               "erat_small.hpp: el marcado desenrollado por bytes solo existe para la rueda mod 30");
@@ -52,6 +53,13 @@ struct DenseState {
 };
 
 constexpr uint64_t QP_LIMIT = uint64_t{1} << 26;
+
+// Medium tier's mod-210 packing (see cross_off_medium below) needs 9 bits
+// for the (residue class, mod-210 phase) index instead of the small
+// tier's 6 (3 for pr + 3 for j), so qp only gets 23 bits here, not 26.
+// Checked against the actual max medium-tier prime (bounded by segment
+// width, not by base_prime_max) in SegmentSieve's constructor.
+constexpr uint64_t QP_LIMIT_MEDIUM210 = uint64_t{1} << 23;
 
 // Crosses off p = 30*qp + R[PR] in s[0, end), starting at the pending hit
 // (i, j); on return (i, j) is the first hit at or past `end`.
@@ -139,8 +147,54 @@ inline void cross_off_class(uint8_t* s, uint64_t end, DenseState* first, DenseSt
 // unpredictable jump into the switch, plus an unpredictable exit point --
 // measured ~5.6x the branch misses of this loop at N=1e11, net slower
 // despite 38% fewer instructions). Generic one-hit-per-iteration stepping
-// instead, division-free via the shared ONFLY_CORRECTION table (wheel.hpp),
+// instead, division-free via the shared mod-210 table (wheel210_big.hpp),
 // on bit positions; mispredicts only once per prime (the loop exit).
+//
+// Mod-210 multiplier stepping (2026-09-24): every medium-tier prime is
+// always > 163 (presieve's {7,23,37} group, presieve.hpp, always covers 7
+// first), so any hit whose multiplier is a multiple of 7 is redundant --
+// already marked composite by 7's own presieve pattern. Stepping through
+// only the 48/210 multiplier phases coprime to 210 instead of the 8/30
+// coprime to 30 (GAP_K210/ONFLY_CORRECTION210, wheel210_big.hpp -- same
+// derivation as ONFLY_CORRECTION/GAP_K in wheel.hpp, just with M210
+// standing in for WHEEL_R) skips ~14% of candidate hits in this tier. This
+// is the same trick already validated and kept for the sparse tier's own
+// big-wheel table (see main README/git history, "try big wheel for big
+// primes"). Unlike the reverted 64-list restructuring below, this does
+// NOT touch DenseState's layout or split the medium tier's single flat
+// list -- only the shared constant tables grew a little (64 entries ->
+// 48+8*48, still ~1.7KB, still trivially L1-resident) -- so there's no
+// cache-vs-instructions trade being made here.
+//
+// A first version indexed a single combined table by a "next" field
+// loaded from the previous lookup (mirroring the sparse tier's own
+// big::TABLE) and measured a cycles:u REGRESSION despite real instruction
+// savings -- the load-to-use chain through that field serializes one
+// table load behind the previous one every hit. See wheel210_big.hpp's
+// comment on GAP_K210/ONFLY_CORRECTION210 for the numbers and the fix
+// (plain register-arithmetic index, like this file's own `j`/`w`).
+//
+// Measured after that fix (dev PC, i5-11400F, perf stat cycles:u, single
+// run at a time, natural auto -s):
+//   N=1e11: 121.118G -> 117.970G cycles:u (-2.6%), cache-refs 1.803B ->
+//     1.825B (flat), cache-misses 12.52M -> 10.55M (-15.7%).
+//   N=1e12: 1.5105T -> 1.4751T cycles:u (-2.3%), cache-refs 25.38B ->
+//     20.40B (-19.6%), cache-misses 450.6M -> 422.8M (-6.2%).
+//   N=1e13: 19.801T -> 19.776T cycles:u (-0.13%, noise-level) -- NOT the
+//     growing win the original prediction here expected. Root cause: a
+//     same-day, separate experiment (main.cpp, "EXPERIMENT IN PROGRESS")
+//     shrinks seg_k_width to the nearest power of 2 once isqrt(limit)
+//     reaches it, which happens by N=1e13 on this machine (2687 small /
+//     152886 medium / 72036 sparse, vs 0 sparse at 1e12) -- that shift
+//     moves a growing share of large medium-tier primes into the sparse
+//     tier instead, so the medium tier's own population doesn't keep
+//     growing with N here the way the (now-stale) reasoning in the
+//     reverted 64-list writeup below assumed. Kept anyway: never measured
+//     worse than flat at any N tried, no memory/layout cost paid, and a
+//     real win at the N most runs actually spend most of their time at.
+//     If the sparse/medium split changes again (segment-width tuning,
+//     hardware), re-measure at 1e13+ before assuming this still helps
+//     there.
 //
 // Attempt (tried, reverted): a 4-way interleaved version -- each prime's
 // own chain (k -> next k) is a serial dependency, but four DIFFERENT
@@ -163,18 +217,30 @@ inline void cross_off_class(uint8_t* s, uint64_t end, DenseState* first, DenseSt
 // lane with fewer hits this segment still pays an `if (aN)` check every
 // remaining iteration instead of retiring early like the scalar version's
 // single while does per prime. Reverted.
+// qw here packs (qp << 9) | (ri*48 + w) -- a different layout from the
+// small tier's DenseState (qw = (qp<<6)|(pr<<3)|j) above; activate_dense
+// (segment_sieve.hpp) packs medium entries this way from the start, never
+// mixed with small-tier state. ri is split out once per prime (it's fixed
+// for the whole call, like the old code's `pr`); w is a loop-carried
+// index updated by plain increment-and-wrap, NOT by loading a "next"
+// field out of the table -- see wheel210_big.hpp's comment on
+// GAP_K210/ONFLY_CORRECTION210 for why that distinction is the whole
+// difference between a win and a regression here.
 inline void cross_off_medium(uint64_t* words, uint64_t end_bit, DenseState* first, DenseState* last, uint64_t rebase_bits) {
     for (DenseState* st = first; st != last; ++st) {
         uint64_t k = st->pos;
-        uint64_t qp = st->qw >> 6;
-        uint32_t pr = (st->qw >> 3) & 7;
-        uint32_t j = st->qw & 7;
+        uint64_t qp = st->qw >> 9;
+        uint32_t idx = st->qw & 511;
+        uint32_t ri = idx / 48;
+        uint32_t w = idx % 48;
+        const uint32_t* gap_k = big::GAP_K210.data();
+        const uint32_t* corr = big::ONFLY_CORRECTION210[ri].data();
         while (k < end_bit) {
             words[k >> 6] |= uint64_t{1} << (k & 63);
-            k += qp * GAP_K[j] + ONFLY_CORRECTION[pr][j];
-            j = (j + 1) & 7;
+            k += qp * gap_k[w] + corr[w];
+            w = (w + 1 == 48) ? 0 : w + 1;
         }
-        st->qw = static_cast<uint32_t>((qp << 6) | (pr << 3) | j);
+        st->qw = static_cast<uint32_t>((qp << 9) | (ri * 48 + w));
         st->pos = static_cast<uint32_t>(k - rebase_bits);
     }
 }

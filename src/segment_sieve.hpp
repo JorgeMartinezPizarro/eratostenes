@@ -17,8 +17,14 @@
 //     unpredictable branch per prime.
 //   - medium_primes (up to the segment width, so >= ~1 hit/segment): FLAT,
 //     one pass over the whole segment, generic one-hit-per-iteration
-//     stepping via ONFLY_CORRECTION (wheel.hpp: one multiply by qp=p/30,
-//     one shared-table lookup, one add). The unrolled loop was measured
+//     stepping via shared mod-210 tables (wheel210_big.hpp::GAP_K210/
+//     ONFLY_CORRECTION210: one multiply by qp=p/30, one shared-table
+//     lookup, one add -- 48 multiplier phases instead of the mod-30
+//     wheel's 8, skipping hits redundant with presieve's own coverage of
+//     7; -2.3%/-2.6% cycles:u at N=1e12/1e11, flat at 1e13 once the sparse
+//     tier starts absorbing this tier's largest primes -- see
+//     erat_small.hpp::cross_off_medium for the full numbers). The unrolled
+//     loop was measured
 //     slower here: with only a few hits per segment it can't amortize its
 //     unpredictable entry/exit (see erat_small.hpp::cross_off_medium). An
 //     EratMedium-style 64-list restructuring (byte marking like the small
@@ -194,6 +200,12 @@ public:
         // DenseState::pos), and p / 30 has to fit its packed qp field.
         if (seg_k_width / WHEEL_MOD >= erat::QP_LIMIT || seg_k_width >= (uint64_t{1} << 30)) {
             throw std::runtime_error("SegmentSieve: segmento demasiado grande para el estado denso empaquetado");
+        }
+        // Medium tier's mod-210 packing needs 9 index bits (see
+        // erat_small.hpp::cross_off_medium), leaving qp only 23 -- tighter
+        // than the small tier's 26-bit budget checked just above.
+        if (seg_k_width / WHEEL_MOD >= erat::QP_LIMIT_MEDIUM210) {
+            throw std::runtime_error("SegmentSieve: segmento demasiado grande para el empaquetado mod-210 del tier medium");
         }
         uint64_t sb = seg_k_width_ / 8; // segment width in bytes
         if (has_sparse && (sb & (sb - 1))) {
@@ -391,22 +403,40 @@ private:
         while (next < primes.size()) {
             uint64_t p = primes[next];
             if (p * p >= high_n) break;
-
-            // Smallest m coprime with WHEEL_MOD with p*m >= max(p*p, low_n).
             uint64_t start_val = std::max(p * p, low_n);
-            uint64_t m = (start_val + p - 1) / p;
-            uint64_t r = m % WHEEL_MOD;
-            uint64_t step = STEP_TO_COPRIME[r];
-            m += step;
-            r += step;
-            if (r >= WHEEL_MOD) r -= WHEEL_MOD;
-
-            // Byte of p*m is (p*m)/30 (k = byte*8 + bit, see erat_small.hpp).
-            uint64_t pos = by_class ? (p * m) / WHEEL_MOD - k_low / 8 : wheel_index(p * m) - k_low;
             uint64_t pr = static_cast<uint64_t>(WHEEL_POS[p % WHEEL_MOD]);
-            uint64_t j = static_cast<uint64_t>(WHEEL_POS[r]);
-            state[by_class ? pr : 0].push_back({static_cast<uint32_t>(((p / WHEEL_MOD) << 6) | (pr << 3) | j),
-                             static_cast<uint32_t>(pos)});
+
+            if (by_class) {
+                // Small tier: smallest m coprime with WHEEL_MOD (30) with
+                // p*m >= start_val -- byte position, (qp<<6)|(pr<<3)|j
+                // packing (erat_small.hpp::cross_off_class).
+                uint64_t m = (start_val + p - 1) / p;
+                uint64_t r = m % WHEEL_MOD;
+                uint64_t step = STEP_TO_COPRIME[r];
+                m += step;
+                r += step;
+                if (r >= WHEEL_MOD) r -= WHEEL_MOD;
+                uint64_t pos = (p * m) / WHEEL_MOD - k_low / 8;
+                uint64_t j = static_cast<uint64_t>(WHEEL_POS[r]);
+                state[pr].push_back({static_cast<uint32_t>(((p / WHEEL_MOD) << 6) | (pr << 3) | j),
+                                     static_cast<uint32_t>(pos)});
+            } else {
+                // Medium tier: smallest m coprime with 210 (not just 30)
+                // with p*m >= start_val -- every medium prime is > 163, so
+                // multiples of 7 are always redundant here (see
+                // erat_small.hpp::cross_off_medium). Bit position,
+                // (qp<<9)|(ri*48+w) packing into big::MEDIUM_TABLE
+                // (wheel210_big.hpp), same t/w decomposition as the sparse
+                // tier's own EratBig-style activation just below.
+                uint64_t m0 = (start_val + p - 1) / p;
+                uint64_t t = m0 / 210, sres = m0 % 210;
+                uint32_t w = big::NEXT_W[sres];
+                if (w == 48) { ++t; w = 0; }
+                uint64_t m = t * 210 + big::M210[w];
+                uint64_t pos = wheel_index(p * m) - k_low;
+                state[0].push_back({static_cast<uint32_t>(((p / WHEEL_MOD) << 9) | (pr * 48 + w)),
+                                     static_cast<uint32_t>(pos)});
+            }
             ++next;
         }
     }
