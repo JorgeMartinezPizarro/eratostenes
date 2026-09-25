@@ -181,6 +181,12 @@ static void sieve_chunk(ChunkRange range, uint64_t seg_k_width, uint64_t base_pr
         sieve.sieve_and_emit(k_low, k_high, small_primes, medium_primes, sparse_primes, out, local_count);
         progress.fetch_add(k_high - k_low, std::memory_order_relaxed);
     }
+    // The medium-high band is crossed off once per SegmentSieve::WINDOW_F
+    // segments (see segment_sieve.hpp's flush_window), not once per
+    // segment -- a chunk's segment count isn't generally a multiple of
+    // that, so the last 1..WINDOW_F-1 segments' worth may still be
+    // pending after the loop above and need an explicit flush.
+    sieve.finish_chunk(out, local_count);
 }
 
 // Count-only pass: no I/O, no byte accounting, just the prime count.
