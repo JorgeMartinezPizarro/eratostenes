@@ -237,7 +237,7 @@ public:
     // has_sparse is true; this constructor just verifies that was done.
     SegmentSieve(uint64_t seg_k_width, uint64_t base_prime_max, const Presieve& presieve,
                  uint64_t sub_block_bytes, bool has_sparse)
-        : window_words_(WINDOW_F * ((seg_k_width + 63) / 64), 0),
+        : words_((seg_k_width + 63) / 64, 0),
           seg_k_width_(seg_k_width),
           sub_block_bytes_(sub_block_bytes),
           presieve_(presieve) {
@@ -259,9 +259,6 @@ public:
         }
         log2_sb_ = 0;
         while ((uint64_t{1} << log2_sb_) < sb) ++log2_sb_;
-        // See medium_high_/WINDOW_F's own comment for why a quarter and
-        // four segments specifically.
-        medium_high_threshold_ = seg_k_width_ / 4;
         // Largest BYTE step between one sparse prime's consecutive hits:
         // qp * max(dm) + max(corr), with max(dm) = 10 on the mod-210
         // multiplier wheel (the largest gap between consecutive 210-
@@ -284,14 +281,9 @@ public:
         cur_segment_ = 0;
         next_small_idx_ = 0;
         next_medium_idx_ = 0;
-        next_medium_high_idx_ = SIZE_MAX;
         next_sparse_idx_ = 0;
-        window_len_ = 0;
-        window_bits_used_ = 0;
-        window_k_low_ = 0;
         for (auto& v : small_) v.clear();
         for (auto& v : medium_) v.clear();
-        for (auto& v : medium_high_) v.clear();
         std::fill(head_.begin(), head_.end(), nullptr);
         std::fill(tail_.begin(), tail_.end(), nullptr);
         // Blocks aren't freed, just handed back to the pool: every block
@@ -303,18 +295,6 @@ public:
                 free_.push_back(reinterpret_cast<Blk*>(c.get() + i * BLK_BYTES));
     }
 
-    // Flushes any medium-high-band window still pending at the end of a
-    // chunk (see header comment, "multi-resolution window"): a chunk's
-    // segment count isn't generally a multiple of WINDOW_F, so the last
-    // 1..WINDOW_F-1 segments accumulated may never trigger the automatic
-    // flush inside sieve_and_emit. Must be called once after the last
-    // sieve_and_emit call of a chunk, with the same Writer/prime_count the
-    // caller was already using -- a no-op if nothing is pending.
-    template <typename Writer>
-    void finish_chunk(Writer& out, uint64_t& prime_count) {
-        if (window_len_ > 0) flush_window(out, prime_count);
-    }
-
     template <typename Writer>
     void sieve_and_emit(uint64_t k_low, uint64_t k_high,
                          const std::vector<uint64_t>& small_primes,
@@ -324,17 +304,11 @@ public:
         uint64_t count = (k_high > k_low) ? (k_high - k_low) : 0;
         if (count == 0) return;
 
+        size_t words_needed = (count + 63) / 64;
         uint64_t bytes_needed = (count + 7) / 8;
 
         uint64_t high_n = wheel_number(k_high); // exclusive numeric bound, valid for the p*p cutoff
         uint64_t low_n = wheel_number(k_low);
-
-        // A new window starts accumulating at this segment: everything
-        // filed into medium_high_ from here until the window flushes is
-        // positioned relative to THIS segment's k_low, not each individual
-        // segment's own -- see activate_medium's low_n/k_low decoupling
-        // used for the high-band call below.
-        if (window_len_ == 0) window_k_low_ = k_low;
 
         // Activate any base primes that just became relevant (p*p < high_n).
         // Each of the three lists is sorted by p and gets its own
@@ -343,20 +317,6 @@ public:
         //
         activate_dense(small_primes, next_small_idx_, small_, true, high_n, low_n, k_low);
         activate_medium(medium_primes, next_medium_idx_, medium_, high_n, low_n, k_low);
-
-        // Medium-high band (see header comment): same activation math as
-        // the line above, but positioned relative to the WINDOW's k_low
-        // (window_k_low_) instead of this segment's own, and starting past
-        // medium_high_threshold_ -- medium_primes is sorted, so a single
-        // lower_bound at the first-ever call finds where that suffix
-        // starts; next_medium_high_idx_ only ever advances forward from
-        // there, same one-visit-per-chunk guarantee as the other tiers.
-        if (next_medium_high_idx_ == SIZE_MAX) {
-            next_medium_high_idx_ = static_cast<size_t>(
-                std::lower_bound(medium_primes.begin(), medium_primes.end(), medium_high_threshold_) -
-                medium_primes.begin());
-        }
-        activate_medium(medium_primes, next_medium_high_idx_, medium_high_, high_n, low_n, window_k_low_);
 
         // EratBig-style activation (see header comment): find the smallest
         // multiplier m coprime to 210 (not just 30) with p*m >= max(p*p,
@@ -387,22 +347,16 @@ public:
             ++next_sparse_idx_;
         }
 
-        // This segment's slice of the pending window, in words/bytes --
-        // window_len_ * seg_k_width_ bits in, a fixed-size slot regardless
-        // of this segment's own (possibly short, see below) actual width.
-        uint64_t words_per_seg = seg_k_width_ / 64;
-        uint64_t* seg_words = window_words_.data() + window_len_ * words_per_seg;
-        uint8_t* bytes = reinterpret_cast<uint8_t*>(seg_words);
-
         // Small tier, one L1-sized sub-block at a time: presieve fill,
         // then every small prime crossed off inside that sub-block while
         // it's still L1-resident, instead of each prime sweeping the whole
         // (L2-sized) segment. Pending hits stay relative to the segment's
         // first byte until the last sub-block rebases them.
+        uint8_t* bytes = reinterpret_cast<uint8_t*>(words_.data());
         for (uint64_t sb = 0; sb < bytes_needed; sb += sub_block_bytes_) {
             uint64_t se = std::min(sb + sub_block_bytes_, bytes_needed);
             uint64_t sb_bit = sb * 8;
-            presieve_.fill(seg_words + sb / 8, k_low + sb_bit, std::min<uint64_t>(count - sb_bit, (se - sb) * 8));
+            presieve_.fill(words_.data() + sb / 8, k_low + sb_bit, std::min<uint64_t>(count - sb_bit, (se - sb) * 8));
             uint64_t rebase = (se == bytes_needed) ? bytes_needed : 0;
             erat::cross_off_class<0>(bytes, se, small_[0].data(), small_[0].data() + small_[0].size(), rebase);
             erat::cross_off_class<1>(bytes, se, small_[1].data(), small_[1].data() + small_[1].size(), rebase);
@@ -414,20 +368,20 @@ public:
             erat::cross_off_class<7>(bytes, se, small_[7].data(), small_[7].data() + small_[7].size(), rebase);
         }
         // Wheel index 0 is the number 1: not prime, and nothing marks it.
-        if (k_low == 0) seg_words[0] |= 1;
+        if (k_low == 0) words_[0] |= 1;
 
-        // Medium-LOW band only here: p < medium_high_threshold_, one pass
-        // over just this segment, same as before the window split. The
-        // high band (medium_high_) is crossed off once per window, in
-        // flush_window below -- not here.
-        erat::cross_off_medium<0>(seg_words, count, medium_[0].data(), medium_[0].data() + medium_[0].size(), count);
-        erat::cross_off_medium<1>(seg_words, count, medium_[1].data(), medium_[1].data() + medium_[1].size(), count);
-        erat::cross_off_medium<2>(seg_words, count, medium_[2].data(), medium_[2].data() + medium_[2].size(), count);
-        erat::cross_off_medium<3>(seg_words, count, medium_[3].data(), medium_[3].data() + medium_[3].size(), count);
-        erat::cross_off_medium<4>(seg_words, count, medium_[4].data(), medium_[4].data() + medium_[4].size(), count);
-        erat::cross_off_medium<5>(seg_words, count, medium_[5].data(), medium_[5].data() + medium_[5].size(), count);
-        erat::cross_off_medium<6>(seg_words, count, medium_[6].data(), medium_[6].data() + medium_[6].size(), count);
-        erat::cross_off_medium<7>(seg_words, count, medium_[7].data(), medium_[7].data() + medium_[7].size(), count);
+        // Medium tier: one pass over the whole segment each, one list per
+        // residue class (medium_[pr]) so PR is a compile-time template
+        // parameter in cross_off_medium<PR>, same reasoning as the small
+        // tier's cross_off_class<PR> calls just above.
+        erat::cross_off_medium<0>(words_.data(), count, medium_[0].data(), medium_[0].data() + medium_[0].size(), count);
+        erat::cross_off_medium<1>(words_.data(), count, medium_[1].data(), medium_[1].data() + medium_[1].size(), count);
+        erat::cross_off_medium<2>(words_.data(), count, medium_[2].data(), medium_[2].data() + medium_[2].size(), count);
+        erat::cross_off_medium<3>(words_.data(), count, medium_[3].data(), medium_[3].data() + medium_[3].size(), count);
+        erat::cross_off_medium<4>(words_.data(), count, medium_[4].data(), medium_[4].data() + medium_[4].size(), count);
+        erat::cross_off_medium<5>(words_.data(), count, medium_[5].data(), medium_[5].data() + medium_[5].size(), count);
+        erat::cross_off_medium<6>(words_.data(), count, medium_[6].data(), medium_[6].data() + medium_[6].size(), count);
+        erat::cross_off_medium<7>(words_.data(), count, medium_[7].data(), medium_[7].data() + medium_[7].size(), count);
 
         // Sparse tier: see process_sparse_bucket below (pulled out of this
         // function on purpose -- see its own comment). sparse_primes is
@@ -436,125 +390,63 @@ public:
         // avoids paying a real (non-inlined) call's overhead every single
         // segment for N where this tier never has anything to do (every N
         // tested up to 1e12 on this machine, see README#benchmarks).
-        if (!sparse_primes.empty()) process_big(bytes);
+        if (!sparse_primes.empty()) process_big();
         ++cur_segment_;
 
-        // Record this segment's place in the window for flush_window's
-        // extraction pass, then either flush now (window full) or wait for
-        // more segments (or finish_chunk, at chunk end).
-        window_segs_[window_len_] = {k_low, count};
-        ++window_len_;
-        window_bits_used_ += count;
-        if (window_len_ == WINDOW_F) flush_window(out, prime_count);
-    }
-
-private:
-    // Crosses off the medium-high band (medium_high_, p in
-    // [medium_high_threshold_, seg_k_width_)) once over the whole pending
-    // window -- window_len_ segments, window_bits_used_ bits total -- then
-    // extracts every one of those segments with its own k_low/width. See
-    // header comment ("multi-resolution window", external review, Opus
-    // 5.5, 2026-09-25) for the isolated-benchmark numbers behind this
-    // split (medwin.cpp/medbench.cpp): at N=1e14, W=256 KiB, the top
-    // quarter of the medium tier's primes ([W/4, W)) accounts for ~73% of
-    // this tier's segment visits but only ~27% of its hits -- crossing
-    // that band off once per WINDOW_F=4 segments instead of once per
-    // segment cuts those visits (and their unpredictable loop entry/exit)
-    // by the same factor. Measured on this project's own dev PC
-    // (i5-11400F) via the review's own medwin.cpp, bit-identical checksums
-    // against the F=1 baseline in every config: -22.2% (W=256 KiB) to
-    // -26.9% (W=128 KiB) cycles for exactly this band/window combination,
-    // in an isolated microbenchmark -- see git history/session notes for
-    // the full table and for medbench.cpp's histogram confirming the
-    // 73%-visits/27%-hits split independently. Whether that isolated win
-    // survives inside the real pipeline (competing for L2 with the small
-    // tier's own sub-blocks and the sparse ring, and diluted by
-    // presieve/extraction/sparse-tier time this microbenchmark doesn't
-    // pay) is exactly what the full-binary perf stat cycles:u comparison
-    // this change ships with is for -- see that comparison's own numbers
-    // before trusting this extrapolates.
-    template <typename Writer>
-    void flush_window(Writer& out, uint64_t& prime_count) {
-        erat::cross_off_medium<0>(window_words_.data(), window_bits_used_, medium_high_[0].data(),
-                                   medium_high_[0].data() + medium_high_[0].size(), window_bits_used_);
-        erat::cross_off_medium<1>(window_words_.data(), window_bits_used_, medium_high_[1].data(),
-                                   medium_high_[1].data() + medium_high_[1].size(), window_bits_used_);
-        erat::cross_off_medium<2>(window_words_.data(), window_bits_used_, medium_high_[2].data(),
-                                   medium_high_[2].data() + medium_high_[2].size(), window_bits_used_);
-        erat::cross_off_medium<3>(window_words_.data(), window_bits_used_, medium_high_[3].data(),
-                                   medium_high_[3].data() + medium_high_[3].size(), window_bits_used_);
-        erat::cross_off_medium<4>(window_words_.data(), window_bits_used_, medium_high_[4].data(),
-                                   medium_high_[4].data() + medium_high_[4].size(), window_bits_used_);
-        erat::cross_off_medium<5>(window_words_.data(), window_bits_used_, medium_high_[5].data(),
-                                   medium_high_[5].data() + medium_high_[5].size(), window_bits_used_);
-        erat::cross_off_medium<6>(window_words_.data(), window_bits_used_, medium_high_[6].data(),
-                                   medium_high_[6].data() + medium_high_[6].size(), window_bits_used_);
-        erat::cross_off_medium<7>(window_words_.data(), window_bits_used_, medium_high_[7].data(),
-                                   medium_high_[7].data() + medium_high_[7].size(), window_bits_used_);
-
-        uint64_t words_per_seg = seg_k_width_ / 64;
+        // Extraction: bit=0 => prime candidate. Accumulated locally and
+        // added to prime_count once at the end, instead of read-modify-
+        // writing through the reference every word (count-only) or every
+        // single prime (value extraction) -- prime_count is a reference
+        // into the caller's frame, so the compiler can't always prove
+        // nothing else aliases it and keep it in a register across this
+        // loop; a local can't be aliased by anything, so it stays in a
+        // register for the whole function.
         uint64_t local_prime_count = 0;
-        for (int i = 0; i < window_len_; ++i) {
-            uint64_t k_low = window_segs_[i].k_low;
-            uint64_t count = window_segs_[i].count;
-            const uint64_t* seg_words = window_words_.data() + static_cast<uint64_t>(i) * words_per_seg;
-            size_t words_needed = (count + 63) / 64;
+        for (size_t w = 0; w < words_needed; ++w) {
+            uint64_t bits = ~words_[w];
+            uint64_t base_idx = w * 64ULL;
+            uint64_t remaining = count - base_idx;
+            if (remaining < 64) {
+                bits &= (remaining == 0) ? 0ULL : ((1ULL << remaining) - 1ULL);
+            }
+            if (bits == 0) continue;
 
-            // Extraction: bit=0 => prime candidate. Accumulated locally and
-            // added to prime_count once at the end, instead of read-modify-
-            // writing through the reference every word (count-only) or every
-            // single prime (value extraction) -- prime_count is a reference
-            // into the caller's frame, so the compiler can't always prove
-            // nothing else aliases it and keep it in a register across this
-            // loop; a local can't be aliased by anything, so it stays in a
-            // register for the whole function.
-            for (size_t w = 0; w < words_needed; ++w) {
-                uint64_t bits = ~seg_words[w];
-                uint64_t base_idx = w * 64ULL;
-                uint64_t remaining = count - base_idx;
-                if (remaining < 64) {
-                    bits &= (remaining == 0) ? 0ULL : ((1ULL << remaining) - 1ULL);
+            // count-only (NullSink) never looks at the value written --
+            // skip straight to how many bits are set instead of decoding
+            // each one (ctz + wheel-index math) just to discard it below.
+            if constexpr (!Writer::WANTS_VALUES) {
+                local_prime_count += static_cast<uint64_t>(__builtin_popcountll(bits));
+                continue;
+            }
+
+            uint64_t k_word_start = k_low + base_idx;
+            uint64_t q = k_word_start / WHEEL_SIZE;
+            uint64_t r = k_word_start % WHEEL_SIZE;
+
+            uint64_t prev_bit = 0;
+            while (bits) {
+                uint64_t bit_pos = static_cast<uint64_t>(__builtin_ctzll(bits));
+                uint64_t step2 = bit_pos - prev_bit;
+                prev_bit = bit_pos;
+                if constexpr (WHEEL_SIZE_IS_POW2) {
+                    uint64_t rq = r + step2;
+                    q += rq >> WHEEL_SIZE_LOG2;
+                    r = rq & (static_cast<uint64_t>(WHEEL_SIZE) - 1);
+                } else {
+                    r += step2;
+                    while (r >= static_cast<uint64_t>(WHEEL_SIZE)) { r -= WHEEL_SIZE; ++q; }
                 }
-                if (bits == 0) continue;
 
-                // count-only (NullSink) never looks at the value written --
-                // skip straight to how many bits are set instead of decoding
-                // each one (ctz + wheel-index math) just to discard it below.
-                if constexpr (!Writer::WANTS_VALUES) {
-                    local_prime_count += static_cast<uint64_t>(__builtin_popcountll(bits));
-                    continue;
-                }
-
-                uint64_t k_word_start = k_low + base_idx;
-                uint64_t q = k_word_start / WHEEL_SIZE;
-                uint64_t r = k_word_start % WHEEL_SIZE;
-
-                uint64_t prev_bit = 0;
-                while (bits) {
-                    uint64_t bit_pos = static_cast<uint64_t>(__builtin_ctzll(bits));
-                    uint64_t step2 = bit_pos - prev_bit;
-                    prev_bit = bit_pos;
-                    if constexpr (WHEEL_SIZE_IS_POW2) {
-                        uint64_t rq = r + step2;
-                        q += rq >> WHEEL_SIZE_LOG2;
-                        r = rq & (static_cast<uint64_t>(WHEEL_SIZE) - 1);
-                    } else {
-                        r += step2;
-                        while (r >= static_cast<uint64_t>(WHEEL_SIZE)) { r -= WHEEL_SIZE; ++q; }
-                    }
-
-                    uint64_t value = q * WHEEL_MOD + WHEEL_R[r];
-                    out.write_uint64(value);
-                    ++local_prime_count;
-                    bits &= bits - 1; // clear the lowest set bit
-                }
+                uint64_t value = q * WHEEL_MOD + WHEEL_R[r];
+                out.write_uint64(value);
+                ++local_prime_count;
+                bits &= bits - 1; // clear the lowest set bit
             }
         }
         prime_count += local_prime_count;
-        window_len_ = 0;
-        window_bits_used_ = 0;
     }
 
+private:
     // Activates (appends state for) every prime in `primes` from `next`
     // on whose square falls below this segment's end; `primes` is sorted,
     // so this touches each prime exactly once per chunk. by_class: the
@@ -790,8 +682,9 @@ private:
     // due in, so no k_low/k_high parameters are needed here at all, unlike
     // the old scheme.
     __attribute__((noinline))
-    void process_big(uint8_t* s) {
+    void process_big() {
         const uint32_t slot = static_cast<uint32_t>(cur_segment_ & (num_buckets_ - 1));
+        uint8_t* const s = reinterpret_cast<uint8_t*>(words_.data());
         const uint32_t log2sb = log2_sb_;
         const uint64_t modsb = (uint64_t{1} << log2sb) - 1;
         const uint64_t bmask = num_buckets_ - 1;
@@ -871,13 +764,7 @@ private:
     std::vector<Blk*> free_;
     std::vector<std::unique_ptr<char, AlignedFree>> chunks_;
 
-    // WINDOW_F consecutive segments' worth of bit array, laid out back to
-    // back (segment i at word offset i*seg_k_width_/64) -- replaces a
-    // single-segment words_ buffer so the medium-high band (medium_high_
-    // below) can be crossed off once over the whole window instead of once
-    // per segment. See flush_window's own comment for the numbers behind
-    // this.
-    std::vector<uint64_t> window_words_;
+    std::vector<uint64_t> words_;
     uint64_t seg_k_width_;
     uint64_t sub_block_bytes_;
     const Presieve& presieve_;
@@ -886,33 +773,7 @@ private:
     // small_primes/medium_primes as they activate -- no bucket, walked
     // every segment (small: every sub-block).
     std::vector<erat::DenseState> small_[8]; // one list per residue class p % 30
-    std::vector<erat::DenseState> medium_[8]; // one list per residue class p % 30, p < medium_high_threshold_
-
-    // Medium-high band: p in [medium_high_threshold_, seg_k_width_), one
-    // list per residue class, crossed off once per WINDOW_F-segment window
-    // in flush_window instead of once per segment -- see that function's
-    // comment. medium_high_threshold_ = seg_k_width_/4 and WINDOW_F=4 are
-    // the config flush_window's comment measured as the best of the six
-    // tried on this project's own dev PC (medwin.cpp); revisit both
-    // together if this is ever re-tuned; the isolated benchmark showed
-    // narrower bands / bigger windows trading off against each other, not
-    // independently.
-    static constexpr int WINDOW_F = 4;
-    std::vector<erat::DenseState> medium_high_[8];
-    uint64_t medium_high_threshold_ = 0;
-    size_t next_medium_high_idx_ = SIZE_MAX;
-
-    // Pending window state: which of the WINDOW_F slots are filled
-    // (window_len_), their total bit width so far (window_bits_used_, what
-    // flush_window passes as cross_off_medium's end_bit/rebase_bits), each
-    // one's own (k_low, count) for flush_window's extraction pass, and the
-    // k_low the window itself started at (window_k_low_, what medium_high_
-    // positions are relative to -- see sieve_and_emit).
-    struct WinSeg { uint64_t k_low; uint64_t count; };
-    WinSeg window_segs_[WINDOW_F];
-    int window_len_ = 0;
-    uint64_t window_bits_used_ = 0;
-    uint64_t window_k_low_ = 0;
+    std::vector<erat::DenseState> medium_[8]; // one list per residue class p % 30
 
     uint32_t log2_sb_ = 0; // log2(segment width in bytes) -- see constructor
     uint64_t num_buckets_ = 1;
