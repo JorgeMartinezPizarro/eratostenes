@@ -56,6 +56,26 @@ constexpr uint64_t QP_LIMIT = uint64_t{1} << 26;
 
 // Crosses off p = 30*qp + R[PR] in s[0, end), starting at the pending hit
 // (i, j); on return (i, j) is the first hit at or past `end`.
+//
+// Tried, reverted (2026-09-25): every local here (qp, p, the o[j]s, b,
+// end) is genuinely bounded well under 2^20 regardless of N -- qp by
+// small_limit (an L1-cache-derived constant, never N-dependent), the
+// rest by the segment's own byte width (seg_k_width/8, capped under 2^30
+// by SegmentSieve's own constructor check) -- so narrowing every local
+// from uint64_t to uint32_t looked like a free win (shorter x86-64
+// encoding, no REX prefix) with no range risk. Measured the opposite:
+// dev PC, i5-11400F, perf stat cycles:u, natural auto -s, two reps each --
+// N=1e11: 118.44G/118.50G -> 120.19G/120.24G cycles:u (+1.47% both reps);
+// N=1e12: 1.4604T/1.4645T -> 1.4742T/1.4805T cycles:u (+0.95%/+1.09%).
+// instructions:u rose too (+3.2% at 1e11, +2.5% at 1e12, identically
+// across reps -- deterministic, not noise), the opposite of the
+// instruction-count savings the shorter encoding was expected to give.
+// Root cause not isolated further (would need perf annotate to see
+// exactly which instructions the compiler added), but the practical
+// takeaway holds regardless: on this compiler/target, 64-bit locals for
+// pointer-offset arithmetic on x86-64 apparently let GCC's optimizer do
+// something it can't when 32/64-bit types mix, even though every value
+// involved provably fits in 32 bits. Reverted to uint64_t throughout.
 template <int PR>
 inline void cross_off(uint8_t* s, uint64_t end, uint64_t qp, uint64_t& i_io, uint32_t& j_io) {
     const uint64_t p = 30 * qp + R[PR];

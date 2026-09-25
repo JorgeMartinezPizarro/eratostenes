@@ -73,6 +73,27 @@
 //     delta[] table tier (40 bytes/prime, capped by an L3/2 budget) plus
 //     the ONFLY_CORRECTION loop for everything past that budget, both on
 //     the whole L2-sized segment: -26% at N=1e11, -30% at N=1e12.
+//
+// Investigated, ruled out (2026-09-25, external review, Opus 5.5): dTLB
+// pressure from a thread's whole working set at large N -- the 256KiB
+// segment array, ~1.2MB of medium-tier DenseState (152,886 primes * 8
+// bytes at the natural N=1e13 cliff, matches the review's own estimate)
+// walked whole every segment, plus the sparse ring's blocks scattered
+// across dozens of 4KiB pages -- all live at once per thread, and with
+// 2 threads/core sharing one STLB (true of this dev PC, i5-11400F, 6C/
+// 12T) that's plausible to blow. Measured before touching anything (perf
+// stat -e dTLB-load-misses,dTLB-loads,dTLB-store-misses,dTLB-stores):
+// N=1e12 -- 11.3M/434.4B loads (0.0026%), 3.8M/281.6B stores (0.0014%);
+// N=1e13 -- 226.9M/5,329.7B loads (0.0043%), 40.5M/3,182.3B stores
+// (0.0013%). Even generously costing every one of the ~267M total dTLB
+// misses at 1e13 at ~20-30 cycles (a full page-walk-from-cache penalty),
+// that's ~5.3-8.0B cycles against 19,274.6B total -- ~0.03-0.04%,
+// nowhere near enough to matter, let alone explain a double-digit ratio
+// gap against primesieve. Miss rate did grow ~1.6x relative from 1e12 to
+// 1e13, but off a base this small that doesn't project to anything
+// significant by 1e14 either. Not pursued further: no huge-pages
+// experiment, no madvise(MADV_HUGEPAGE) -- the measurement this review
+// itself proposed as the cheap first step already closes the question.
 //   - sparse_primes (p >= segment width, at most ~1 hit/segment): BUCKET.
 //
 //     EXPERIMENT IN PROGRESS (isolated test of point 1 from an external
