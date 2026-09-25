@@ -112,6 +112,23 @@ $(OBJ_DIR_DEBUG)/%.o: $(SRC_DIR)/%.cpp $(HEADERS) | $(OBJ_DIR_DEBUG)
 # whole range -- see README#benchmarks; not yet re-measured with the
 # sparse-tier training added. Overwrites $(BIN) in place, like `portable`
 # does; run `make re` afterwards to get back a plain release build.
+#
+# VERDICT (2026-09-25, production server, via docker-pgo/run-pgo below,
+# real hardware not the dev PC): NOT ADOPTED. N=1e12: several PGO runs
+# clustered ~24.5-25s vs the non-PGO README figure of 24.51s -- no visible
+# separation from run-to-run noise. N=1e13: 328.49s (PGO) vs 330.38s
+# (non-PGO, README) -- a 0.57% difference, again indistinguishable from
+# single-run wall-clock noise. Unlike the dev PC, the server has no
+# perf/cycles:u available to look past that noise the way this project
+# normally would (see BENCHMARK section of this file's own git history
+# for why cycles:u is trusted over wall-clock here) -- so on the one
+# machine this was actually built for, PGO's payoff can't even be
+# confirmed, let alone justified against its real costs: a longer build,
+# and an image/binary tied to the exact machine it's compiled on. Kept as
+# opt-in infrastructure (not part of default `make`/`make docker`) since
+# it's harmless sitting unused, but don't re-run this validation again
+# without a new reason to expect a different answer -- this was checked
+# on real production hardware, not extrapolated from the dev PC.
 pgo: $(NTH_BIN)
 	rm -rf $(OBJ_DIR_PGO)
 	mkdir -p $(PROF_DIR)
@@ -152,10 +169,14 @@ docker:
 # `docker compose run` asigna TTY automaticamente cuando la terminal que
 # invoca es interactiva (ver -T/--no-TTY en `docker compose run --help`),
 # a diferencia de `docker run`, que no lo hace salvo que se le pida -t.
+# -e ERATOSTENES_DEBUG_IDLE forwards that var IF set in the host shell
+# (see run_parallel_chunks in main.cpp) -- `docker compose run` doesn't
+# forward the host environment on its own, has to be told which vars to
+# pass through, same as THREADS below for docker-test/docker-benchmark.
 # Ejemplo: make run ARGS="1e9 -o /output/primos.txt -t 8"
 run:
 	mkdir -p $(OUT_DIR)
-	$(COMPOSE) run --rm eratostenes $(ARGS)
+	$(COMPOSE) run --rm -e ERATOSTENES_DEBUG_IDLE eratostenes $(ARGS)
 
 # PGO image: two-phase profile-guided build (see Makefile's own `pgo`
 # target for the flags/training rationale) baked in at `docker build`
@@ -168,14 +189,18 @@ run:
 # baked in at both the instrumented AND the final compile -- see
 # Dockerfile's own warning on pgo-builder) and takes noticeably longer to
 # build (the training passes run during the image build itself).
+# VERDICT: not adopted -- tried on the actual production server, no
+# measurable win. See the `pgo` target's own comment above for the numbers
+# before repeating this investigation.
 docker-pgo:
 	$(COMPOSE) build eratostenes-pgo
 
-# Same calling convention as `run` above, against the PGO image instead.
+# Same calling convention as `run` above, against the PGO image instead,
+# including the ERATOSTENES_DEBUG_IDLE forwarding.
 # Ejemplo: make run-pgo ARGS="1e11 -t 8"
 run-pgo:
 	mkdir -p $(OUT_DIR)
-	$(COMPOSE) run --rm eratostenes-pgo $(ARGS)
+	$(COMPOSE) run --rm -e ERATOSTENES_DEBUG_IDLE eratostenes-pgo $(ARGS)
 
 # Compara pi(N) contra el valor conocido para N=1e8..1e11 (sin -o, modo
 # conteo, sin E/S); un .db real en N=1e10 con primos conocidos por posicion via

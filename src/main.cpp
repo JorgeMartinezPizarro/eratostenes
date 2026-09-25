@@ -47,6 +47,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdint>
+#include <cstdlib>
 #include <exception>
 #include <vector>
 #include <string>
@@ -325,19 +326,59 @@ struct ProgressGuard {
 // part of the range; pulling many narrow chunks from a shared counter lets
 // a thread that finishes an early, cheap chunk immediately pick up the
 // next available one instead of sitting idle.
+//
+// Investigated (2026-09-25, external review, Opus 5.5): hypothesis that
+// CHUNKS_PER_THREAD=16 is too coarse at large N -- a fixed chunk count
+// means each chunk gets proportionally WIDER as N grows (1e13: ~20s/chunk
+// on the server; 1e14 projected ~250s/chunk), and since split_ranges
+// carves chunks in original k-order, the LAST chunks (widest population,
+// per the comment above) could still leave most threads idle at the end
+// even with this shared-counter queue -- worse on the server's i5-13500
+// specifically if a straggler chunk lands on a slower E-core. Proposed
+// this file's ERATOSTENES_DEBUG_IDLE diagnostic as the cheap first step
+// before trying any fix, given the review's own honest caveat that
+// N=1e12 already sits at ratio 1.01 with the identical scheme.
+// Measured on the dev PC (i5-11400F, 12 symmetric P-cores, no E-cores):
+// idle=1.4% at N=1e12, idle=0.9% at N=1e13 -- LOWER at the larger N, not
+// higher, directly contradicting the "idle grows with N" half of the
+// hypothesis, and far too small either way to explain this machine's own
+// ~13% ratio gap at 1e13 (see README#benchmarks). The queue above is
+// already doing its job here. Caveat: this refutes the mechanism on
+// symmetric cores specifically -- the review's own strongest argument
+// (a straggler chunk landing on a slow E-core) has no equivalent on this
+// dev PC to test, since it has none. Re-run the same check on the
+// server -- which only has Docker, no compiler of its own, so this has
+// to go through the image (see Makefile's own run/run-pgo targets and
+// their -e ERATOSTENES_DEBUG_IDLE forwarding, and docker/Dockerfile for
+// the images themselves): `ERATOSTENES_DEBUG_IDLE=1 make run-pgo
+// ARGS="1e13 -t 20"` (or plain `run` for the non-PGO image) -- before
+// concluding this doesn't matter there too. Not yet done as of this
+// writeup.
 template <typename Fn>
 static void run_parallel_chunks(unsigned workers, unsigned num_chunks, Fn&& fn) {
     std::atomic<unsigned> next_chunk{0};
     std::vector<std::exception_ptr> errors(workers);
     std::vector<std::thread> pool;
     pool.reserve(workers);
+    // ERATOSTENES_DEBUG_IDLE=1: per-thread finish timestamp, to measure
+    // whether the shared-counter queue above actually keeps every thread
+    // busy or whether a handful of expensive
+    // tail chunks still leave most threads idle at the end -- see the
+    // 2026-09-25 finding this produced, in the comment on the loop right
+    // above (num_chunks > workers on purpose).
+    const bool debug_idle = std::getenv("ERATOSTENES_DEBUG_IDLE") != nullptr;
+    auto t0 = std::chrono::steady_clock::now();
+    std::vector<double> finish(debug_idle ? workers : 0);
     for (unsigned w = 0; w < workers; ++w) {
-        pool.emplace_back([&fn, &errors, &next_chunk, num_chunks, w]() {
+        pool.emplace_back([&fn, &errors, &next_chunk, num_chunks, w, debug_idle, &finish, t0]() {
             try {
                 for (;;) {
                     unsigned idx = next_chunk.fetch_add(1, std::memory_order_relaxed);
                     if (idx >= num_chunks) break;
                     fn(idx);
+                }
+                if (debug_idle) {
+                    finish[w] = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
                 }
             } catch (...) {
                 errors[w] = std::current_exception();
@@ -346,6 +387,13 @@ static void run_parallel_chunks(unsigned workers, unsigned num_chunks, Fn&& fn) 
     }
     for (auto& th : pool) th.join();
     for (auto& e : errors) if (e) std::rethrow_exception(e);
+    if (debug_idle && !finish.empty()) {
+        double lo = finish[0], hi = finish[0], idle_sum = 0;
+        for (double f : finish) { lo = std::min(lo, f); hi = std::max(hi, f); }
+        for (double f : finish) idle_sum += (hi - f);
+        std::fprintf(stderr, "[idle] chunks=%u workers=%u min=%.3fs max=%.3fs idle=%.1f%%\n",
+                     num_chunks, workers, lo, hi, 100.0 * idle_sum / (workers * hi));
+    }
 }
 
 int main(int argc, char** argv) {

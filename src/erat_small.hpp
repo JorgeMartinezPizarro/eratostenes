@@ -189,6 +189,32 @@ inline void cross_off_class(uint8_t* s, uint64_t end, DenseState* first, DenseSt
 //     hardware), re-measure at 1e13+ before assuming this still helps
 //     there.
 //
+// Considered, not implemented (2026-09-25, external review, Opus 5.5):
+// the obvious next step past mod-210 is mod-2310 (skip 7, 11 AND 13's
+// redundant multiples, all three already covered by PRESIEVE_GROUPS) --
+// 480 phases instead of 48, ~9% fewer candidate hits in both this tier
+// and the sparse one. Checked the actual table cost before writing any
+// code: wheel210_big.hpp's Entry is 8 bytes; the sparse tier's flat
+// per-(class,phase) table would grow from 384 entries (3KB) to 8*480=3840
+// (30KB) -- not the review's own ~15KB estimate, which this file's git
+// history has no matching derivation for; this tier's own idx already
+// needs 12 bits instead of 9 to address it. This file's two tables
+// (GAP_K210 + ONFLY_CORRECTION210) would grow from ~1.7KB to ~17.3KB.
+// Both land at or past the 32KiB L1d the review itself flags on the
+// server's E-cores -- and that's each table ALONE, before counting
+// whatever else (DenseState arrays, the segment bit array) needs L1 at
+// the same time. Same conclusion wheel.hpp already reached for the mod-
+// 2310 BASE wheel, for the same underlying reason (a wheel's table cost
+// grows with the product of its primes; the candidate reduction only
+// grows with their sum of reciprocals) -- this is that argument applying
+// a second time, one level down, to the stepping tables instead of the
+// whole-program layout. Not implemented: the review's own estimate was a
+// modest 1-3% gain, likely optimistic given the corrected table sizes,
+// against a real risk of blowing L1 on the actual target hardware. Worth
+// revisiting only if the sparse/medium tables ever need re-deriving for
+// another reason anyway, and only with real perf stat cache-miss numbers
+// from the server, not projected ones.
+//
 // Attempt (tried, reverted): a 4-way interleaved version -- each prime's
 // own chain (k -> next k) is a serial dependency, but four DIFFERENT
 // primes' chains are independent, so the idea was to give out-of-order
