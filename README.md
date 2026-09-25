@@ -1,6 +1,6 @@
 # Eratostenes
 
-A segmented, parallel, wheel-based Sieve of Eratosthenes (C++20) for generating or counting primes up to very large N (10^12+), with a compact, randomly-indexable `.db` output format for storing dense prime tables at scale. [primesieve](https://github.com/kimwalisch/primesieve) is this project's reference, both for performance (see [Benchmarks](#benchmarks)) and for technique -- several of the ideas below come directly from reading its source. See [docs/ALGORITHM.md](docs/ALGORITHM.md) for how the pieces fit together.
+A segmented, parallel, wheel-based Sieve of Eratosthenes (C++20) for generating or counting primes up to very large N (10^15+), with a compact, randomly-indexable `.db` output format for storing dense prime tables at scale. [primesieve](https://github.com/kimwalisch/primesieve) is this project's reference, both for performance (see [Benchmarks](#benchmarks)) and for technique -- several of the ideas below come directly from reading its source. See [docs/ALGORITHM.md](docs/ALGORITHM.md) for how the pieces fit together.
 
 ## Build
 
@@ -19,6 +19,7 @@ sudo apt-get install primecount-bin   # Debian/Ubuntu/WSL
 ```sh
 make            # release build: -O3 -march=native -flto, plus nth_prime
 make portable   # no -march=native, for a binary you'll copy to another machine
+make pgo		# Build with a performance optimizations training.
 make debug      # ASan/UBSan, for debugging
 make test       # checks output against primecount across N and across
                 # several parameter combinations, plus .db vs text output
@@ -27,8 +28,8 @@ make test       # checks output against primecount across N and across
 ## Docker
 
 ```sh
-make docker                                              # build the image
-make run ARGS="100b -o /output/primes.txt -t 12"          # run it
+make docker                                      # build the image
+make run ARGS="100b -o /output/primes.txt -t 12" # run it
 ```
 
 `make run` mounts `./output` (host) at `/output` (container); use
@@ -40,30 +41,29 @@ outside the container.
 ```sh
 ./eratostenes N [options]
 
-  N                      Upper bound (inclusive), positional (no flag --
+  N                       Upper bound (inclusive), positional (no flag --
                           primesieve-style). Accepts suffixes:
                           k=1e3  m=1e6  b=1e9 (short-scale billion)  t=1e12
-  -o, --output PATH      Output file. Without it, only counts primes --
+  -o, --output PATH       Output file. Without it, only counts primes --
                           no file is written. .db suffix switches to the
                           compact SQLite format (see below).
-  -t, --threads N        Thread count (default: available cores)
-  -s, --segment-width N  Numeric width per segment
+  -t, --threads N         Thread count (default: available cores)
+  -s, --segment-width N   Numeric width per segment
                           (default: auto, sized from N)
-      --db-block-size N  Primes per compressed block in .db mode (default: 65536)
-      --zstd-level N     zstd compression level in .db mode (default: 3)
-  -h, --help             Help
+      --db-block-size N   Primes per compressed block in .db mode (default: 65536)
+      --zstd-level N      zstd compression level in .db mode (default: 3)
+  -h, --help              Help
 ```
 
 ```sh
-./eratostenes 10000 -o primes_1M.txt
-./eratostenes 100m -o ~/primes_100b.txt -t 12
-./eratostenes 10b -t 12          # no -o: counts only, writes nothing
-./eratostenes 1t -o ~/primes_100b.db
+./eratostenes 10000 -o primes_1M.txt      # Write to text        
+./eratostenes 10b -t 12                   # Count using 12 threads
+./eratostenes 1t -o ~/primes_100b.db      # Write to db
 ```
 
 ## DB compression
 
-The `.db` format is a indexed sqlite file (max 256TB size), so it is suitable up to `e16`, around `200TB`. To query for primes you can use the `nth_prime` companion:
+The `.db` format is a indexed sqlite file (max 256TB size), so it is suitable up to `e16`, around `190TB`. To query for primes you can use the `nth_prime` companion:
 
 ```sh
 ./nth_prime out.db 1000000     # the 1,000,000th prime (1-indexed: N=1 -> 2)
