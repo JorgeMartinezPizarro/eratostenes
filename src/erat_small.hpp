@@ -359,5 +359,33 @@ inline void cross_off_medium(uint64_t* words, uint64_t end_bit, DenseState* firs
 // argues against it holding up at the N this project targets. If ever
 // revisited, re-derive at N=1e14+ first rather than trusting the 1e12/1e13
 // trend to extrapolate favorably.
+//
+// CONFIRMED (2026-09-25, follow-up session, fresh implementation -- the
+// original above was never committed, so this was rewritten from scratch,
+// not recovered): re-attempted this exact idea, now with real perf access
+// on this dev PC (see project memory on the sudo/perf permission story)
+// instead of trusting the trend extrapolation above. New double-buffered
+// design (medium64_cur_/medium64_next_ in segment_sieve.hpp, swapped each
+// segment instead of migrating in place) to sidestep any implementation-
+// specific confound. Measured (perf stat cycles:u, single clean run each,
+// natural auto -s):
+//   N=1e12: cycles:u 1.4644T -> 1.3791T (-5.8%), instructions:u -32.1%,
+//     cache-miss rate (LLC) 4.91%, IPC 1.26->0.91. A real win, smaller
+//     than the original writeup's -11.5% but the same direction.
+//   N=1e13: cycles:u 19.412T -> 20.042T (+3.25%, a REGRESSION, not just a
+//     smaller win), instructions:u still -18.9% (real, substantial), but
+//     cache-misses:u nearly DOUBLED (20.06B -> 39.29B, +95.8%) and fully
+//     consumed the instruction savings.
+// This directly confirms the trend-based rejection above was correct --
+// not by extrapolating from two points this time, but by measuring the
+// actual N=1e13 regression directly. The idea is now closed on real data
+// at the N this project targets (E13-E14), not just a projection past it.
+// Don't re-attempt without a fundamentally different fix for the
+// footprint-vs-instruction trade (e.g. shrinking DenseState itself, or
+// bounding how many of the 64 lists can be simultaneously "hot") -- the
+// trade direction itself (fewer instructions for more cache pressure) has
+// now failed this same trend check three times in this codebase (see also
+// segment_sieve.hpp's sparse-tier attempt 3, and the sparse_limit/4 cutoff
+// experiment in main.cpp).
 
 } // namespace erat
