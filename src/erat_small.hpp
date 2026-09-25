@@ -210,10 +210,30 @@ inline void cross_off_class(uint8_t* s, uint64_t end, DenseState* first, DenseSt
 // a second time, one level down, to the stepping tables instead of the
 // whole-program layout. Not implemented: the review's own estimate was a
 // modest 1-3% gain, likely optimistic given the corrected table sizes,
-// against a real risk of blowing L1 on the actual target hardware. Worth
-// revisiting only if the sparse/medium tables ever need re-deriving for
-// another reason anyway, and only with real perf stat cache-miss numbers
-// from the server, not projected ones.
+// against a real risk of blowing L1 on the actual target hardware.
+//
+// A second, independent reason kills the SPARSE tier's half of this
+// outright, past just cache pressure: DenseState.qw is a uint32_t, and
+// mod-210 there already spends 9 bits on (class, phase) (8*48=384,
+// needs 9), leaving 23 for qp -- max representable prime ~251.66M
+// (qp_max*30), comfortably past isqrt(1e15)~31.62M, this project's own
+// declared E15 target (see MEMORY.md/project scope), with ~8x headroom.
+// Mod-2310 needs 12 bits for (class, phase) (8*480=3840), leaving only
+// 20 for qp -- max representable prime ~31.46M, which is BELOW
+// isqrt(1e15). Past that point qp silently wraps and the sieve produces
+// wrong results with no error -- this isn't a performance tradeoff
+// against a modest gain any more, it's incompatible with a goal this
+// project has already committed to, short of a bigger restructuring of
+// DenseState's packing than this idea was ever meant to be. (Aside,
+// found while checking this: base_prime_max -- which is what the sparse
+// tier's own qp actually has to fit, not seg_k_width -- has no runtime
+// assertion today, under the CURRENT mod-210 packing either; harmless at
+// E15 given the 8x headroom above, but worth a real check if this
+// project's own target ever moves past roughly limit=6.3e16.) The
+// MEDIUM tier's mod-2310 half doesn't have this problem (its primes stay
+// under seg_k_width, orders of magnitude below this ceiling either way)
+// -- it's still just the cache-pressure argument above for that tier,
+// not a hard rejection.
 //
 // Attempt (tried, reverted): a 4-way interleaved version -- each prime's
 // own chain (k -> next k) is a serial dependency, but four DIFFERENT

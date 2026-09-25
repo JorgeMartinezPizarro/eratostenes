@@ -351,9 +351,39 @@ struct ProgressGuard {
 // to go through the image (see Makefile's own run/run-pgo targets and
 // their -e ERATOSTENES_DEBUG_IDLE forwarding, and docker/Dockerfile for
 // the images themselves): `ERATOSTENES_DEBUG_IDLE=1 make run-pgo
-// ARGS="1e13 -t 20"` (or plain `run` for the non-PGO image) -- before
-// concluding this doesn't matter there too. Not yet done as of this
-// writeup.
+// ARGS="1e13 -t 20"` (or plain `run` for the non-PGO image).
+//
+// Done (2026-09-25, production server, i5-13500, 20 threads, real P/E
+// cores this time): idle=2.1% at N=1e12, idle=2.1% at N=1e13 -- flat
+// across N, same as the dev PC, and still nowhere near large enough to
+// explain this machine's own ~12% ratio gap at 1e13 (see
+// README#benchmarks). This closes the straggler-on-an-E-core mechanism
+// too, on the one machine that could actually exercise it: the queue
+// keeps every thread fed regardless of which core class picks up the
+// tail chunks. VERDICT: as an explanation for the ~12% ratio gap,
+// REJECTED on real target hardware, not just the dev PC -- 2.1% idle
+// can't be most of a 12-point gap. Chunk granularity/scheduling is not
+// worth re-investigating for THAT reason.
+//
+// Follow-up (2026-09-25, same review): a constant (not N-growing) ~2%
+// idle at BOTH N is still consistent with a simpler, smaller effect --
+// roughly half a chunk's worth of tail latency, independent of the ratio
+// gap entirely. Recovering it is cheap (CHUNKS_PER_THREAD 16->150 here,
+// ~10 lines, doesn't touch any tier's hot path) even if it doesn't
+// explain the gap. Dev PC (i5-11400F): idle 1.4%->0.2% at N=1e12,
+// 0.9%->0.2% at N=1e13; wall-clock -3.2% at 1e12 and -1.1% at 1e13 in
+// paired same-session runs. NOT YET TRUSTED, though: a same-config
+// re-run drifted from 499.98s to 419.95s between two points in this
+// session (16% apart, far past normal noise) after hours of continuous
+// heavy jobs on this machine -- almost certainly residual contention
+// (see this project's own "never run two thread-heavy jobs at once on
+// the dev PC" lesson, git history), not a real effect. cycles:u under
+// that same contention even flipped sign once (+0.84% for 150 vs 16).
+// Re-measure on the server (`ERATOSTENES_DEBUG_IDLE=1 make run-pgo
+// ARGS="1e13 -t 20"`, clean machine, no hours of prior jobs) before
+// trusting either the idle-reduction number or the wall-clock delta.
+// CHUNKS_PER_THREAD=150 is left in place below for that test -- revert
+// to 16 if the server doesn't confirm a real win.
 template <typename Fn>
 static void run_parallel_chunks(unsigned workers, unsigned num_chunks, Fn&& fn) {
     std::atomic<unsigned> next_chunk{0};
@@ -641,7 +671,7 @@ int main(int argc, char** argv) {
     // run_parallel_chunks for why: work per chunk isn't uniform across the
     // range) and hand them out from a shared queue instead of one static
     // chunk per thread.
-    constexpr unsigned CHUNKS_PER_THREAD = 16;
+    constexpr unsigned CHUNKS_PER_THREAD = 150;
     auto ranges = split_ranges(opt.limit, opt.threads * CHUNKS_PER_THREAD);
     unsigned num_chunks = static_cast<unsigned>(ranges.size());
     unsigned actual_threads = std::min<unsigned>(opt.threads, num_chunks);
