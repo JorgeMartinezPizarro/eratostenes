@@ -66,7 +66,7 @@ outside the container.
 The `.db` format is a indexed sqlite file (max 256TB size), so it is suitable up to `e16`, around `190TB`. To query for primes you can use the `nth_prime` companion:
 
 ```sh
-./nth_prime out.db 1000000     # the 1,000,000th prime (1-indexed: N=1 -> 2)
+./nth_prime out.db 1000000     # the 1,000,000th prime
 ./nth_prime out.db --count     # pi(limit)
 ```
 

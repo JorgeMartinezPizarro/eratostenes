@@ -41,18 +41,14 @@ public:
         exec("PRAGMA page_size=4096;");
         exec("PRAGMA journal_mode=WAL;");
         exec("PRAGMA synchronous=NORMAL;");
-        // UNTESTED (2026-09-25, added for a future session -- see project
-        // memory on the 1e13 write-throughput drop): SQLite's own default
-        // cache_size is -2000 (2MB), tiny next to block_data's B-tree once
-        // it holds millions of rows (~5.28M at 1e13) -- every INSERT may
-        // have to re-fetch interior/leaf pages from the OS page cache
-        // (CPU/memory-bandwidth cost, not disk I/O) as the tree gets
-        // deeper. 512MB is a guess at a reasonable middle ground (SQLite's
-        // page cache is process memory, not OS page cache -- this doesn't
-        // compete with the OS's own caching of the file), not yet measured
-        // at any N. Negative value = KiB, per SQLite's own PRAGMA cache_size
-        // convention (positive would mean page COUNT instead).
-        exec("PRAGMA cache_size=-524288;");
+        // Tried, reverted (2026-09-25): PRAGMA cache_size=-524288 (512MB,
+        // up from SQLite's own default -2000/2MB), on the hypothesis that
+        // a bigger internal page cache would cut down on re-fetching
+        // block_data's B-tree pages as it grows into millions of rows at
+        // large N. Measured WORSE on the server at both N=1e12 and N=1e13
+        // (user's own A/B, this same session) -- reverted. Root cause not
+        // isolated; don't re-propose a bigger cache_size without new
+        // evidence for why the default would be the bottleneck.
         exec("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);");
         // Metadata (small, mutable -- start_index gets corrected after the
         // fact, see fix_offsets) lives apart from the compressed payload

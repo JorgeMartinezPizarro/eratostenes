@@ -649,6 +649,35 @@ int main(int argc, char** argv) {
     // Re-tuning segment_sieve.hpp's BLK_BYTES/CHUNK_BLOCKS for this 2.6x
     // bigger sparse population is still the untaken next step -- do that
     // BEFORE re-measuring this cutoff again, not after.
+    //
+    // Taken (2026-09-25, follow-up session): retuned BLK_BYTES 1024->4096
+    // (128->512 entries/block, matching the ~2.6x population growth) and
+    // re-ran the same sparse_limit = seg_k_width/4 cutoff. Correctness
+    // held (pi(1e12) exact vs primecount) and it's a real, reproducible
+    // win at N=1e12 (dev PC, i5-11400F, wall-clock, no perf access this
+    // session -- see feedback on sudo/perf in project memory): ~30.8-31.0s
+    // vs a ~31.3-31.5s baseline, consistently 2 reps each. But at the
+    // *natural* N=1e13 cliff -- the actual N this change targets -- it
+    // reproduced as a regression across 3 separate runs against 2 clean
+    // baseline runs, non-overlapping ranges: experiment 437.60s/489.73s,
+    // baseline 415.33s/430.17s -- i.e. retuning the block size fixed the
+    // catastrophic +8.2%/+34% cycles:u blowup from the two attempts above,
+    // but didn't close the gap into a win; a real, still-negative effect
+    // remained. Reverted a third time (BLK_BYTES back to 1024, cutoff back
+    // to plain seg_k_width). Root cause, not further isolated (would need
+    // perf's cache-miss counters, unavailable this session): the 2.6x
+    // bigger sparse population's total memory footprint (population x
+    // sizeof(DenseState) = population x 8 bytes) doesn't shrink just
+    // because each block holds more entries -- BLK_BYTES only changes how
+    // that footprint is grouped/traversed, not its size, so it was never
+    // going to fully offset a genuinely bigger working set living in the
+    // bucket ring. This closes the "retune the ring first" angle this
+    // cutoff idea's prior two attempts left open -- three strikes now
+    // (unretuned/128 entries, unretuned/128 entries again, retuned/512
+    // entries), all regressing at 1e13 specifically. Don't re-propose
+    // sparse_limit independent of seg_k_width without a fundamentally
+    // different fix for the population's memory footprint itself, not
+    // just how it's grouped into blocks.
     if (base_limit >= seg_k_width) {
         uint64_t sb = seg_k_width / 8, p2 = 1;
         while (p2 * 2 <= sb) p2 *= 2;

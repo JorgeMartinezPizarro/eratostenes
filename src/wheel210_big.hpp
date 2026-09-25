@@ -93,6 +93,25 @@ inline constexpr std::array<uint8_t, 211> NEXT_W = make_next();
 // 1.700T (-15.1%, roughly the expected ~14% hit reduction) -- IPC dropped
 // 1.33 -> 1.10, confirming a latency, not throughput, problem. Reverted to
 // this two-array form before it was ever committed.
+//
+// Tried again, reverted (2026-09-25, follow-up session): a narrower
+// variant of the same idea -- fuse GAP_K210[w] and ONFLY_CORRECTION210
+// [PR][w] into one 8-byte {gap,corr} struct per (PR, w), keeping `w`
+// exactly as it already is (loop-local register arithmetic, never loaded
+// from the table), so the chained-"next"-field problem above doesn't
+// apply here. Reasoned this should be a pure win (one load instead of
+// two, same cache line) or at worst neutral. Measured the opposite (dev
+// PC, i5-11400F, wall-clock -- no perf access this session, see project
+// memory on sudo/perf): N=1e12, 2 reps, 33.55s/34.25s vs a ~30.8-31.5s
+// baseline cluster (same session, same machine) -- consistently 8-10%
+// SLOWER, not neutral. Root cause not isolated (no perf access to check
+// codegen/cache behavior directly), but the practical takeaway holds
+// regardless: even a same-index, non-chained fusion of two small
+// per-class tables into one struct-per-entry array regressed here, not
+// just the chained-index version above. Reverted; if ever revisited,
+// get `perf` access first (see project memory) to see whether the
+// compiler is actually emitting one load or two for the struct read
+// before assuming fusing helps.
 constexpr std::array<uint32_t, 48> make_gap_k210() {
     std::array<uint32_t, 48> g{};
     for (int w = 0; w < 48; ++w) {
