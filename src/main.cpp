@@ -368,22 +368,45 @@ struct ProgressGuard {
 // Follow-up (2026-09-25, same review): a constant (not N-growing) ~2%
 // idle at BOTH N is still consistent with a simpler, smaller effect --
 // roughly half a chunk's worth of tail latency, independent of the ratio
-// gap entirely. Recovering it is cheap (CHUNKS_PER_THREAD 16->150 here,
+// gap entirely. Recovering it is cheap (CHUNKS_PER_THREAD 16->150 tried,
 // ~10 lines, doesn't touch any tier's hot path) even if it doesn't
-// explain the gap. Dev PC (i5-11400F): idle 1.4%->0.2% at N=1e12,
-// 0.9%->0.2% at N=1e13; wall-clock -3.2% at 1e12 and -1.1% at 1e13 in
-// paired same-session runs. NOT YET TRUSTED, though: a same-config
-// re-run drifted from 499.98s to 419.95s between two points in this
-// session (16% apart, far past normal noise) after hours of continuous
-// heavy jobs on this machine -- almost certainly residual contention
-// (see this project's own "never run two thread-heavy jobs at once on
-// the dev PC" lesson, git history), not a real effect. cycles:u under
-// that same contention even flipped sign once (+0.84% for 150 vs 16).
-// Re-measure on the server (`ERATOSTENES_DEBUG_IDLE=1 make run-pgo
-// ARGS="1e13 -t 20"`, clean machine, no hours of prior jobs) before
-// trusting either the idle-reduction number or the wall-clock delta.
-// CHUNKS_PER_THREAD=150 is left in place below for that test -- revert
-// to 16 if the server doesn't confirm a real win.
+// explain the gap. Dev PC (i5-11400F) numbers looked promising at first
+// (idle 1.4%->0.2% at 1e12, 0.9%->0.2% at 1e13) but turned out unusable:
+// a same-config re-run drifted from 499.98s to 419.95s between two
+// points in the same session (16% apart, far past normal noise) after
+// hours of continuous heavy jobs on this machine -- almost certainly
+// residual contention (see this project's own "never run two
+// thread-heavy jobs at once on the dev PC" lesson, git history), not a
+// real effect; cycles:u under that same contention even flipped sign
+// once (+0.84% for 150 vs 16).
+//
+// Re-measured on the server (2026-09-25, i5-13500, 20 threads): idle DID
+// drop the same way (2.1%->0.2% at both N), and the first single-rep
+// wall-clock comparison looked like a wash (1e12 24.22s->24.81s, WORSE;
+// 1e13 330.54s->327.50s, better) -- but that turned out to be measuring
+// the wrong thing. `REPS=5 make docker-benchmark` (which rebuilds and
+// runs 1e10, then 5x1e11, then 5x1e12 back to back) showed 1e11 climbing
+// 1.65s->1.75s->2.04s->2.04s->2.04s and 1e12 drifting 25.49->25.58s
+// across its own 5 reps, SAME build, nothing else changed -- a
+// same-direction, reproducible slowdown under sustained load, not random
+// noise (thermal throttling or, if this is a burstable cloud instance,
+// exhausted CPU credit -- never confirmed which, but the shape matches
+// either). That contaminated every earlier server number in this
+// writeup, not just the k=150 ones: they were all taken after this
+// session's own hours of back-to-back heavy jobs. Once measured
+// cold/isolated instead (`make run`, nothing queued before or after,
+// repeated on different occasions): 1e12 consistently 23.91-23.92s,
+// 1e13 325.93s -- both BETTER than this project's own README figures for
+// this machine (24.51s, 330.38s) and never once worse across every clean
+// reading taken. KEPT at 150: idle drops from 2.1% to 0.2% (real,
+// reproduced every time it was checked) and the cold-measured wall-clock
+// never regressed, only improved slightly -- the earlier "REVERTED"
+// verdict above was itself a measurement artifact of the same
+// accumulated-load effect this paragraph just described, not a real
+// finding about CHUNKS_PER_THREAD. If revisiting this again, measure
+// cold (`make run`, isolated, no prior load that session) -- the
+// benchmark script's own REPS loop is NOT safe for this machine as
+// currently written, since later reps run hot.
 template <typename Fn>
 static void run_parallel_chunks(unsigned workers, unsigned num_chunks, Fn&& fn) {
     std::atomic<unsigned> next_chunk{0};

@@ -44,7 +44,19 @@
 # sweep -- there's real run-to-run noise on this kind of box, see BENCHMARK
 # section of the README/commit history; primesieve itself always runs once
 # per N regardless of REPS -- it's the fixed reference, not what's being
-# tuned, and at N=1e13 a single run already costs several minutes),
+# tuned, and at N=1e13 a single run already costs several minutes), COOLDOWN
+# (default: 5, seconds slept between eratostenes reps, not after the last
+# one -- see below). CAUTION on the production server specifically
+# (2026-09-25, see main.cpp's run_parallel_chunks comment on
+# CHUNKS_PER_THREAD): back-to-back REPS on that machine showed a
+# reproducible same-direction slowdown across reps within one run of this
+# script (1e11: 1.65s->2.04s over 5 reps, no COOLDOWN yet at the time) --
+# likely thermal throttling or exhausted burst CPU credit, not noise.
+# "Fastest of REPS" happened to dodge it (the first, coldest rep usually
+# won), but comparing rep-by-rep or trusting a later rep's number did not.
+# COOLDOWN=5 is a first mitigation, not a fix confirmed to be enough on
+# that machine -- raise it (or fall back to several separate `make
+# run`/isolated invocations, spaced further out) if reps still climb.
 # WRITE_PATH/KEEP_DB (see above; KEEP_DB
 # defaults to 0 -- each .db is deleted right after it's measured, since
 # the several GB the I/O sweep accumulates otherwise (mostly the N=1e11
@@ -66,6 +78,7 @@ BIN=./eratostenes
 THREADS="${THREADS:-$(nproc)}"
 SEGMENT="${SEGMENT:-}"
 REPS="${REPS:-1}"
+COOLDOWN="${COOLDOWN:-5}"
 WRITE_PATH="${WRITE_PATH:-$HOME/eratostenes-io-bench}"
 KEEP_DB="${KEEP_DB:-0}"
 
@@ -133,6 +146,15 @@ for i in "${!NS[@]}"; do
         fi
 
         echo "  n=$n rep=$r eratostenes=${t_e}s [ok]" >&2
+        # Cooldown between reps, not after the last one -- REPS>1 back to
+        # back on the production server showed a reproducible same-
+        # direction slowdown across reps (thermal throttling or exhausted
+        # burst CPU credit, see the REPS comment above and main.cpp's
+        # run_parallel_chunks); this doesn't fully fix that (only a
+        # reboot-level cooldown would), but it should keep the fastest-of-
+        # REPS figure this script reports from being measured hot every
+        # time REPS>1 is used on that kind of machine.
+        [ "$r" -lt "$REPS" ] && sleep "$COOLDOWN"
     done
     ERATO_TIME["$n"]="$best_e"
     PRIMESIEVE_TIME["$n"]="$t_p"
