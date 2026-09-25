@@ -81,6 +81,7 @@ Below the results for `./eratostenes limit -o base.db`:
 |1E10   | 269.41 MiB |      4.97 |  328.5 |     0.86 |
 |1E11   | 2.42 GiB   |      5.04 |  374.0 |     6.94 |
 |1E12   | 22.47 GiB  |      5.13 |  355.0 |    67.96 |
+|1E13   | 215.89 GiB  |      5.36 |  215.89 |     954.07 |
 
 ## Techniques
 
