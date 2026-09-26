@@ -1,6 +1,6 @@
 # Eratostenes
 
-A segmented, parallel, wheel-based Sieve of Eratosthenes (C++20) for generating or counting primes up to very large N (10^15+), with a compact, randomly-indexable `.db` output format for storing dense prime tables at scale. [primesieve](https://github.com/kimwalisch/primesieve) is this project's reference, both for performance (see [Benchmarks](#benchmarks)) and for technique -- several of the ideas below come directly from reading its source. See [docs/ALGORITHM.md](docs/ALGORITHM.md) for how the pieces fit together.
+A segmented, parallel, wheel-based Sieve of Eratosthenes writen in C++, it is designed to count and generate primes up to very large N (10^15+), with a compact, randomly-indexable `.db` output format for storing dense prime tables at scale. [primesieve](https://github.com/kimwalisch/primesieve) is this project's reference, both for performance (see [Benchmarks](#benchmarks)) and for technique -- several of the ideas below come directly from reading its source. See [docs/ALGORITHM.md](docs/ALGORITHM.md) for how the pieces fit together.
 
 ## Build
 
@@ -98,15 +98,15 @@ What this project is built from, one term each — follow the link for the conce
 
 ## Benchmarks
 
-`./eratostenes N` (no `-o`: counts only) on an Intel Core i5-13500, primesieve alongside it for reference:
+`./eratostenes N` (counts only) on an Intel Core i5-13500, primesieve alongside it for reference:
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
 | 1e10 | 0.13s | 0.135s | 0.96x |
 | 1e11 | 1.63s | 1.656s | 0.98x |
 | 1e12 | 23.73s | 25.064s | 0.95x |
-| 1e13 | 325.93s | 292.078s | 1.11x |
-| 1e14 | 3968.24s | 3349.907 | 1.18x |
+| 1e13 | 324.96s | 292.078s | 1.11x |
+| 1e14 | 3956.40s | 3349.907 | 1.18x |
 
 The same results on an Intel Core i5-11400F:
 
