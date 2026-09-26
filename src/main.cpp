@@ -439,6 +439,23 @@ int main(int argc, char** argv) {
     // need every segment to start on a word boundary.
     uint64_t seg_k_width = std::max<uint64_t>(64, (opt.segment_width * WHEEL_SIZE / WHEEL_MOD) / 64 * 64);
 
+    // small_limit's own divisor, joint-tuned with
+    // ERATOSTENES_MED64_NUM/_DEN below (see docs/RESEARCH.md's med64
+    // joint-sweep entry): now that med64 exists as a cheaper alternative
+    // destination for the highest-hit-count primes near this boundary,
+    // the old standalone-tuned /2 (still the right cutoff for the plain
+    // small-vs-medium split, see the comment below) is no longer the
+    // right one once med64 is in the mix -- 1/4, paired with
+    // MED64_NUM/_DEN=1/12, measured a clean win on every metric
+    // (cycles:u, instructions:u, cache-misses:u AND branch-misses:u, not
+    // a trade-off) over the standalone /2 default, confirmed at both
+    // N=1e12 and N=1e13. Overridable via ERATOSTENES_SMALL_NUM/_DEN for
+    // further sweeps without recompiling.
+    uint64_t small_num = 1, small_den = 4;
+    if (const char* s = std::getenv("ERATOSTENES_SMALL_NUM")) small_num = std::strtoull(s, nullptr, 10);
+    if (const char* s = std::getenv("ERATOSTENES_SMALL_DEN")) small_den = std::strtoull(s, nullptr, 10);
+    if (small_den == 0) small_den = 4;
+
     // The small tier is crossed off one L1-sized sub-block at a time (see
     // SegmentSieve::sieve_and_emit), so the sub-block is the machine's real
     // L1 data cache (detected, like L2 for -s), and a prime counts as small
@@ -446,11 +463,13 @@ int main(int argc, char** argv) {
     // p-byte cycle holds 8 hits). /2 was tuned against several other
     // candidate cutoffs (/1, /4, *2/3) at multiple sub-block sizes, and
     // re-checked after the medium tier got cheaper per hit -- /2 won every
-    // time. See docs/RESEARCH.md for the numbers.
+    // time. See docs/RESEARCH.md for the numbers. (This was all BEFORE
+    // med64 existed -- see small_num/small_den just above for why the
+    // *actual* default has since moved to /4.)
     uint64_t l1_bytes = opt.l1_bytes_override ? opt.l1_bytes_override : detect_l1d_cache_bytes();
     if (l1_bytes == 0) l1_bytes = 32 * 1024;
     SUB_BLOCK_BYTES = std::max<uint64_t>(8, l1_bytes / 8 * 8);
-    uint64_t small_limit = SUB_BLOCK_BYTES / 2;
+    uint64_t small_limit = SUB_BLOCK_BYTES * small_num / small_den;
 
     // On a hybrid P-core/E-core CPU, detect_l2_cache_bytes()/
     // detect_l1d_cache_bytes() above always read cpu0 -- if cpu0 happens
@@ -500,7 +519,7 @@ int main(int argc, char** argv) {
             for (uint64_t s : topo.l1_raw) if (s && s < min_l1_raw) min_l1_raw = s;
             if (min_l1_raw < topo.l1_raw[0]) {
                 SUB_BLOCK_BYTES = sub_block_from_l1_bytes(min_l1_raw);
-                small_limit = SUB_BLOCK_BYTES / 2;
+                small_limit = SUB_BLOCK_BYTES * small_num / small_den;
             }
         }
     }
@@ -546,22 +565,26 @@ int main(int argc, char** argv) {
     // num/den <= small_limit/seg_k_width) disables the tier, degenerating
     // med64_limit to <= small_limit so no prime ever qualifies -- exactly
     // reproduces the pre-med64 baseline (verified: pi(N) and cycles:u both
-    // unchanged). 1/8 measured best of {1/8, 1/4, 3/8, 1/2} on the dev PC
-    // (perf stat cycles:u, 2 reps): -5.5%/-5.6% at N=1e12, -4.07%/-4.17%
-    // at N=1e13 -- a real win at both N, unlike the full-medium-tier
-    // attempts (see docs/RESEARCH.md), which won at 1e12 but regressed at
-    // 1e13 as their unbounded population grew. Narrower still (1/16)
-    // measured slightly worse than 1/8 (-3.94% at 1e13) -- 1/8 sits at or
-    // near the actual optimum, not just the smallest fraction that still
-    // helps. See docs/RESEARCH.md for the full sweep, including a
-    // follow-up finding that a smaller small_limit (L1/5 instead of L1/2)
-    // combined with 1/8 measured even better (-6.67% at 1e13) -- not yet
-    // separately re-tuned; small_limit itself stays at its own
-    // already-validated L1/2 default here.
-    uint64_t med64_num = 1, med64_den = 8;
+    // unchanged). Standalone (small_limit still at its old /2), 1/8
+    // measured best of {1/16, 1/8, 1/4, 3/8, 1/2}: -5.5%/-5.6% at N=1e12,
+    // -4.07%/-4.17% at N=1e13 -- a real win at both N, unlike the
+    // full-medium-tier attempts (see docs/RESEARCH.md), which won at
+    // 1e12 but regressed at 1e13 as their unbounded population grew.
+    //
+    // JOINTLY re-tuned with small_limit's own divisor just above (a
+    // smaller small_limit shifts med64's own lower bound down, so its
+    // optimal fraction shifts too): a grid scan at N=1e12 followed by 2-
+    // rep confirmation at both N found 1/12 (paired with small_limit=1/4)
+    // beats the standalone-tuned 1/8+1/2 combo on every metric, not a
+    // trade-off -- at N=1e13, cycles:u -2.1%, instructions:u -2.5%,
+    // cache-misses:u -0.6%, and branch-misses:u -13.7% (fewer med64
+    // entries per segment, once small_limit itself moved, means less of
+    // the exit-side misprediction cost cross_off's own comment already
+    // flags). Kept at 1/12. See docs/RESEARCH.md for the full grid.
+    uint64_t med64_num = 1, med64_den = 12;
     if (const char* s = std::getenv("ERATOSTENES_MED64_NUM")) med64_num = std::strtoull(s, nullptr, 10);
     if (const char* s = std::getenv("ERATOSTENES_MED64_DEN")) med64_den = std::strtoull(s, nullptr, 10);
-    if (med64_den == 0) med64_den = 8;
+    if (med64_den == 0) med64_den = 12;
     uint64_t med64_limit = seg_k_width * med64_num / med64_den;
 
     // Primes also covered by the pre-sieve pattern (see presieve.hpp) are

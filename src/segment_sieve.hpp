@@ -39,9 +39,11 @@
 //     before small_limit's), so it shouldn't. Double-buffered like the
 //     second prior attempt (m64_cur_/m64_nxt_, swapped per segment) --
 //     see process_med64's own comment. Swept via
-//     ERATOSTENES_MED64_NUM/_DEN (main.cpp): 1/8 kept as the default,
-//     measured a real win at both N=1e12 and N=1e13 (unlike the full-tier
-//     attempts above) -- see docs/RESEARCH.md for the full sweep.
+//     ERATOSTENES_MED64_NUM/_DEN (main.cpp), jointly with small_limit's
+//     own divisor (see main.cpp's comment there for why they interact):
+//     1/12 (paired with small_limit=1/4) kept as the default, a real win
+//     over the standalone-tuned 1/8+small_limit/2 combo at both N=1e12
+//     and N=1e13, on every metric measured -- see docs/RESEARCH.md.
 //     Both flat tiers keep 8 bytes/prime of state (erat::DenseState),
 //     walked every segment in place -- there is never a segment these
 //     primes "skip", so a bucket would buy nothing.

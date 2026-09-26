@@ -396,18 +396,77 @@ cache-misses:u grew only +55.5% at 1e13 (18.0B->28.0B) instead of the CONFIRMED
 attempt's +95.8%, and critically that growth no longer erases the instruction
 savings the way it did before. **Kept at 1/8.**
 
-Follow-up finding, not yet acted on: re-running the winning 1/8 cutoff with
-`small_limit` itself lowered from its own already-validated `L1d/2` to `L1d/5`
-(primesieve uses ~0.2*L1d) measured *even better* at N=1e13, -6.67% vs the original
-L1/2-and-no-med64 baseline (vs -4.1% for L1/2-and-med64) -- a single, unreplicated
-rep, tested by temporarily editing the divisor (no runtime override exists for it).
-This suggests `small_limit`'s own optimal cutoff shifted once med64 exists as a
-cheaper alternative destination for high-hit-count primes -- plausible, since
-med64's own per-segment bookkeeping cost is now competitive with the small tier's
-sub-block dispatch for exactly the primes near that boundary. Not re-tuned here;
-`small_limit` stays at its own existing L1/2 default (see its own entry above) --
-re-sweeping `small_limit` jointly with `med64_limit`, with more reps, is the
-natural next step if this tier's default is revisited again.
+A follow-up single, unreplicated rep suggested `small_limit` itself might have a
+new optimum once med64 exists (lowering it from the standalone-tuned `L1d/2` to
+`L1d/5` measured -6.67% at N=1e13 combined with 1/8, vs -4.1% for `L1d/2` combined
+with 1/8) -- acted on below.
+
+### `small_limit` re-tuned jointly with `med64_limit` (KEPT, 2026-09-26)
+
+`small_limit`'s own divisor was made an env-var override
+(`ERATOSTENES_SMALL_NUM`/`_DEN`, same style as `MED64_NUM`/`_DEN`) specifically to
+follow up on the single-rep finding above with a real sweep. The reasoning for why
+this needed re-tuning at all: `med64_limit`'s LOWER bound is `small_limit` itself,
+so moving `small_limit` shifts which primes med64 even sees, and (per the
+population-saturation argument in the entry above) med64's own optimal fraction
+depends on how many primes actually land in its band -- the two cutoffs were never
+independent once med64 existed, even though `small_limit` alone still measures best
+at `/2` for the plain small-vs-medium split with med64 disabled (see its own
+"cutoff tuning" entry above, unchanged).
+
+**Landscape** (dev PC, `perf stat cycles:u`, N=1e12, single rep per point -- a fast
+first pass before spending real time on N=1e13):
+
+| `small_limit` | MED64=1/16 | MED64=1/8 | MED64=1/4 |
+|---|---:|---:|---:|
+| /2 | 1.4126T | 1.4042T | 1.4112T |
+| /3 | 1.3844T | 1.3863T | 1.3988T |
+| /4 | 1.3824T | 1.3813T | 1.4030T |
+| /5 | 1.3705T | 1.3854T | 1.4097T |
+| /6 | 1.3847T | 1.3804T | 1.4059T |
+| /7 | 1.3904T | 1.3863T | 1.4287T |
+| /8 | 1.4062T | 1.4106T | 1.4317T |
+
+Clear pattern: smaller `small_limit` wants a smaller `med64` fraction too (the
+per-row minimum drifts from MED64=1/8 at `small_limit=/2` toward MED64=1/16 at
+`/4`-`/6`) -- consistent with med64's band needing a bounded, "right-sized"
+population regardless of where its lower bound sits, not "more conversion is
+always better." A refinement pass around the apparent best region (`small_limit` in
+{4,5,6} x MED64 in {1/12,1/16,1/20,1/24,1/32}) found run-to-run noise of about
+±1% even at a fixed config (e.g. `small=/5,med64=1/16` read 1.3705T in the first
+pass and 1.3838T in the refinement pass) -- too close to call from single reps, so
+the two best-looking round candidates (`small=/4,med64=1/8` and `small=/5,med64=1/16`,
+statistically tied at ~1.384T average over 2 reps each) plus the single best grid
+point (`small=/4,med64=1/12`, ~1.374T average over 3 reps) were compared properly.
+
+`small=1/4, med64=1/12` won clearly at N=1e12 (3 reps, ~2.3% below the shipped
+1/2+1/8 default) and was then confirmed at N=1e13 (2 reps, interleaved with the
+1/2+1/8 default, `perf stat cycles:u,instructions:u,cache-misses:u,branch-misses:u`):
+
+| metric | default (1/2, 1/8) | candidate (1/4, 1/12) | delta |
+|---|---:|---:|---:|
+| cycles:u | 18.904T / 19.071T | 18.629T / 18.548T | **-2.1%** |
+| instructions:u | ~19.563T | ~19.070T | -2.5% |
+| cache-misses:u | ~24.32B | ~24.17B | -0.6% |
+| branch-misses:u | ~175.4B | ~151.4B | **-13.7%** |
+
+No overlap between reps on any metric -- a clean win, not a trade-off (unlike the
+original med64 sweep, where cache-misses:u/instructions:u moved in opposite
+directions). The branch-misses:u drop is the most interesting number: `small=1/4,
+med64=1/12` puts *fewer* primes in med64 (14,428 vs 20,275 at this N) even though
+`small_limit` itself dropped (fewer, not more, of the highest-hit-count primes end
+up in med64's own 64-list structure) -- consistent with the entry/exit branch-
+misprediction concern `erat_small.hpp::cross_off`'s own comment already flags:
+grouping by entry phase fixes the entry side, but the exit side still depends on
+each prime's own phase alignment, and a smaller, better-sized med64 population
+means less of that residual cost paid in aggregate. **Kept: `small_limit`
+default moved to `L1d/4`, `med64_limit` default moved to `seg_k_width/12`.**
+
+Not swept further: whether an even smaller `small_limit` (e.g. `/6`-`/8`, which
+looked competitive at N=1e12 with a correspondingly smaller med64 fraction) holds
+up at N=1e13 too -- the grid above is N=1e12-only except for the two confirmed
+points. If this default is revisited again, extend the grid to N=1e13 directly
+rather than assuming the N=1e12 landscape transfers.
 
 ### dTLB pressure at large N: investigated, ruled out (2026-09-25, external review, Opus 5.5)
 
