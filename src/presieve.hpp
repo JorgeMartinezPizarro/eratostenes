@@ -39,6 +39,7 @@
 // all of them. Here a set bit means "composite", so a number that's
 // composite according to *any* table's primes is composite overall -- OR.)
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <vector>
@@ -104,6 +105,13 @@ struct Presieve {
     // itself is left uncorrected; fill() patches only the exact absolute
     // position, not the periodic bit.
     std::vector<uint64_t> self_k;
+    // max(self_k), or 0 if empty -- self_k entries are wheel-indices of the
+    // pre-sieve primes themselves (all <= wheel_index(163), a few hundred
+    // at most), so past this point no segment can ever contain one: fill()
+    // uses this to skip the self_k correction loop entirely for every
+    // segment except the handful at the very start of the range, instead
+    // of running it (unable to match) on every single segment of the run.
+    uint64_t max_self_k = 0;
 
     // Fills the first `count` bits of dst (word-granular, dst must have
     // room for ceil(count/64) words) with the pre-sieve pattern for the
@@ -157,13 +165,19 @@ struct Presieve {
             }
         }
 
-        // self_k is tiny (one entry per pre-sieve prime) and only ever
-        // actually falls inside k_low==0's segment, but checking
-        // unconditionally is cheap and doesn't need that assumption.
-        for (uint64_t sk : self_k) {
-            if (sk >= k_low && sk < k_low + count) {
-                uint64_t idx = sk - k_low;
-                dst[idx >> 6] &= ~(1ULL << (idx & 63));
+        // self_k entries only ever actually fall inside a segment near the
+        // very start of the range (k_low==0's, in practice) -- every
+        // self_k value is <= max_self_k, so k_low > max_self_k already
+        // rules out every entry without checking any of them individually.
+        // Skips this loop entirely for the overwhelming majority of
+        // segments in any real run instead of paying ~|self_k| comparisons
+        // (none of which can ever match) on every single one.
+        if (k_low <= max_self_k) {
+            for (uint64_t sk : self_k) {
+                if (sk >= k_low && sk < k_low + count) {
+                    uint64_t idx = sk - k_low;
+                    dst[idx >> 6] &= ~(1ULL << (idx & 63));
+                }
             }
         }
     }
@@ -245,5 +259,6 @@ inline Presieve build_presieve(const std::vector<std::vector<uint64_t>>& groups,
         if (filtered.empty()) continue;
         ps.tables.push_back(build_presieve_table(filtered, max_seg_k_width, ps.self_k));
     }
+    for (uint64_t sk : ps.self_k) ps.max_self_k = std::max(ps.max_self_k, sk);
     return ps;
 }

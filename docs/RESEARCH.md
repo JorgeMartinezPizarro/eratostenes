@@ -45,6 +45,7 @@ throughout below).
   - [Page size (kept)](#page-size-kept)
 - [main.cpp](#maincpp)
   - [`SUB_BLOCK_BYTES`: per-thread vs. machine-wide sizing (kept, uniform-with-margin wins)](#sub_block_bytes-per-thread-vs-machine-wide-sizing-kept-uniform-with-margin-wins)
+  - [`sieve_chunk`: one `SegmentSieve` per worker instead of per chunk (tried, reverted -- neutral on cycles:u, 2026-09-26)](#sieve_chunk-one-segmentsieve-per-worker-instead-of-per-chunk-tried-reverted----neutral-on-cyclesu-2026-09-26)
   - [`run_parallel_chunks`: chunk-granularity idle-time investigation (2026-09-25, external review, Opus 5.5)](#run_parallel_chunks-chunk-granularity-idle-time-investigation-2026-09-25-external-review-opus-55)
   - [`small_limit` cutoff tuning](#small_limit-cutoff-tuning)
   - [Cache-topology sizing: per-CPU-minimum step (kept)](#cache-topology-sizing-per-cpu-minimum-step-kept)
@@ -53,6 +54,7 @@ throughout below).
   - [Auto segment width: dropping the `isqrt(limit)` cap (kept)](#auto-segment-width-dropping-the-isqrtlimit-cap-kept)
   - [`seg_k_width_from_l2_bytes`'s extra /2 margin, applied on top of an already-per-thread L2 share (kept, counterintuitive)](#seg_k_width_from_l2_bytess-extra-2-margin-applied-on-top-of-an-already-per-thread-l2-share-kept-counterintuitive)
 - [presieve.hpp](#presievehpp)
+  - [`fill()`: skip the `self_k` correction loop when it can't possibly match (kept, 2026-09-26)](#fill-skip-the-self_k-correction-loop-when-it-cant-possibly-match-kept-2026-09-26)
   - [Extending pre-sieve coverage past prime 163 (tried three ways, all reverted)](#extending-pre-sieve-coverage-past-prime-163-tried-three-ways-all-reverted)
 - [Makefile](#makefile)
   - [PGO training set: a natural 1e13 pass (tried, reverted, 2026-09-25, follow-up session)](#pgo-training-set-a-natural-1e13-pass-tried-reverted-2026-09-25-follow-up-session)
@@ -944,6 +946,86 @@ thread, not per-thread-recomputed) seems to matter more on real many-thread-
 contended hardware than hitting each core's own "fair" cache share exactly. See
 git history for the full A/B trail (dev PC and server) behind this.
 
+### `sieve_chunk`: one `SegmentSieve` per worker instead of per chunk (tried, reverted -- neutral on cycles:u, 2026-09-26)
+
+`sieve_chunk` constructs a fresh `SegmentSieve` (its `words_` buffer alone is
+~256KB at typical segment widths, above glibc's default mmap threshold) for
+every chunk -- `CHUNKS_PER_THREAD=150` means up to 150 constructions per
+thread per pass, twice over for text mode's two passes. `begin_chunk()`
+exists specifically to reset a `SegmentSieve` for reuse across chunks without
+reallocating, but was never actually used that way -- it's only ever called
+once, immediately after construction, in the same function. This looked like
+a clear, architecture-independent redundancy worth fixing on that basis
+alone: reuse one `SegmentSieve` per `run_parallel_chunks` worker slot
+(0..workers-1, stable for that call's whole lifetime) instead of one per
+chunk, calling `begin_chunk()` between chunks as originally intended.
+Required threading a worker-slot index through `run_parallel_chunks`'s
+callback and moving `SegmentSieve` construction out of `sieve_chunk` into
+each of the four call sites (count-only, `.db`, and text mode's two passes,
+the last two sharing one set of per-slot instances). Correctness fully held
+(`make test` green, pi(1e12) exact) -- `begin_chunk()`'s own reset already
+clears every piece of per-chunk state (`words_` doesn't need explicit
+clearing either: presieve fill overwrites each segment's whole byte range
+before any marking touches it), so reuse across arbitrarily-ordered,
+non-consecutive chunks on the same instance is safe by construction, not
+just in the cases tested.
+
+Measured (dev PC, i5-11400F, `perf stat cycles:u,instructions:u`, N=1e12,
+order-varied and cooldown-separated to rule out the thermal/frequency drift
+this project's own methodology notes have flagged before): an initial,
+uncontrolled pair looked like a real win (wall 30.13s->28.92s, sys
+0.146s->0.084s), but a careful 4-run OLD/NEW/NEW/OLD sequence with an 8s
+cooldown between each didn't confirm it on the metric this project trusts:
+
+| metric | baseline (2 reps avg) | with reuse (2 reps avg) | delta |
+|---|---:|---:|---:|
+| cycles:u | 1.3687T | 1.3727T | +0.3% (noise) |
+| instructions:u | 1.306988T (identical both reps) | 1.306384T (identical both reps) | -0.05% (real, tiny) |
+| wall-clock | 29.11s | 28.60s | -1.75% |
+| sys time | 0.128s | 0.096s | -25% relative |
+
+`instructions:u` being bit-identical across repeats on each side (not just
+close) confirms the tiny instruction-count saving is real, not noise -- but
+it's far too small to explain the wall-clock gap. `cycles:u`, the
+frequency-independent metric this project's whole methodology is built
+around specifically to see past exactly this kind of gap, shows no
+improvement at all (if anything, a fraction of a percent worse, within
+noise). The wall-clock/sys-time delta not showing up in cycles:u is the same
+signature this project's own methodology notes already catalogued (see the
+CHUNKS_PER_THREAD entry above, and `perf-cache-scaling-validated` project
+memory) as frequency/thermal drift between runs, not a real code effect.
+Root cause of the *lack* of a real win, not independently confirmed but
+consistent with `page-faults:u` also not moving between binaries: glibc's
+allocator dynamically raises its own mmap threshold once it observes a freed
+chunk get immediately re-requested at a similar size (specifically to avoid
+mmap/munmap thrashing for exactly this repeated-allocation pattern) -- the
+redundancy this change targets was plausibly already absorbed by the
+allocator before it ever reached the kernel, which would also explain why
+`sys` time's absolute drop (tens of ms) is real but small relative to total
+wall-clock, not the dominant effect the initial uncontrolled reading
+suggested.
+
+**Reverted** (working tree only, never committed) -- not because reusing the
+`SegmentSieve` is wrong (it still matches `begin_chunk()`'s own documented
+intent better than the current one-per-chunk pattern), but because this
+project only keeps changes with a measured win on `cycles:u`, and this one
+doesn't have one on this hardware. Not re-run on the production server
+(i5-13500) -- skipped by the user's own call, not because the reasoning
+wouldn't transfer; if the server's allocator or thread count ever makes this
+worth re-checking, the code for it is in git history (this commit's diff),
+not carried forward as a live flag.
+**Why:** a change that's architecturally cleaner and provably correct can
+still be a net-zero on the metric that actually decides whether it ships --
+worth recording so "construct once per worker, not per chunk" isn't
+re-proposed as an obviously-free win without first checking whether the
+allocator has already absorbed the cost being targeted.
+**How to apply:** don't re-propose per-chunk `SegmentSieve` construction as
+unexamined overhead -- it's now measured as allocator-absorbed, not a real
+cost, on this codebase's target allocator (glibc). A different allocator
+(jemalloc, tcmalloc, or a `--static` musl build) could plausibly behave
+differently here; that would be a new, from-scratch measurement, not a
+re-run of this one.
+
 ### `run_parallel_chunks`: chunk-granularity idle-time investigation (2026-09-25, external review, Opus 5.5)
 
 Hypothesis: `CHUNKS_PER_THREAD=16` is too coarse at large N -- a fixed chunk count
@@ -1157,6 +1239,55 @@ L3/memory bandwidth), the smaller resulting segment is reliably faster than the
 A/B trail behind reversing that "fix".
 
 ## presieve.hpp
+
+### `fill()`: skip the `self_k` correction loop when it can't possibly match (kept, 2026-09-26)
+
+`Presieve::fill()` ran a small loop (one entry per pre-sieve prime, ~30-35
+total) over `self_k` on *every single call* -- once per sub-block, so many
+times per segment -- to patch the one absolute position where each table's
+periodic pattern is wrong (a prime marked composite by its own multiple-of-1
+hit). But every `self_k` value is a wheel-index of a prime <= 163, so it can
+only ever fall inside a segment at or near the very start of the whole
+range -- past that point the loop runs every single time with no chance of
+ever matching, pure wasted comparisons. Fix: track `max_self_k` (computed
+once in `build_presieve`) and skip the loop entirely whenever
+`k_low > max_self_k`, which is true for the overwhelming majority of
+segments in any real run.
+
+Found while auditing the existing code for redundancy (user's own framing:
+architecture-independent, not chasing another hardware-specific micro-opt
+after the med64 mod-210 dead end above). Correctness held (`make test`
+green, pi(1e12) exact). Measured (dev PC, i5-11400F, `perf stat
+cycles:u,instructions:u`, N=1e12, 4 interleaved reps each side, cooldown
+between runs):
+
+| metric | baseline (4 reps avg) | with skip (4 reps avg) | delta |
+|---|---:|---:|---:|
+| cycles:u | 1.345253T | 1.344509T | -0.055% (within the ~±0.3% run-to-run spread) |
+| instructions:u | 1.306988T (identical all 4 reps) | 1.306824T (identical all 4 reps) | -0.0125%, real and deterministic |
+
+`instructions:u` being bit-identical across every repeat on each side (not
+just close) confirms the removed work is real, not noise -- but at ~0.0125%
+of total instructions, it's an order of magnitude below what this dev PC's
+cycles:u noise floor (~0.3%) can distinguish from zero. Unlike the
+`SegmentSieve`-per-worker entry above (also inconclusive on cycles:u), this
+one was kept anyway: the fix is provably correct by construction (the
+skipped loop cannot ever do anything once `k_low > max_self_k`), adds no
+new abstraction or API surface (one struct field, one guard), and can never
+measure worse than the baseline it replaces -- there's no complexity or risk
+being traded for the unproven cycles:u win, unlike the worker-reuse change's
+API/indirection cost. **Kept.**
+**Why:** distinguishes two shapes of "measured as inconclusive on cycles:u":
+a change whose entire justification IS the performance claim (worker reuse
+avoiding allocator overhead -- reverted when that claim didn't hold), versus
+a change that's independently correct/harmless and only incidentally also a
+(too-small-to-see) performance win. The bar this project holds performance
+claims to doesn't need to block a free, provably-safe removal of dead work.
+**How to apply:** don't expect this fix alone to move any wall-clock number
+visibly -- it won't, at any N, since it's a fixed tiny fraction of an
+already-small (~5.6% of cycles, per `perf-cache-scaling-validated` project
+memory Finding 4) part of the pipeline. It's correctness/cleanliness kept
+cheap, not a lead worth re-measuring later.
 
 ### Extending pre-sieve coverage past prime 163 (tried three ways, all reverted)
 
