@@ -216,19 +216,10 @@ inline uint64_t wheel_delta_at(uint64_t p, uint64_t p_mod, int jj) {
 //
 // where pr = WHEEL_POS[p_mod] and GAP_K[j] = WHEEL_GAP[j]*WHEEL_SIZE (both
 // tiny, WHEEL_SIZE-sized tables). Per hit this is one multiply (by qp,
-// unavoidable -- consecutive hits of p are ~p apart no matter what) plus
-// one lookup into a WHEEL_SIZE x WHEEL_SIZE shared table (64 entries for
-// mod 30) plus one add -- no runtime mod, no div, no two dependent
-// WHEEL_POS lookups per hit like the old recompute-every-time version.
-// Measured ~3.25x faster for primes forced through this tier at N=1e11 on
-// an i5-11400F (README#benchmarks), because unlike a per-prime delta[]
-// table (the old dense tier's delta[]), this table's size never grows with how
-// many primes use it -- it stays L1-resident regardless of tier size, so
-// there's no memory-budget tradeoff being made here at all.
-// primesieve's own EratMedium/WheelFactorization does the same trick (a
-// small shared wheel table plus one multiply by the prime itself, see its
-// WheelElement/nextMultipleFactor) -- this is that same idea, re-derived
-// from this project's own wheel_delta_at rather than ported from there.
+// unavoidable) plus one lookup into a WHEEL_SIZE x WHEEL_SIZE shared table
+// plus one add -- no runtime mod, no div. Replaced an older per-prime
+// delta[] table (whose footprint grew with tier size) -- see
+// docs/RESEARCH.md#onfly_correctiongap_k-shared-table-replacing-a-per-prime-delta-kept.
 inline std::array<std::array<uint32_t, WHEEL_SIZE>, WHEEL_SIZE> make_onfly_correction() {
     std::array<std::array<uint32_t, WHEEL_SIZE>, WHEEL_SIZE> tbl{};
     for (int pr = 0; pr < WHEEL_SIZE; ++pr) {

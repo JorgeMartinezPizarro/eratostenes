@@ -31,10 +31,8 @@ class SqlitePrimeStore {
 public:
     explicit SqlitePrimeStore(const std::string& path) {
         // PRAGMA page_size only takes effect on a page-less (brand new)
-        // database, so any stale file at this path must go first -- a 64KB
-        // leftover page size would waste ~half a page per block via
-        // internal fragmentation (this was the dominant overhead in the
-        // prototype before it was tracked down).
+        // database, so any stale file at this path must go first. See
+        // docs/RESEARCH.md#page-size-kept.
         std::remove(path.c_str());
 
         check(sqlite3_open(path.c_str(), &db_), "open");
@@ -47,13 +45,9 @@ public:
         exec("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);");
         // Metadata (small, mutable -- start_index gets corrected after the
         // fact, see fix_offsets) lives apart from the compressed payload
-        // (large, immutable, written once). SQLite stores every column of
-        // a row together in one B-tree cell, so an UPDATE touching even one
-        // small integer column would otherwise have to rewrite each row's
-        // BLOB too (measured: an UPDATE across ~62K rows/2.6GB of blobs at
-        // N=1e11 took ~12-17s, comparable to the sieve pass itself it was
-        // meant to be cheaper than) -- splitting them means fix_offsets
-        // only ever touches the tiny `blocks` rows.
+        // (large, immutable, written once), so fix_offsets only ever
+        // touches the tiny `blocks` rows. See
+        // docs/RESEARCH.md#blocksblock_data-table-split-kept.
         exec("CREATE TABLE blocks ("
              "  block_id    INTEGER PRIMARY KEY,"
              "  chunk_id    INTEGER NOT NULL,"
@@ -187,6 +181,9 @@ private:
 
     void writer_loop() {
         try {
+            // Commits-per-transaction; 1000 measured best against
+            // 3000/10000/100000. See
+            // docs/RESEARCH.md#write-pipeline-knobs-batch---db-block-size-wal_autocheckpoint-all-measured-kept-at-their-defaults.
             const size_t BATCH = 1000;
             size_t in_txn = 0;
             bool txn_open = false;

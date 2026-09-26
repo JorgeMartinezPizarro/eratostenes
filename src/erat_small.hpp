@@ -140,49 +140,31 @@ inline void cross_off_class(uint8_t* s, uint64_t end, DenseState* first, DenseSt
 }
 
 // Medium tier: primes with only a handful of hits per segment, where the
-// unrolled loop above can't amortize its per-prime entry cost (an
-// unpredictable jump into the switch, plus an unpredictable exit point --
-// measured ~5.6x the branch misses of this loop at N=1e11, net slower
-// despite 38% fewer instructions). Generic one-hit-per-iteration stepping
-// instead, division-free via the shared mod-210 table (wheel210_big.hpp),
-// on bit positions; mispredicts only once per prime (the loop exit).
+// unrolled loop above can't amortize its per-prime entry/exit cost -- see
+// docs/RESEARCH.md#small-tiers-unrolled-loop-applied-to-medium-hit-count-primes-measured-not-adopted.
+// Generic one-hit-per-iteration stepping instead, division-free via the
+// shared mod-210 table (wheel210_big.hpp), on bit positions.
 //
-// Every medium-tier prime is always > 163 (presieve's {7,23,37} group,
-// presieve.hpp, always covers 7 first), so any hit whose multiplier is a
-// multiple of 7 is redundant -- already marked composite by 7's own
-// presieve pattern. Stepping through only the 48/210 multiplier phases
-// coprime to 210 instead of the 8/30 coprime to 30 (GAP_K210/
-// ONFLY_CORRECTION210, wheel210_big.hpp -- same derivation as
-// ONFLY_CORRECTION/GAP_K in wheel.hpp, just with M210 standing in for
-// WHEEL_R) skips ~14% of candidate hits in this tier -- the same trick
-// already validated and kept for the sparse tier's own big-wheel table.
-// This does NOT touch DenseState's layout or split the medium tier's
-// single flat list -- only the shared constant tables grew a little (64
-// entries -> 48+8*48, still ~1.7KB, still trivially L1-resident) -- so
-// there's no cache-vs-instructions trade being made here. A mod-2310
-// version of the same idea was considered and rejected (candidate
-// reduction not worth the L1 pressure, and incompatible with this tier's
-// packed DenseState layout for the sparse tier's own half of it -- see
-// docs/RESEARCH.md).
+// Every medium-tier prime is always > 163 (presieve's {7,23,37} group
+// always covers 7 first), so multiplier phases that are multiples of 7 are
+// redundant -- stepping through only the 48/210 phases coprime to 210
+// (GAP_K210/ONFLY_CORRECTION210, wheel210_big.hpp) instead of the 8/30
+// coprime to 30 skips ~14% of candidate hits here, same trick as the
+// sparse tier's own big-wheel table. See
+// docs/RESEARCH.md#cross_off_medium-mod-210-multiplier-stepping-2026-09-24
+// for the numbers, and
+// docs/RESEARCH.md#cross_off_medium-mod-2310-stepping-considered-not-implemented-2026-09-25-external-review-opus-55
+// for why a mod-2310 extension was considered and rejected.
 //
 // PR is a compile-time template parameter (matching primesieve's own
 // EratMedium split into crossOff_7/11/13/.../31, one per residue class):
 // one list per class (medium_[8] in segment_sieve.hpp, same shape as the
-// small tier's small_[8]) instead of one flat list carrying a runtime
-// `ri`. big::ONFLY_CORRECTION210[PR] is a compile-time-constant row
-// offset (foldable into the load's displacement) instead of a per-prime
-// runtime-computed pointer -- removes one multiply-by-row-size per prime
-// per segment. qw packs (qp << 6) | w (w needs 6 bits, 0..47, same budget
-// as the small tier's (pr<<3)|j).
-//
-// This DOES split medium_ into 8 lists -- a much smaller fragmentation
-// than the (reverted) 64-list restructuring tried for this tier, and each
-// list still holds every prime of its OWN class permanently (no
-// per-segment migration between lists, since a prime's class never
-// changes) -- structurally identical to how small_[8] already works
-// without issue. A chained-table variant, a mod-2310 extension, a 4-way
-// interleaved stepping variant, and the 64-list restructuring itself were
-// all tried and reverted -- see docs/RESEARCH.md for the numbers.
+// small tier's small_[8]). qw packs (qp << 6) | w (w needs 6 bits, 0..47,
+// same budget as the small tier's (pr<<3)|j). See
+// docs/RESEARCH.md#cross_off_medium-class-specialized-layout-kept-2026-09-24.
+// A chained-table variant, a mod-2310 extension, a 4-way interleaved
+// stepping variant, and a 64-list restructuring were all tried and
+// reverted -- see docs/RESEARCH.md's other `cross_off_medium` entries.
 template <int PR>
 inline void cross_off_medium(uint64_t* words, uint64_t end_bit, DenseState* first, DenseState* last, uint64_t rebase_bits) {
     const uint32_t* gap_k = big::GAP_K210.data();

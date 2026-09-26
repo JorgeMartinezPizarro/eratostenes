@@ -16,6 +16,7 @@ throughout below).
 ## Index
 
 - [erat_small.hpp](#erat_smallhpp)
+  - [Small tier's unrolled loop applied to medium-hit-count primes (measured, not adopted)](#small-tiers-unrolled-loop-applied-to-medium-hit-count-primes-measured-not-adopted)
   - [`cross_off`: narrowing locals to uint32_t (tried, reverted, 2026-09-25)](#cross_off-narrowing-locals-to-uint32_t-tried-reverted-2026-09-25)
   - [`cross_off_medium`: mod-210 multiplier stepping (2026-09-24)](#cross_off_medium-mod-210-multiplier-stepping-2026-09-24)
   - [`cross_off_medium`: mod-2310 stepping, considered, not implemented (2026-09-25, external review, Opus 5.5)](#cross_off_medium-mod-2310-stepping-considered-not-implemented-2026-09-25-external-review-opus-55)
@@ -26,6 +27,7 @@ throughout below).
   - [med64: mod-210 stepping, two variants (tried, both reverted, 2026-09-26, external review, Opus 5.5)](#med64-mod-210-stepping-two-variants-tried-both-reverted-2026-09-26-external-review-opus-55)
 - [wheel.hpp](#wheelhpp)
   - [Wheel size: mod 6 vs. mod 30 vs. mod 210 (historical, pre-tiered-marking architecture)](#wheel-size-mod-6-vs-mod-30-vs-mod-210-historical-pre-tiered-marking-architecture)
+  - [`ONFLY_CORRECTION`/`GAP_K`: shared table replacing a per-prime `delta[]` (kept)](#onfly_correctiongap_k-shared-table-replacing-a-per-prime-delta-kept)
 - [wheel210_big.hpp](#wheel210_bighpp)
   - [`GAP_K210`/`ONFLY_CORRECTION210` table shape: chained-index vs. flat arrays](#gap_k210onfly_correction210-table-shape-chained-index-vs-flat-arrays)
 - [segment_sieve.hpp](#segment_sievehpp)
@@ -39,7 +41,9 @@ throughout below).
   - [Sparse tier design, current: fixed-size pooled blocks (attempt 6)](#sparse-tier-design-current-fixed-size-pooled-blocks-attempt-6)
   - [`SPARSE_BLOCK_ENTRIES` tuning: 1024 vs. 128](#sparse_block_entries-tuning-1024-vs-128)
   - [Sparse tier attempts 7-10 (all tried, reverted)](#sparse-tier-attempts-7-10-all-tried-reverted)
+  - [Attempt 11: shrinking the live entry from 8 to 7 bytes (tried, reverted, 2026-09-27)](#attempt-11-shrinking-the-live-entry-from-8-to-7-bytes-tried-reverted-2026-09-27)
 - [sqlite_prime_store.hpp](#sqlite_prime_storehpp)
+  - [Write-pipeline knobs: `BATCH`, `--db-block-size`, `wal_autocheckpoint` (all measured, kept at their defaults)](#write-pipeline-knobs-batch---db-block-size-wal_autocheckpoint-all-measured-kept-at-their-defaults)
   - [`PRAGMA cache_size` increase (tried, reverted, 2026-09-25)](#pragma-cache_size-increase-tried-reverted-2026-09-25)
   - [`blocks`/`block_data` table split (kept)](#blocksblock_data-table-split-kept)
   - [Page size (kept)](#page-size-kept)
@@ -51,6 +55,7 @@ throughout below).
   - [Cache-topology sizing: per-CPU-minimum step (kept)](#cache-topology-sizing-per-cpu-minimum-step-kept)
   - [EratBig-style sparse tier: forcing a power-of-2 segment width, and `sparse_limit = seg_k_width/4` (all attempts reverted)](#eratbig-style-sparse-tier-forcing-a-power-of-2-segment-width-and-sparse_limit--seg_k_width4-all-attempts-reverted)
 - [arg_parser.hpp](#arg_parserhpp)
+  - [`--zstd-level` default: 1 measured faster than 3, not yet made the default (open)](#--zstd-level-default-1-measured-faster-than-3-not-yet-made-the-default-open)
   - [Auto segment width: dropping the `isqrt(limit)` cap (kept)](#auto-segment-width-dropping-the-isqrtlimit-cap-kept)
   - [`seg_k_width_from_l2_bytes`'s extra /2 margin, applied on top of an already-per-thread L2 share (kept, counterintuitive)](#seg_k_width_from_l2_bytess-extra-2-margin-applied-on-top-of-an-already-per-thread-l2-share-kept-counterintuitive)
 - [presieve.hpp](#presievehpp)
@@ -61,6 +66,20 @@ throughout below).
   - [PGO overall: measured on the dev PC, not adopted on the production server](#pgo-overall-measured-on-the-dev-pc-not-adopted-on-the-production-server)
 
 ## erat_small.hpp
+
+### Small tier's unrolled loop applied to medium-hit-count primes (measured, not adopted)
+
+Foundational reasoning behind the small/medium tier split itself (not a later
+attempt): `cross_off`'s unrolled 8-hits-per-cycle loop is ~2 instructions/hit,
+vastly cheaper than the medium tier's generic one-hit-per-iteration stepping
+(~9-12 instructions/hit) -- but only once its per-prime entry/exit cost (an
+unpredictable jump into the switch, plus an unpredictable exit point) is
+amortized over enough hits. Measured directly on medium-tier-range primes at
+N=1e11: ~5.6x the branch misses of the generic loop, a net regression despite
+38% fewer instructions retired. This is why the tier boundary (`small_limit`)
+exists at all, not just a difference in per-hit cost -- see `main.cpp`'s own
+`small_limit` cutoff-tuning entry (below) for where that boundary is actually
+set.
 
 ### `cross_off`: narrowing locals to uint32_t (tried, reverted, 2026-09-25)
 
@@ -437,6 +456,21 @@ hardware is roughly 3-4x faster than the 89.54s above (see the current
 record of *why* mod 30 was picked over a bigger wheel, not as a current
 performance reference -- re-running this comparison on the current codebase
 would need its own fresh measurement, not a diff against these numbers.
+
+### `ONFLY_CORRECTION`/`GAP_K`: shared table replacing a per-prime `delta[]` (kept)
+
+Before this shared, `WHEEL_SIZE`-sized table existed, the medium/sparse tiers'
+on-the-fly stepping (`delta(p,j) = qp*GAP_K[j] + ONFLY_CORRECTION[pr][j]`, see
+`wheel.hpp`'s own derivation next to `make_onfly_correction`) used a per-prime
+`delta[]` table instead -- one whose memory footprint grows with how many
+primes use it, unlike the shared table (stays L1-resident regardless of tier
+size). Measured ~3.25x faster for primes forced through this tier at N=1e11 on
+the dev PC (i5-11400F) -- see the current [README benchmarks](../README.md#benchmarks)
+for today's numbers on the tiers this feeds into. primesieve's own
+EratMedium/WheelFactorization uses the same trick (a small shared wheel table
+plus one multiply by the prime itself, its `WheelElement`/`nextMultipleFactor`)
+-- this project's version was re-derived from its own `wheel_delta_at`, not
+ported from there.
 
 ## wheel210_big.hpp
 
@@ -898,7 +932,118 @@ than assuming either one predicts the other for a block-size change specifically
   than a full-window copy) on segments where the window is already all-nullptr,
   which is the common case at realistic N.
 
+### Attempt 11: shrinking the live entry from 8 to 7 bytes (tried, reverted, 2026-09-27)
+
+Motivated by a per-tier profile (external review, Opus 5.5, see the `erat_small.hpp`
+"med64: mod-210 stepping" entry above) diagnosing this tier as memory-bound, not
+instruction-bound -- the reasoning being that this project's own E14 ratio gap
+against primesieve (1.17x, vs. 1.03-1.09x through 1e13) coincides with this tier's
+population, which keeps growing past `seg_k_width` saturation, becoming a bigger
+share of total work. If bytes-moved is really what matters here, shrinking the
+8-byte `erat::DenseState` this tier reuses seemed like the one lever that targets
+the actual bottleneck instead of instructions.
+
+The bit budget was checked before writing any code: `qw` (the existing
+`(qp<<9)|idx` packing) needs ~30 of its 32 bits for the E15 target, no room to
+spare there. `pos` is the one field with real slack -- a segment-relative byte
+offset, needing only `log2(seg_k_width/8)` bits (18 on the dev PC's 256KiB
+segment, more on a bigger-L2 machine) out of the 32 it's given. Total real need:
+idx(9) + qp(21) + pos(~18-20) ≈ 50 bits, fitting a 7-byte (56-bit) packed value --
+but NOT 6 bytes as first hoped (pos alone already exceeds 16 bits on real
+hardware, ruling out a plain `uint16_t` field).
+
+7 isn't a power of 2, which collides with a harder constraint than expected:
+`std::aligned_alloc`'s alignment argument (this tier's `BLK_BYTES=1024`) must
+itself be a power of 2, and the pool's "tail pointer lands exactly on a block
+boundary = full" trick (primesieve's own Bucket design, no count field to load)
+only works when the entry size evenly divides that power-of-2 block size --
+impossible for any non-power-of-2 entry size, not just impractical. Implemented
+anyway, accepting the trade: a packed 7-byte `SparseEntry` (byte-precise
+pack/unpack, no unaligned wide loads) replacing `erat::DenseState` for this tier
+only, and an explicit per-slot `tail_blk_`/`tail_count_` pair replacing the
+pointer-alignment full-check (both already touched every push, so not a
+logically new memory access, just two explicit fields instead of one implicit
+one). `ENTRIES_PER_BLOCK` recomputed as `(1024-16)/7 = 144` exactly.
+
+Correctness held at every scale tried: `make test` (which forces `-s 64`,
+essentially all-sparse), a forced-84%-sparse proxy at N=1e12 (`-s 500000`,
+pi(N) exact), and the natural N=1e13 cliff (31.6% sparse, pi(N)=346,065,536,839
+exact). Performance was a clear, reproducible REGRESSION, not a wash -- measured
+on the forced-sparse proxy (dev PC, i5-11400F, `perf stat cycles:u,
+instructions:u,cache-misses:u`, N=1e12 `-s 500000`, 2 interleaved reps each,
+cooldown between):
+
+| metric | baseline (8-byte) | 7-byte packed | delta |
+|---|---:|---:|---:|
+| cycles:u | 2.2057T (avg) | 2.4354T (avg) | **+10.4%** |
+| instructions:u | 3.181300T (identical both reps) | 3.714951T (identical both reps) | **+16.8%**, real and deterministic |
+| cache-misses:u | 243M / 613M (2.5x spread between its OWN 2 reps) | 354M / 276M | too noisy on this metric to read directionally |
+
+`instructions:u` being bit-identical across repeats on each side rules out
+noise for that number specifically: this genuinely executes ~17% MORE
+instructions to do the same work, the opposite of the intended trade
+(fewer bytes moved, even at the cost of a few more instructions to pack/unpack
+them). Root cause not fully isolated via `perf annotate` this session, but the
+mechanism most consistent with the numbers: `SparseEntry`'s 1-byte alignment
+means consecutive entries sit at non-4-byte-aligned, 7-byte-strided offsets --
+neither a natural machine word size nor a power-of-2 stride, which likely
+defeats both (a) the compiler's ability to lower `qw()`/`pos()`/`make()`'s
+`memcpy`-based accessors into single clean load/store instructions (hence the
+instruction blowup) and (b) the hardware prefetcher's ability to recognize a
+7-byte-strided access pattern the way it does the old 8-byte one (a plausible,
+though not directly confirmed, explanation for cache-misses trending worse in
+one of the two reps). Both effects would push in the same direction actually
+observed: more instructions AND no cache-locality win to show for it.
+
+**Reverted, code removed** (not kept behind a flag -- confirmed dead end, not a
+pending tune). **Why:** this closes the "just shrink the struct" version of the
+memory-bound-tier hypothesis specifically -- the profile's underlying diagnosis
+(this tier is memory-bound, and its growing E14+ population plausibly explains
+the widening ratio gap) is not itself refuted, only this one proposed fix for
+it. **How to apply:** don't re-propose a sub-8-byte packed entry for this tier
+without a fundamentally different mechanism for AVOIDING the alignment/prefetch
+penalty a non-power-of-2 stride incurs (e.g., a byte-aligned-but-vectorized
+bulk pack/unpack across several entries at once, or restructuring to a
+struct-of-arrays layout instead of packing one entry tighter) -- naive
+byte-level packing of a single entry measured as a net loss on every metric
+that wasn't too noisy to read. The E14 ratio gap itself remains open; the next
+angle isn't a smaller entry, it's a different one entirely.
+
 ## sqlite_prime_store.hpp
+
+### Write-pipeline knobs: `BATCH`, `--db-block-size`, `wal_autocheckpoint` (all measured, kept at their defaults)
+
+Profiled after the single-pass elimination (see the `.db` single-pass entry in
+project history/git log): `writer_loop()` spends most of its wall-clock inside
+`COMMIT`, not `insert_block()` itself -- sieve threads sit idle on the
+backpressure queue while the single writer thread is the critical path. Three
+tunable knobs were tried, all measured with clean interleaved A/B (same
+binary, alternated, not back-to-back-same-config):
+
+1. **`BATCH`** (`writer_loop`'s commits-per-transaction, hardcoded 1000, not
+   a CLI flag): tried 3000/10000/100000. Default 1000 **won clearly** against
+   10000 in a 3-rep interleaved test (14.7-19.9s vs. 24.2-28.1s). Kept at
+   1000.
+2. **`--db-block-size`** (primes/compressed-block, default 65536): tried 4x
+   smaller (16384) and 16x bigger (1048576). **Both directions lost**
+   (16-21s at default vs. 27-30s either extreme) -- 65536 is a real local
+   optimum, not an arbitrary default.
+3. **`PRAGMA wal_autocheckpoint=0`** (disable the ~4MB-WAL auto-checkpoint,
+   relying only on `finish()`'s own explicit one): mixed and *more variable*
+   than default (18.8-30.1s vs. a tight 20.0-20.8s for default across 3
+   reps) -- deferring all checkpointing to one final flush trades predictable
+   incremental cost for an unpredictable final spike. Reverted.
+
+The bigger ~150-320MB/s-vs-disk-capability gap this profiling was chasing
+looks structural, not a tunable parameter: SQLite only allows one writer
+transaction at a time, so no amount of batching/block-size/checkpoint tuning
+inside that single serialized thread can exceed what one thread's own
+syscall/fsync pattern allows. Actually closing that gap would mean sharding
+the `.db` across multiple files/writer threads for true write parallelism --
+a real format and `nth_prime` interface change, not a tuning pass.
+**How to apply:** don't re-propose bigger commit batches, bigger or smaller
+`--db-block-size`, or disabling `wal_autocheckpoint` as fresh ideas for this
+gap -- all three are measured, reverted dead ends specifically for it.
 
 ### `PRAGMA cache_size` increase (tried, reverted, 2026-09-25)
 
@@ -1136,6 +1281,17 @@ full A/B trail (dev PC and server) behind this. Skipped when the user already
 forced a value on purpose (`-s`, `--l2-bytes`, `--l1-bytes`) or detection found
 nothing (non-Linux, sysfs unavailable).
 
+The recompute itself is gated on GENUINE heterogeneity (some CPU's share smaller
+than cpu0's own), not run unconditionally: on a uniform machine every share is
+equal, so the minimum trivially equals cpu0's, and re-deriving through
+`seg_k_width_from_l2_bytes` -- whose own /2 margin is deliberately extra-
+conservative, validated for real P/E-core contention (see that function's own
+entry below) -- would apply that same extra margin machine-wide for no reason,
+on hardware where it's only ever been measured to help (i5-13500) and was NOT
+re-validated to help (this project's own i5-11400F data on this margin question
+is mixed -- see git history). Only touch anything when the machine actually has
+more than one cache domain.
+
 ### EratBig-style sparse tier: forcing a power-of-2 segment width, and `sparse_limit = seg_k_width/4` (all attempts reverted)
 
 The sparse tier's EratBig-style rewrite (see `segment_sieve.hpp` above) needs the
@@ -1197,6 +1353,17 @@ regressing at 1e13 specifically. Don't re-propose `sparse_limit` independent of
 footprint itself, not just how it's grouped into blocks.
 
 ## arg_parser.hpp
+
+### `--zstd-level` default: 1 measured faster than 3, not yet made the default (open)
+
+The default (3) was picked on general zstd knowledge -- entropy coding, which is
+most of the achievable ratio on this near-random gap-byte stream, barely depends
+on compression level, so higher levels mostly buy slower builds, not smaller
+files. That reasoning was later checked directly: `--zstd-level 1` vs. the
+default 3, interleaved x3 on the dev PC, measured ~5-8% faster (16.7-19.6s vs.
+17.8-20.9s) with essentially identical output size (0.629 vs. 0.630
+bytes/prime). A small, consistent, low-risk win -- **not yet made the default**,
+just measured; worth doing since there's no real tradeoff at this ratio.
 
 ### Auto segment width: dropping the `isqrt(limit)` cap (kept)
 

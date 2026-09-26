@@ -203,18 +203,11 @@ inline CpuCacheTopology detect_cpu_cache_topology() {
 
 // Wheel-index segment width (word-aligned to 64, ready for SegmentSieve)
 // that fills half of `l2_bytes` -- same derivation as the auto -s formula
-// below, but returning k-width directly instead of the CLI-facing
-// "numeric width" -s uses. Also used, deliberately, in main.cpp's
-// per-CPU-minimum step with an already-per-thread L2 share (not just the
-// RAW machine-wide value the single-CPU fallback passes): applying this
-// same /2 on top of a share that's already divided by how many logical
-// CPUs share that L2 looked like double-counting the same headroom at
-// first (and briefly was fixed away as a bug) -- but measured, on the
-// actual target hardware (many real threads contending for shared
-// L3/memory bandwidth), the smaller resulting segment is reliably faster
-// than the "fair share, no extra margin" version, not slower -- see
-// docs/RESEARCH.md for the A/B trail behind reversing that "fix". 0 falls
-// back to a conservative 256KiB.
+// below, but returning k-width directly. Also used in main.cpp's
+// per-CPU-minimum step, deliberately applying this same /2 margin even on
+// top of an already-per-thread L2 share -- counterintuitive, see
+// docs/RESEARCH.md#seg_k_width_from_l2_bytess-extra-2-margin-applied-on-top-of-an-already-per-thread-l2-share-kept-counterintuitive.
+// 0 falls back to a conservative 256KiB.
 inline uint64_t seg_k_width_from_l2_bytes(uint64_t l2_bytes) {
     if (l2_bytes == 0) l2_bytes = 256 * 1024;
     uint64_t l2_target_bytes = l2_bytes / 2;
@@ -252,12 +245,11 @@ struct Options {
     // Only used when --output ends in ".db" (SQLite + zstd gap encoding,
     // see gap_block_sink.hpp / sqlite_prime_store.hpp). Ignored for plain
     // text output.
-    uint64_t db_block_size = 65536;      // primes per compressed block
-    int zstd_level = 3;                  // low: entropy coding (most of the
-                                          // ratio, on this near-random byte
-                                          // stream) barely depends on level,
-                                          // so higher levels mostly buy
-                                          // slower builds, not smaller files
+    uint64_t db_block_size = 65536;      // primes per compressed block; see
+                                          // docs/RESEARCH.md#write-pipeline-knobs-batch---db-block-size-wal_autocheckpoint-all-measured-kept-at-their-defaults
+    int zstd_level = 3;                  // low: entropy coding barely depends
+                                          // on level here. See
+                                          // docs/RESEARCH.md#--zstd-level-default-1-measured-faster-than-3-not-yet-made-the-default-open
 
     // Manual overrides for detect_l2_cache_bytes()/detect_l1d_cache_bytes()
     // (this file, below): 0 means "keep auto-detecting". Auto-detection
@@ -410,42 +402,22 @@ inline Options parse_args(int argc, char** argv) {
         opt.threads = std::max(1u, std::thread::hardware_concurrency());
     }
     if (!opt.segment_width_set) {
-        // Size the segment to fill a fraction of the machine's actual,
-        // detected L2 (not guessed) -- 1/2 leaves room for a hyperthread
-        // sibling sharing the same L2 (typical topology) plus whatever else
-        // is running; falls back to a conservative 256KiB if L2 can't be
-        // detected (see detect_l2_cache_bytes), or use --l2-bytes if that
-        // fallback is wrong for this machine (see the Options field
-        // comment). Past this width some base primes fall into the
-        // costlier sparse/bucket tier instead of staying dense -- that's
-        // an accepted tradeoff, not a bug: the bucket ring is pool-
-        // allocated (see SegmentSieve), so it's cheap once it's needed, far
-        // cheaper than an L2-blowing segment.
-        //
-        // An earlier version additionally capped this at isqrt(limit) --
-        // the smallest width that keeps EVERY base prime dense, avoiding
-        // the sparse tier altogether below the N where that width exceeds
-        // the L2 budget above. That's still correct, but it stopped being
-        // the right default once the small tier's L1 sub-block (see
-        // erat_small.hpp) was decoupled from segment size: before that
-        // change, a smaller segment directly meant less L2 traffic for
-        // every tier, so "smaller is better below the cap" made sense; the
-        // small tier is now already confined to L1 regardless of segment
-        // size, so shrinking the segment below the L2 budget no longer
-        // helps it and only adds fixed per-segment cost (walking every
-        // active prime's state, entering/exiting each tier's loop,
-        // presieve fill) more often than necessary, for the medium and
-        // sparse tiers that DO still scale with segment count. Dropping
-        // the isqrt cap measured faster at every N where it used to bind,
-        // and a no-op elsewhere -- see docs/RESEARCH.md. That's a
-        // DIFFERENT question from how big the budget itself should be --
-        // removing the /2 halving below (using the full L2 instead of
-        // L2/2) was measured as a regression at N=1e13, so the /2 stays.
+        // Size the segment to fill half of the machine's actual, detected L2
+        // (not guessed) -- falls back to a conservative 256KiB if L2 can't
+        // be detected, or use --l2-bytes if that fallback is wrong (see the
+        // Options field comment). Past this width some base primes fall
+        // into the costlier sparse/bucket tier instead of staying dense --
+        // an accepted tradeoff (the bucket ring is pool-allocated, cheap
+        // once needed, far cheaper than an L2-blowing segment), not a bug.
+        // No longer additionally capped at isqrt(limit) (the smallest width
+        // keeping every base prime dense) -- see
+        // docs/RESEARCH.md#auto-segment-width-dropping-the-isqrtlimit-cap-kept
+        // for why that stopped being the right default, and why the /2
+        // itself (not the isqrt cap) stays.
         uint64_t l2_bytes = opt.l2_bytes_override ? opt.l2_bytes_override : detect_l2_cache_bytes();
         if (l2_bytes == 0) l2_bytes = 256 * 1024;
         uint64_t l2_target_bytes = l2_bytes / 2;
-        // Inverse of array_bytes = segment_width * WHEEL_SIZE / WHEEL_MOD / 8
-        // (see README#tuning-for-your-machine).
+        // Inverse of array_bytes = segment_width * WHEEL_SIZE / WHEEL_MOD / 8.
         opt.segment_width = l2_target_bytes * 8 * WHEEL_MOD / WHEEL_SIZE;
     }
 

@@ -1,91 +1,12 @@
 #pragma once
 // Segmented sieve on a compile-time wheel (see wheel.hpp), bit-packed into
-// uint64_t words.
-//
-// Three prime tiers, chosen by expected hits (see main.cpp for the actual
-// cutoffs) -- this mirrors primesieve's own split (EratSmall / EratMedium /
-// EratBig): a prime p's average gap between hits, in wheel-index terms, is
-// ~p (each wheel-coprime multiplier step advances the value by
-// ~p*WHEEL_MOD/WHEEL_SIZE, which converts back to a k-gap of ~p).
-//
-//   - small_primes (p < L1d/2 bytes, >= ~16 hits per L1-sized sub-block):
-//     FLAT, crossed off one L1-sized sub-block at a time (presieve fill
-//     first, then every small prime), so the marks -- ~80%+ of all of them
-//     -- land in L1 instead of the L2-sized segment. Uses erat_small.hpp's
-//     unrolled 8-hits-per-cycle loop with compile-time bit masks, one list
-//     per residue class p % 30 (small_[pr]) so the class dispatch isn't an
-//     unpredictable branch per prime.
-//   - medium_primes (up to the segment width, so >= ~1 hit/segment): FLAT,
-//     one pass over the whole segment, generic one-hit-per-iteration
-//     stepping via shared mod-210 tables (wheel210_big.hpp::GAP_K210/
-//     ONFLY_CORRECTION210: one multiply by qp=p/30, one shared-table
-//     lookup, one add -- 48 multiplier phases instead of the mod-30
-//     wheel's 8, skipping hits redundant with presieve's own coverage of
-//     7 -- see erat_small.hpp::cross_off_medium for the full numbers).
-//     The unrolled loop was measured slower here: with only a few hits
-//     per segment it can't amortize its unpredictable entry/exit (see
-//     erat_small.hpp::cross_off_medium). An EratMedium-style 64-list
-//     restructuring (byte marking like the small tier, keyed by (class,
-//     entry phase)) was tried twice, in two different implementations,
-//     and reverted both times -- see docs/RESEARCH.md.
-//
-//     med64_primes/process_med64 (KEPT, 2026-09-26): a THIRD variant of
-//     that same 64-list idea, scoped to only the sub-band of medium primes
-//     closest to small_limit ([small_limit, med64_limit), main.cpp) --
-//     the two prior attempts applied it to the whole medium tier, whose
-//     population keeps growing with N past small_limit's own saturation
-//     point (see erat_small.hpp), which is what sank both of them at
-//     large N; this band's own population saturates far earlier (at or
-//     before small_limit's), so it shouldn't. Double-buffered like the
-//     second prior attempt (m64_cur_/m64_nxt_, swapped per segment) --
-//     see process_med64's own comment. Swept via
-//     ERATOSTENES_MED64_NUM/_DEN (main.cpp), jointly with small_limit's
-//     own divisor (see main.cpp's comment there for why they interact):
-//     1/12 (paired with small_limit=1/4) kept as the default, a real win
-//     over the standalone-tuned 1/8+small_limit/2 combo at both N=1e12
-//     and N=1e13, on every metric measured -- see docs/RESEARCH.md.
-//     Both flat tiers keep 8 bytes/prime of state (erat::DenseState),
-//     walked every segment in place -- there is never a segment these
-//     primes "skip", so a bucket would buy nothing.
-//
-//     These two tiers replaced (dev PC, i5-11400F, cycles:u) a per-prime
-//     delta[] table tier (40 bytes/prime, capped by an L3/2 budget) plus
-//     the ONFLY_CORRECTION loop for everything past that budget, both on
-//     the whole L2-sized segment: -26% at N=1e11, -30% at N=1e12.
-//
-// dTLB pressure from a thread's whole working set at large N (the 256KiB
-// segment array, ~1.2MB of medium-tier DenseState at the N=1e13 cliff,
-// plus the sparse ring's blocks scattered across many 4KiB pages) was
-// investigated as a possible explanation for this project's ratio gap
-// against primesieve and ruled out -- measured dTLB miss rates are
-// ~0.003-0.004%, nowhere near enough to matter. See docs/RESEARCH.md.
-//
-//   - sparse_primes (p >= segment width, at most ~1 hit/segment): BUCKET,
-//     EratBig-style (adopted after an isolated A/B against the original
-//     design below) -- byte marking (not bit), a mod-210 multiplier wheel
-//     (48/210 phases instead of 8/30, same redundant-multiple-of-7
-//     reasoning as the medium tier above), and pointer-aligned blocks (a
-//     tail pointer landing exactly on a block boundary means "full",
-//     primesieve's own Bucket trick, no per-block count field to load).
-//     Requires a power-of-2 segment width in BYTES (see the constructor's
-//     has_sparse check) for the bucket-slot math to become a shift/mask
-//     instead of a division -- main.cpp floors seg_k_width to the nearest
-//     power of 2 whenever this tier is used.
-//
-//     Most segments have nothing to do for most of these primes, so
-//     scheduling each one into the future segment where its next hit
-//     actually falls (a fixed-size ring of block-pooled queues, see
-//     process_big's own comment) means a segment's processing only ever
-//     looks at the (few) sparse primes actually due, not all of them.
-//     Steps forward the same qp*GAP_K[j] + ONFLY_CORRECTION[pr][j] way the
-//     medium tier does -- no division by the runtime value p anywhere in
-//     this tier -- with qp/pr/the wheel phase j packed into one word
-//     (erat::DenseState::qw, same layout as the dense tiers) alongside a
-//     `pos` relative to whichever segment the entry is due in, 8 bytes
-//     total per live entry. Several earlier designs for this tier's
-//     stepping math (a shared-table scheme, an AoS relayout, a couple of
-//     division-free variants) were tried and reverted before landing on
-//     this one -- see docs/RESEARCH.md for that history.
+// uint64_t words. Four prime tiers by expected hits per segment -- small,
+// med64, medium, sparse (cutoffs computed in main.cpp) -- mirroring
+// primesieve's own EratSmall/EratMedium/EratBig split, plus this project's
+// own med64 sub-band. See docs/ALGORITHM.md §6 for how and why each tier
+// works the way it does, and docs/RESEARCH.md for every tried-and-reverted
+// alternative along the way (64-list medium restructurings, dTLB pressure,
+// sparse-tier stepping-math variants, the 7-byte SparseEntry attempt).
 //
 // Extraction (turning the finished bit array into actual prime values):
 // invert each word, decompose into (q, r) = (k / WHEEL_SIZE, k %
@@ -504,55 +425,30 @@ private:
 
     // Processes exactly the sparse-tier entries due this segment: mark,
     // advance, reschedule into whichever future bucket the next hit lands
-    // in -- see the block-pool comment right below for how a due entry
-    // gets there and where it goes next.
-    //
-    // Pulled out of sieve_and_emit into its own function, and marked
-    // noinline to make sure it stays that way even under -O3/-flto: with
-    // dense/onfly/sparse all fully inlined into one function, perf showed
-    // real cycles going to a spilled-to-stack reload of a loop-invariant
-    // member (num_buckets_) -- the *number* of values simultaneously live
-    // across all three tiers was forcing spills, not a poor choice of
-    // which value to spill. Giving this tier its own function gives it its
-    // own register allocation scope instead, so its live ranges stop
-    // competing with the other two tiers' for the same register file.
-    // Confirmed with perf stat, not just wall-clock: at N=1e12 with a
-    // third of base primes forced sparse (-s 500000), cycles dropped ~5-9%
-    // and IPC rose from 1.07 to 1.14-1.19 across repeated runs,
-    // consistently. The flip side of a real function call is real call
-    // overhead, paid once per segment even when this tier has nothing due
-    // -- sieve_and_emit below skips the call entirely when sparse_primes
-    // is empty for the whole run, which is what keeps the dense-only
-    // case's numbers unchanged from before this split.
+    // in. Pulled into its own noinline function to keep this tier's live
+    // ranges from competing for registers with the other two tiers -- see
+    // docs/RESEARCH.md#sparse-tier-process_bigprocess_sparse_bucket-split-into-its-own-noinline-function.
+    // Skipped entirely by sieve_and_emit when sparse_primes is empty.
     //
     // Fixed-size blocks of erat::DenseState pulled from a pool, one queue
     // (linked list of blocks) per ring slot -- primesieve's own EratBig
-    // design, replacing an earlier idx-indexed intrusive list (see
-    // docs/RESEARCH.md for that history and why it lost). The entry itself
-    // carries everything needed to process it (qp/pr/j packed into `qw`,
-    // `pos` relative to whichever segment it's due in, same layout as the
-    // dense tiers' DenseState), so rescheduling COPIES the entry into the
-    // target slot's tail block instead of relinking an index -- both the
-    // read (draining a slot's blocks front to back) and the write
-    // (appending to a tail) are sequential. A live entry costs exactly 8
-    // bytes (sizeof(DenseState)) at any one time.
+    // design. The entry carries everything needed to process it (qp/pr/j
+    // packed into `qw`, `pos` relative to whichever segment it's due in,
+    // same layout as the dense tiers' DenseState, 8 bytes total), so
+    // rescheduling COPIES the entry into the target slot's tail block
+    // instead of relinking an index. SPARSE_BLOCK_ENTRIES=128 (1 KiB/
+    // block). See
+    // docs/RESEARCH.md#sparse-tier-design-current-fixed-size-pooled-blocks-attempt-6
+    // and docs/RESEARCH.md#sparse_block_entries-tuning-1024-vs-128 for why
+    // this design (not an earlier idx-indexed intrusive list) and this
+    // block size.
     //
-    // SPARSE_BLOCK_ENTRIES=128 (1 KiB/block) was tuned against both a
-    // forced-heavy-sparse proxy and the natural N=1e13 cliff after the two
-    // regimes initially disagreed at the primesieve-default 1024 -- see
-    // docs/RESEARCH.md for the numbers and why they disagreed. Several
-    // further changes (rounding the ring-slot division away, prefetching
-    // the hit loop's next target, 4-way software-pipelining it, a
-    // sliding-window ring instead of the modular one below) were all tried
-    // and reverted -- see docs/RESEARCH.md.
     // Drains this segment's ring slot: for each due entry, mark its one
     // hit (byte marking, mod-210 table lookup for mask/step -- see
-    // wheel210_big.hpp), advance to the next hit, and re-file it (usually
-    // into a future slot, occasionally the current one again if the step
-    // is small) by byte position with a shift/mask instead of a division.
-    // `pos` in a live entry is always relative to whichever segment it's
-    // due in, so no k_low/k_high parameters are needed here at all, unlike
-    // the old scheme.
+    // wheel210_big.hpp), advance to the next hit, and re-file it by byte
+    // position with a shift/mask instead of a division. `pos` in a live
+    // entry is always relative to whichever segment it's due in, so no
+    // k_low/k_high parameters are needed here.
     __attribute__((noinline))
     void process_big() {
         const uint32_t slot = static_cast<uint32_t>(cur_segment_ & (num_buckets_ - 1));

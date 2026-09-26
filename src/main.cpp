@@ -114,12 +114,9 @@ const std::string SMALL_PRIMES_TEXT = build_small_primes_text();
 const uint64_t SMALL_PRIMES_BYTES = SMALL_PRIMES_TEXT.size();
 const uint64_t SMALL_PRIMES_COUNT = WHEEL_PRIMES.size();
 
-// L1-sized slice the small dense tier is crossed off in (SegmentSieve);
-// set once in main() from the detected L1d size -- see that assignment's
-// own comment for how a hybrid P-core/E-core CPU is handled: one
-// conservative machine-wide value (the smallest domain detected), not a
-// per-thread one (a per-thread version was tried and measured slower --
-// see docs/RESEARCH.md).
+// L1-sized slice the small dense tier is crossed off in (SegmentSieve); set
+// once in main() from the detected L1d size, machine-wide not per-thread.
+// See docs/RESEARCH.md#cache-topology-sizing-per-cpu-minimum-step-kept.
 static uint64_t SUB_BLOCK_BYTES = 32 * 1024;
 
 struct ChunkRange {
@@ -310,41 +307,20 @@ struct ProgressGuard {
 // Spawns 'workers' OS threads that dynamically pull chunk indices in
 // [0, num_chunks) from a shared atomic counter and call fn(chunk_idx) for
 // each, then joins them all and rethrows the first exception any of them
-// raised. Plain std::thread has no way to propagate an exception back to
-// the caller on its own -- one escaping a thread's function calls
-// std::terminate() instead -- so every worker call is run under a
-// try/catch that stashes it here (a full disk during the write pass, or
-// the bucket-sieve sizing check in SegmentSieve::schedule, are the
-// realistic ways this fires).
-//
-// num_chunks > workers on purpose (see split_ranges): a base prime only
-// starts contributing hits to a segment once p*p is below that segment's
-// position, so equal-WIDTH chunks are not equal-WORK chunks -- chunks near
-// the end of the range have far more active base primes per segment than
-// chunks near the start. Static one-chunk-per-thread assignment leaves
-// early threads idle while the last one grinds through the most expensive
-// part of the range; pulling many narrow chunks from a shared counter lets
-// a thread that finishes an early, cheap chunk immediately pick up the
-// next available one instead of sitting idle.
-//
-// CHUNKS_PER_THREAD=150 (not the more obvious-looking 16) was reached via
-// an idle-time investigation (ERATOSTENES_DEBUG_IDLE below) that measured
-// idle time too small to explain this project's ratio gap against
-// primesieve, but still found a real, if small, tail-latency win from a
-// bigger chunk count -- and a wall-clock measurement trap along the way
-// (sustained-load server drift masquerading as a regression). See
-// docs/RESEARCH.md for the full investigation.
+// raised (plain std::thread can't propagate one on its own). num_chunks >
+// workers on purpose -- see ALGORITHM.md §4 for why (chunks aren't
+// equal-work) and
+// docs/RESEARCH.md#run_parallel_chunks-chunk-granularity-idle-time-investigation-2026-09-25-external-review-opus-55
+// for why CHUNKS_PER_THREAD=150.
 template <typename Fn>
 static void run_parallel_chunks(unsigned workers, unsigned num_chunks, Fn&& fn) {
     std::atomic<unsigned> next_chunk{0};
     std::vector<std::exception_ptr> errors(workers);
     std::vector<std::thread> pool;
     pool.reserve(workers);
-    // ERATOSTENES_DEBUG_IDLE=1: per-thread finish timestamp, to measure
-    // whether the shared-counter queue above actually keeps every thread
-    // busy or whether a handful of expensive tail chunks still leave most
-    // threads idle at the end -- see docs/RESEARCH.md for what this
-    // produced (CHUNKS_PER_THREAD's own tuning history, above).
+    // ERATOSTENES_DEBUG_IDLE=1: per-thread finish timestamp, to check the
+    // shared-counter queue keeps every thread busy. See docs/RESEARCH.md
+    // (link above).
     const bool debug_idle = std::getenv("ERATOSTENES_DEBUG_IDLE") != nullptr;
     auto t0 = std::chrono::steady_clock::now();
     std::vector<double> finish(debug_idle ? workers : 0);
@@ -439,73 +415,36 @@ int main(int argc, char** argv) {
     // need every segment to start on a word boundary.
     uint64_t seg_k_width = std::max<uint64_t>(64, (opt.segment_width * WHEEL_SIZE / WHEEL_MOD) / 64 * 64);
 
-    // small_limit's own divisor, joint-tuned with
-    // ERATOSTENES_MED64_NUM/_DEN below (see docs/RESEARCH.md's med64
-    // joint-sweep entry): now that med64 exists as a cheaper alternative
-    // destination for the highest-hit-count primes near this boundary,
-    // the old standalone-tuned /2 (still the right cutoff for the plain
-    // small-vs-medium split, see the comment below) is no longer the
-    // right one once med64 is in the mix -- 1/4, paired with
-    // MED64_NUM/_DEN=1/12, measured a clean win on every metric
-    // (cycles:u, instructions:u, cache-misses:u AND branch-misses:u, not
-    // a trade-off) over the standalone /2 default, confirmed at both
-    // N=1e12 and N=1e13. Overridable via ERATOSTENES_SMALL_NUM/_DEN for
-    // further sweeps without recompiling.
+    // small_limit's own divisor, joint-tuned with ERATOSTENES_MED64_NUM/_DEN
+    // below; default 1/4 (was 1/2 before med64 existed). Overridable via
+    // ERATOSTENES_SMALL_NUM/_DEN for further sweeps without recompiling.
+    // See docs/RESEARCH.md#small_limit-re-tuned-jointly-with-med64_limit-kept-2026-09-26.
     uint64_t small_num = 1, small_den = 4;
     if (const char* s = std::getenv("ERATOSTENES_SMALL_NUM")) small_num = std::strtoull(s, nullptr, 10);
     if (const char* s = std::getenv("ERATOSTENES_SMALL_DEN")) small_den = std::strtoull(s, nullptr, 10);
     if (small_den == 0) small_den = 4;
 
     // The small tier is crossed off one L1-sized sub-block at a time (see
-    // SegmentSieve::sieve_and_emit), so the sub-block is the machine's real
-    // L1 data cache (detected, like L2 for -s), and a prime counts as small
-    // when it has >= ~16 hits per sub-block (p < sub-block bytes / 2; each
-    // p-byte cycle holds 8 hits). /2 was tuned against several other
-    // candidate cutoffs (/1, /4, *2/3) at multiple sub-block sizes, and
-    // re-checked after the medium tier got cheaper per hit -- /2 won every
-    // time. See docs/RESEARCH.md for the numbers. (This was all BEFORE
-    // med64 existed -- see small_num/small_den just above for why the
-    // *actual* default has since moved to /4.)
+    // SegmentSieve::sieve_and_emit); sub-block = the machine's detected L1d
+    // size. See docs/RESEARCH.md#small_limit-cutoff-tuning for the /2-vs-
+    // alternatives derivation this divisor is based on.
     uint64_t l1_bytes = opt.l1_bytes_override ? opt.l1_bytes_override : detect_l1d_cache_bytes();
     if (l1_bytes == 0) l1_bytes = 32 * 1024;
     SUB_BLOCK_BYTES = std::max<uint64_t>(8, l1_bytes / 8 * 8);
     uint64_t small_limit = SUB_BLOCK_BYTES * small_num / small_den;
 
-    // On a hybrid P-core/E-core CPU, detect_l2_cache_bytes()/
-    // detect_l1d_cache_bytes() above always read cpu0 -- if cpu0 happens
-    // to be a (bigger-cache) P-core, every thread, including E-core ones,
-    // gets sized for cache they don't actually have that much of. Fix:
-    // detect every CPU's own fair L2 share (CpuCacheTopology) and, if any
-    // of them is SMALLER than what cpu0 alone gave us, use that smallest
-    // one instead -- for every thread, uniformly, not per-thread. This
-    // guarantees every thread's segment fits comfortably in whichever
-    // cache it actually lands on, no matter which one that is.
-    //
-    // An earlier version sized each thread individually for wherever it
-    // happened to be running (sched_getcpu() + a per-CPU table) instead of
-    // this single conservative value -- measured SLOWER on the actual
-    // target hardware than this simpler "smallest domain, same for
-    // everyone" version, even though the per-thread version was the
-    // mathematically "fairer" one; a smaller, safely-under-budget segment
-    // seems to matter more on real many-thread-contended hardware than
-    // hitting each core's own "fair" cache share exactly -- see
-    // docs/RESEARCH.md for the full A/B trail. Skipped when the user
-    // already forced a value on purpose (-s, --l2-bytes, --l1-bytes) or
-    // detection found nothing (non-Linux, sysfs unavailable).
+    // Hybrid P-core/E-core correction: detect_l2_cache_bytes()/
+    // detect_l1d_cache_bytes() above always read cpu0, so a P-core cpu0
+    // would otherwise size E-core threads for cache they don't have. Use
+    // the smallest per-CPU share detected (CpuCacheTopology), uniformly for
+    // every thread, not per-thread -- see
+    // docs/RESEARCH.md#cache-topology-sizing-per-cpu-minimum-step-kept.
+    // Skipped when the user already forced a value (-s, --l2-bytes,
+    // --l1-bytes) or detection found nothing (non-Linux, sysfs unavailable).
     if ((!opt.segment_width_set && !opt.l2_bytes_override) || !opt.l1_bytes_override) {
         CpuCacheTopology topo = detect_cpu_cache_topology();
-        // Gate on GENUINE heterogeneity (some other CPU's share is smaller
-        // than cpu0's own) rather than always recomputing from the
-        // minimum: on a uniform machine every share is equal, so the
-        // minimum trivially equals cpu0's, and re-deriving through
-        // seg_k_width_from_l2_bytes -- whose own /2 margin is deliberately
-        // extra-conservative, validated for real P/E-core contention, see
-        // that function's comment -- would apply that SAME extra margin
-        // machine-wide for no reason, even where it's only ever been
-        // measured to help (i5-13500) and was NOT re-validated to help
-        // (this project's own i5-11400F data on this margin question is
-        // mixed -- see git history). Only touch anything when the
-        // machine actually has more than one cache domain.
+        // Only recompute when some CPU's share is genuinely smaller than
+        // cpu0's own -- a uniform machine's minimum trivially equals cpu0's.
         if (!opt.segment_width_set && !opt.l2_bytes_override && !topo.l2_share.empty() && topo.l2_share[0]) {
             uint64_t min_l2_share = topo.l2_share[0];
             for (uint64_t s : topo.l2_share) if (s && s < min_l2_share) min_l2_share = s;
@@ -533,13 +472,10 @@ int main(int argc, char** argv) {
     // classified sparse below and the width is left exactly as
     // auto-tuned. small_limit/the small-vs-medium cutoff are untouched.
     //
-    // Decoupling the medium/sparse cutoff from the segment width itself
-    // (sparse_limit = seg_k_width/4 instead of always p >= seg_k_width,
-    // matching primesieve's own wider EratMedium/EratBig split) was tried
-    // three times, including a bucket-ring retune meant to fix it, and
-    // reverted every time -- a real win at N=1e12 that turned into a
-    // regression at the natural N=1e13 cliff this project actually targets.
-    // See docs/RESEARCH.md for the numbers.
+    // The medium/sparse cutoff itself stays plain `p >= seg_k_width` --
+    // decoupling it (sparse_limit = seg_k_width/4) was tried three times
+    // and reverted every time. See
+    // docs/RESEARCH.md#eratbig-style-sparse-tier-forcing-a-power-of-2-segment-width-and-sparse_limit--seg_k_width4-all-attempts-reverted.
     if (base_limit >= seg_k_width) {
         uint64_t sb = seg_k_width / 8, p2 = 1;
         while (p2 * 2 <= sb) p2 *= 2;
@@ -549,38 +485,16 @@ int main(int argc, char** argv) {
         }
     }
 
-    // med64 tier (see docs/RESEARCH.md's "erat_small.hpp: EratMedium-style
-    // 64-list restructuring" for why a full-medium-tier version of this
-    // was tried and reverted): primes in [small_limit, med64_limit) use
-    // erat_small.hpp's byte-marking cross_off<PR> (via
-    // SegmentSieve::process_med64), grouped into 64 (class, entry phase)
-    // lists so every call sharing a list also shares its entry phase --
-    // the same idea, but scoped to a bounded sub-band close to
-    // small_limit instead of the whole medium tier, so its population
-    // doesn't keep growing with N past small_limit's own saturation point
-    // the way the full tier's did.
-    //
-    // med64_limit is swept via ERATOSTENES_MED64_NUM/_DEN (numerator/
-    // denominator of seg_k_width) without recompiling; NUM=0 (or any
-    // num/den <= small_limit/seg_k_width) disables the tier, degenerating
-    // med64_limit to <= small_limit so no prime ever qualifies -- exactly
-    // reproduces the pre-med64 baseline (verified: pi(N) and cycles:u both
-    // unchanged). Standalone (small_limit still at its old /2), 1/8
-    // measured best of {1/16, 1/8, 1/4, 3/8, 1/2}: -5.5%/-5.6% at N=1e12,
-    // -4.07%/-4.17% at N=1e13 -- a real win at both N, unlike the
-    // full-medium-tier attempts (see docs/RESEARCH.md), which won at
-    // 1e12 but regressed at 1e13 as their unbounded population grew.
-    //
-    // JOINTLY re-tuned with small_limit's own divisor just above (a
-    // smaller small_limit shifts med64's own lower bound down, so its
-    // optimal fraction shifts too): a grid scan at N=1e12 followed by 2-
-    // rep confirmation at both N found 1/12 (paired with small_limit=1/4)
-    // beats the standalone-tuned 1/8+1/2 combo on every metric, not a
-    // trade-off -- at N=1e13, cycles:u -2.1%, instructions:u -2.5%,
-    // cache-misses:u -0.6%, and branch-misses:u -13.7% (fewer med64
-    // entries per segment, once small_limit itself moved, means less of
-    // the exit-side misprediction cost cross_off's own comment already
-    // flags). Kept at 1/12. See docs/RESEARCH.md for the full grid.
+    // med64 tier: primes in [small_limit, med64_limit) use erat_small.hpp's
+    // byte-marking cross_off<PR> (via SegmentSieve::process_med64), grouped
+    // into 64 (class, entry phase) lists -- a bounded sub-band close to
+    // small_limit, not the whole medium tier (see
+    // docs/RESEARCH.md#medium-tier-64-list-restructuring-scoped-to-a-bounded-sub-band-med64_primes-kept-2026-09-26
+    // for why the whole-tier version was reverted first). med64_limit swept
+    // via ERATOSTENES_MED64_NUM/_DEN without recompiling; NUM=0 disables
+    // the tier, exactly reproducing the pre-med64 baseline. Default 1/12,
+    // jointly re-tuned with small_limit's own divisor above -- see
+    // docs/RESEARCH.md#small_limit-re-tuned-jointly-with-med64_limit-kept-2026-09-26.
     uint64_t med64_num = 1, med64_den = 12;
     if (const char* s = std::getenv("ERATOSTENES_MED64_NUM")) med64_num = std::strtoull(s, nullptr, 10);
     if (const char* s = std::getenv("ERATOSTENES_MED64_DEN")) med64_den = std::strtoull(s, nullptr, 10);
