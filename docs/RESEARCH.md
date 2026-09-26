@@ -23,6 +23,7 @@ throughout below).
   - [`cross_off_medium`: class-specialized layout (kept, 2026-09-24)](#cross_off_medium-class-specialized-layout-kept-2026-09-24)
   - [`cross_off_medium`: 2-ahead software prefetch (tried, reverted, 2026-09-25, follow-up session)](#cross_off_medium-2-ahead-software-prefetch-tried-reverted-2026-09-25-follow-up-session)
   - [`cross_off_medium`: EratMedium-style 64-list restructuring](#cross_off_medium-eratmedium-style-64-list-restructuring)
+  - [med64: mod-210 stepping, two variants (tried, both reverted, 2026-09-26, external review, Opus 5.5)](#med64-mod-210-stepping-two-variants-tried-both-reverted-2026-09-26-external-review-opus-55)
 - [wheel.hpp](#wheelhpp)
   - [Wheel size: mod 6 vs. mod 30 vs. mod 210 (historical, pre-tiered-marking architecture)](#wheel-size-mod-6-vs-mod-30-vs-mod-210-historical-pre-tiered-marking-architecture)
 - [wheel210_big.hpp](#wheel210_bighpp)
@@ -314,6 +315,97 @@ fundamentally different fix for the footprint-vs-instruction trade (e.g. shrinki
 has now failed this same trend check three times in this codebase (see also the
 sparse-tier attempt 3 below, and the `sparse_limit/4` cutoff experiment in
 `main.cpp` below).
+
+### med64: mod-210 stepping, two variants (tried, both reverted, 2026-09-26, external review, Opus 5.5)
+
+A per-tier profile (VM, emulating the server's cache, 6e10 window at N=1e14 --
+external review, Opus 5.5) found small+med64 together at 44% of cycles, and
+noted both still step on the mod-30 wheel (8 multiplier phases) while medium
+and sparse already skip the ~1/7 of hits that are redundant multiples of 7
+(already covered by presieve) via mod-210 stepping (48 phases). Applying the
+same trick to small+med64 was estimated at a 6% ceiling, "realistic 2-3% net"
+-- flagged up front as the one place this project could beat primesieve
+outright, not just match it, since primesieve's own EratSmall/EratMedium are
+also mod-30. med64 was picked as the first target (bounded population, no
+hardware-dependent memory-bound tier to fight, per the same review).
+
+The proposed difficulty: one 48-hit mod-210 cycle spans 7p bytes (derived
+below), vs. one 8-hit mod-30 cycle's p bytes -- the review's suggested fix for
+the resulting larger per-call offset-table setup was "5 precomputed registers
+(qp*2, qp*4, qp*6, qp*8, qp*10) plus a per-phase constant", since the gaps
+between consecutive mod-210-coprime residues take only those 5 values (the
+Jacobsthal function of 210 is 10) -- verified directly (Python, brute-force
+over all 48 gaps): {2,4,6,8,10}, counts {15,15,14,2,2}, summing to 210.
+
+**Math** (verified by direct simulation before writing any C++, 5000+
+randomized cases plus 500 multi-segment fuzz sequences against a from-scratch
+reference, `perf stat cycles:u` and `make test` both green at every step
+below): generalizing `cross_off`'s mod-30 derivation, for p = 30qp+R[pr] and
+multiplier m coprime to 210, byte(m) = qp*m + floor(R[pr]*m/30); one full
+210-residue period advances the byte position by exactly 7p (not p) --
+qp*210 + R[pr]*7 = 7*(30qp+R[pr]), since 210 is an exact multiple of 30 so the
+correction term carries no fractional remainder. `o[w] = qp*(M210[w]-1) +
+C210(pr,w)` is the direct mod-210 analogue of `cross_off`'s `o[j]`, needed as
+a full 48-entry array (not a running scalar) to keep the steady-state loop's
+stores independent-address (`s[b+o[w]]`, no dependency chain), exactly like
+`cross_off`'s own `o[0..7]`.
+
+**Variant 1 (`cross_off210`): 47 independent multiplications.** Each `o[w]`
+computed directly (`qp * (M210[w]-1) + C210(pr,w)`, all compile-time except
+`qp`) -- 47 independent multiply-adds per prime per segment call, vs. the
+mod-30 tier's 7. Measured (dev PC, i5-11400F, `perf stat cycles:u`, single
+clean run each, natural auto `-s`, `ERATOSTENES_MED64_MOD210=1`):
+
+| N | baseline cycles:u | variant 1 cycles:u | delta | instructions:u delta | cache-misses:u delta |
+|---|---:|---:|---:|---:|---:|
+| 1e12 | 1.3498T | 1.4770T | **+9.4%** | +24.1% | +43.6% |
+| 1e13 | 18.189T | 19.744T | **+8.6%** | +15.2% | +19.6% |
+
+A real, consistent regression at both N (no sign flip) -- despite skipping
+~1/7 of this tier's hits, cycles:u went UP, not down. Root cause: med64
+primes get few hits per segment call (that's this tier's whole classification
+criterion), so the 47-multiplication setup cost is paid on almost every call
+without being amortized over enough hits to recoup it -- exactly the
+difficulty the review itself flagged, just confirmed with a number instead of
+an estimate.
+
+**Variant 2 (`cross_off210b`): the review's own proposed fix -- 5 precomputed
+qp-registers, cumulative offsets.** `o[w] = o[w-1] + step[gap(w)] + corr(pr,w)`
+using one of 5 precomputed `qp*{2,4,6,8,10}` registers (matching the gap set
+above) instead of computing each `o[w]` independently. Measured worse, not
+better, than variant 1:
+
+| N | baseline cycles:u | variant 2 cycles:u | delta | instructions:u delta | cache-misses:u delta |
+|---|---:|---:|---:|---:|---:|
+| 1e12 | 1.3455T | 1.5774T | **+17.2%** | +37.5% | +63.4% |
+
+(N=1e13 not run for variant 2 -- already clearly worse than variant 1 at
+1e12 by a wide margin, and variant 1 itself didn't flip sign at 1e13, so a
+third ~7-minute run was judged low-value; see presieve.hpp's own precedent
+for skipping a confirmation run once the direction is unambiguous.)
+
+Root cause: computing `o[w]` cumulatively trades 47 independent multiplications
+for 5 multiplications plus 47 *serially dependent* additions (`o[w]` reads
+`o[w-1]`) -- MORE total arithmetic ops than variant 1 (52 vs. 47), and a real
+dependency chain besides. Variant 1's independent multiplies, despite higher
+per-op latency, let the CPU's out-of-order engine overlap them; variant 2's
+cheaper-per-op but serially-chained adds can't overlap at all. This is the
+same lesson `wheel210_big.hpp`'s own "chained-index vs. flat arrays" entry
+already found in a different shape (a load-to-use chain beats fewer
+instructions) -- here confirmed again for a pure-register dependency chain,
+not a memory load.
+
+**Verdict: both reverted, code removed** (not kept behind a flag -- this
+tier's mod-210 stepping is a genuine dead end at the N this project targets,
+not a pending tune). If revisited, the setup-cost-vs-few-hits mismatch is
+structural to med64 specifically (by definition, its primes have few hits per
+segment): a fix would need to amortize the offset table across *multiple
+segments*, not just multiple hits within one, which is a materially different
+design, not a variant of this one. The small tier (this idea's other
+proposed target, not yet attempted) has the opposite population shape (many
+hits per prime per sub-block), so this negative result does NOT by itself
+rule out mod-210 stepping there -- that would need its own measurement, not
+an extrapolation from med64's failure.
 
 ## wheel.hpp
 
