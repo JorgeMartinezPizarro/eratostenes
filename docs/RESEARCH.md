@@ -13,6 +13,50 @@ Unless noted otherwise, measurements are from the project's dev PC (i5-11400F, 6
 lesson on why cycles:u is trusted over wall-clock on contended machines, referenced
 throughout below).
 
+## Index
+
+- [erat_small.hpp](#erat_smallhpp)
+  - [`cross_off`: narrowing locals to uint32_t (tried, reverted, 2026-09-25)](#cross_off-narrowing-locals-to-uint32_t-tried-reverted-2026-09-25)
+  - [`cross_off_medium`: mod-210 multiplier stepping (2026-09-24)](#cross_off_medium-mod-210-multiplier-stepping-2026-09-24)
+  - [`cross_off_medium`: mod-2310 stepping, considered, not implemented (2026-09-25, external review, Opus 5.5)](#cross_off_medium-mod-2310-stepping-considered-not-implemented-2026-09-25-external-review-opus-55)
+  - [`cross_off_medium`: 4-way interleaved stepping (tried, reverted)](#cross_off_medium-4-way-interleaved-stepping-tried-reverted)
+  - [`cross_off_medium`: class-specialized layout (kept, 2026-09-24)](#cross_off_medium-class-specialized-layout-kept-2026-09-24)
+  - [`cross_off_medium`: 2-ahead software prefetch (tried, reverted, 2026-09-25, follow-up session)](#cross_off_medium-2-ahead-software-prefetch-tried-reverted-2026-09-25-follow-up-session)
+  - [`cross_off_medium`: EratMedium-style 64-list restructuring](#cross_off_medium-eratmedium-style-64-list-restructuring)
+- [wheel.hpp](#wheelhpp)
+  - [Wheel size: mod 6 vs. mod 30 vs. mod 210 (historical, pre-tiered-marking architecture)](#wheel-size-mod-6-vs-mod-30-vs-mod-210-historical-pre-tiered-marking-architecture)
+- [wheel210_big.hpp](#wheel210_bighpp)
+  - [`GAP_K210`/`ONFLY_CORRECTION210` table shape: chained-index vs. flat arrays](#gap_k210onfly_correction210-table-shape-chained-index-vs-flat-arrays)
+- [segment_sieve.hpp](#segment_sievehpp)
+  - [Medium tier: 64-list restructuring, retry with a block-pool allocator (2026-09-24, idea 2 from an external review, Opus 5.5, second round)](#medium-tier-64-list-restructuring-retry-with-a-block-pool-allocator-2026-09-24-idea-2-from-an-external-review-opus-55-second-round)
+  - [Medium tier: 64-list restructuring scoped to a bounded sub-band (`med64_primes`, KEPT, 2026-09-26)](#medium-tier-64-list-restructuring-scoped-to-a-bounded-sub-band-med64_primes-kept-2026-09-26)
+  - [`small_limit` re-tuned jointly with `med64_limit` (KEPT, 2026-09-26)](#small_limit-re-tuned-jointly-with-med64_limit-kept-2026-09-26)
+  - [dTLB pressure at large N: investigated, ruled out (2026-09-25, external review, Opus 5.5)](#dtlb-pressure-at-large-n-investigated-ruled-out-2026-09-25-external-review-opus-55)
+  - [Sparse tier: EratBig-style rewrite (adopted, 2026-09-24, isolated test of point 1 from an external review, Opus 5.5)](#sparse-tier-eratbig-style-rewrite-adopted-2026-09-24-isolated-test-of-point-1-from-an-external-review-opus-55)
+  - [Sparse tier (original design, before the EratBig rewrite above): stepping-math attempts 1-5](#sparse-tier-original-design-before-the-eratbig-rewrite-above-stepping-math-attempts-1-5)
+  - [Sparse tier: `process_big`/`process_sparse_bucket` split into its own noinline function](#sparse-tier-process_bigprocess_sparse_bucket-split-into-its-own-noinline-function)
+  - [Sparse tier design, current: fixed-size pooled blocks (attempt 6)](#sparse-tier-design-current-fixed-size-pooled-blocks-attempt-6)
+  - [`SPARSE_BLOCK_ENTRIES` tuning: 1024 vs. 128](#sparse_block_entries-tuning-1024-vs-128)
+  - [Sparse tier attempts 7-10 (all tried, reverted)](#sparse-tier-attempts-7-10-all-tried-reverted)
+- [sqlite_prime_store.hpp](#sqlite_prime_storehpp)
+  - [`PRAGMA cache_size` increase (tried, reverted, 2026-09-25)](#pragma-cache_size-increase-tried-reverted-2026-09-25)
+  - [`blocks`/`block_data` table split (kept)](#blocksblock_data-table-split-kept)
+  - [Page size (kept)](#page-size-kept)
+- [main.cpp](#maincpp)
+  - [`SUB_BLOCK_BYTES`: per-thread vs. machine-wide sizing (kept, uniform-with-margin wins)](#sub_block_bytes-per-thread-vs-machine-wide-sizing-kept-uniform-with-margin-wins)
+  - [`run_parallel_chunks`: chunk-granularity idle-time investigation (2026-09-25, external review, Opus 5.5)](#run_parallel_chunks-chunk-granularity-idle-time-investigation-2026-09-25-external-review-opus-55)
+  - [`small_limit` cutoff tuning](#small_limit-cutoff-tuning)
+  - [Cache-topology sizing: per-CPU-minimum step (kept)](#cache-topology-sizing-per-cpu-minimum-step-kept)
+  - [EratBig-style sparse tier: forcing a power-of-2 segment width, and `sparse_limit = seg_k_width/4` (all attempts reverted)](#eratbig-style-sparse-tier-forcing-a-power-of-2-segment-width-and-sparse_limit--seg_k_width4-all-attempts-reverted)
+- [arg_parser.hpp](#arg_parserhpp)
+  - [Auto segment width: dropping the `isqrt(limit)` cap (kept)](#auto-segment-width-dropping-the-isqrtlimit-cap-kept)
+  - [`seg_k_width_from_l2_bytes`'s extra /2 margin, applied on top of an already-per-thread L2 share (kept, counterintuitive)](#seg_k_width_from_l2_bytess-extra-2-margin-applied-on-top-of-an-already-per-thread-l2-share-kept-counterintuitive)
+- [presieve.hpp](#presievehpp)
+  - [Extending pre-sieve coverage past prime 163 (tried three ways, all reverted)](#extending-pre-sieve-coverage-past-prime-163-tried-three-ways-all-reverted)
+- [Makefile](#makefile)
+  - [PGO training set: a natural 1e13 pass (tried, reverted, 2026-09-25, follow-up session)](#pgo-training-set-a-natural-1e13-pass-tried-reverted-2026-09-25-follow-up-session)
+  - [PGO overall: measured on the dev PC, not adopted on the production server](#pgo-overall-measured-on-the-dev-pc-not-adopted-on-the-production-server)
+
 ## erat_small.hpp
 
 ### `cross_off`: narrowing locals to uint32_t (tried, reverted, 2026-09-25)
@@ -270,6 +314,35 @@ fundamentally different fix for the footprint-vs-instruction trade (e.g. shrinki
 has now failed this same trend check three times in this codebase (see also the
 sparse-tier attempt 3 below, and the `sparse_limit/4` cutoff experiment in
 `main.cpp` below).
+
+## wheel.hpp
+
+### Wheel size: mod 6 vs. mod 30 vs. mod 210 (historical, pre-tiered-marking architecture)
+
+An early version of this project (before the segmented small/medium/sparse tier
+split described in [ALGORITHM.md](ALGORITHM.md) existed -- back when marking used
+a single per-prime jump table regardless of hit frequency) compared `WHEEL_PRIMES`
+configs directly, rebuilding between runs (i5-11400F, `--count-only`):
+
+| N | mod 6 | mod 30 | mod 210 | winner |
+|---|---:|---:|---:|---|
+| 10^10 | 1.00s | 1.01s | 1.01s | tie |
+| 10^11 | 10.51s | 8.01s | **7.02s** | mod 210 |
+| 10^12 | 123.58s | **89.54s** | 142.60s | mod 30 |
+
+Mod 210 won at 10^11 but lost badly at 10^12 once its jump table (`phi(210)=48`
+entries/prime) outgrew L3; mod 30 was the more consistent winner across the
+range this project actually targets, so it's what shipped (`wheel.hpp`).
+
+**These specific numbers are historical and pre-date the current architecture
+by a wide margin** -- they were measured before the presieve (§3), the
+small/med64/medium/sparse tier split (§6), and the EratBig-style sparse
+rewrite all existed; today's mod-30 count-only time at N=1e12 on comparable
+hardware is roughly 3-4x faster than the 89.54s above (see the current
+[README benchmarks](../README.md#benchmarks)). They're kept here only as the
+record of *why* mod 30 was picked over a bigger wheel, not as a current
+performance reference -- re-running this comparison on the current codebase
+would need its own fresh measurement, not a diff against these numbers.
 
 ## wheel210_big.hpp
 

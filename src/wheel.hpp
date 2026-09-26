@@ -11,8 +11,12 @@
 // faster than the benefit: adding prime p multiplies the table by (p-1)
 // but only cuts marking work by (p-1)/p. Past a certain size that table
 // stops fitting the CPU's L3 cache and the sieve becomes
-// memory-bandwidth-bound rather than compute-bound. See README.md#benchmarks
-// for measured table sizes and timings across wheels and N.
+// memory-bandwidth-bound rather than compute-bound. See docs/RESEARCH.md
+// (this file's own section) for the mod-6/30/210 table-size and timing
+// comparison behind that call -- from an early version of the codebase,
+// before the tiered small/medium/sparse marking this project uses today,
+// so treat the specific numbers as historical, not a claim about current
+// performance.
 //
 //   Some configs to try (uncomment one, comment the rest, then `make`):
 //
@@ -28,7 +32,7 @@
 // layout (one byte = 30 numbers) for its compile-time bit masks and
 // static_asserts WHEEL_MOD == 30; the other configs below no longer build
 // without deriving an equivalent for them. mod 30 was already the measured
-// best (README#benchmarks).
+// best (see docs/RESEARCH.md).
 
 #include <cstdint>
 #include <array>

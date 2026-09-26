@@ -29,8 +29,8 @@
 //     entry phase)) was tried twice, in two different implementations,
 //     and reverted both times -- see docs/RESEARCH.md.
 //
-//     EXPERIMENT (med64_primes, process_med64): a THIRD variant of that
-//     same 64-list idea, scoped to only the sub-band of medium primes
+//     med64_primes/process_med64 (KEPT, 2026-09-26): a THIRD variant of
+//     that same 64-list idea, scoped to only the sub-band of medium primes
 //     closest to small_limit ([small_limit, med64_limit), main.cpp) --
 //     the two prior attempts applied it to the whole medium tier, whose
 //     population keeps growing with N past small_limit's own saturation
@@ -468,7 +468,7 @@ private:
         }
     }
 
-    // med64 tier (EXPERIMENT -- see docs/RESEARCH.md): PR a compile-time
+    // med64 tier (kept default, see docs/RESEARCH.md): PR a compile-time
     // template parameter like cross_off_class<PR>/cross_off_medium<PR>
     // above, looping over that class's own 8 entry-phase lists
     // (m64_cur_[PR*8+j]) so every cross_off<PR> call within one inner loop
@@ -647,7 +647,7 @@ private:
     std::vector<erat::DenseState> small_[8]; // one list per residue class p % 30
     std::vector<erat::DenseState> medium_[8]; // one list per residue class p % 30
 
-    // med64 tier (EXPERIMENT, see docs/RESEARCH.md): double-buffered, one
+    // med64 tier (kept default, see docs/RESEARCH.md): double-buffered, one
     // pair of (class, entry phase) lists swapped every segment instead of
     // migrating entries in place -- see process_med64's own comment.
     // med64_reserved_ survives begin_chunk() on purpose: a vector's

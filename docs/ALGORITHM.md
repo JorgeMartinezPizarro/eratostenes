@@ -77,14 +77,18 @@ same array -- this is the classic segmented-sieve idea, and it's the reason base
 primes only need O(1) state each between segments (§6) instead of O(range).
 
 Above that, the whole range is split into many more **chunks** than there are
-threads (16 per thread), pulled from a shared queue rather than assigned one
-fixed chunk per thread. This matters because chunks are not equal work: a chunk
-near the start of the range has far fewer *active* base primes per segment (most
-base primes haven't reached their first multiple yet) than a chunk near the end.
-Static one-chunk-per-thread assignment would leave early-finishing threads idle
-while the last one grinds through the most expensive part of the range; dynamic,
-fine-grained chunk stealing keeps every thread busy until the work genuinely runs
-out. See `run_parallel_chunks` in `main.cpp`.
+threads (`CHUNKS_PER_THREAD = 150`, `main.cpp`), pulled from a shared queue
+rather than assigned one fixed chunk per thread. This matters because chunks are
+not equal work: a chunk near the start of the range has far fewer *active* base
+primes per segment (most base primes haven't reached their first multiple yet)
+than a chunk near the end. Static one-chunk-per-thread assignment would leave
+early-finishing threads idle while the last one grinds through the most
+expensive part of the range; dynamic, fine-grained chunk stealing keeps every
+thread busy until the work genuinely runs out. 150 (not the more obvious-looking
+16) came out of an idle-time investigation on real target hardware -- see
+`main.cpp`'s own comment on `CHUNKS_PER_THREAD` and
+[RESEARCH.md](RESEARCH.md#run_parallel_chunks-chunk-granularity-idle-time-investigation-2026-09-25-external-review-opus-55)
+for the measurements behind it. See `run_parallel_chunks` in `main.cpp`.
 
 Text output needs two passes over this same structure (count bytes, then write) so
 that `pwrite()` can have every thread's exact, disjoint file offset known before any
@@ -102,26 +106,42 @@ into each sorted prime list it has already "activated," so across a whole chunk'
 worth of segments, every prime is examined for activation exactly once, not once per
 segment.
 
-## 6. Three-tier marking within a segment (`segment_sieve.hpp`, `erat_small.hpp`)
+## 6. Four-tier marking within a segment (`segment_sieve.hpp`, `erat_small.hpp`)
 
 Once a base prime is active, how expensive it is to mark depends entirely on how
 often it hits within one segment -- a prime much smaller than the segment hits it
 dozens of times; a prime close to the segment's own width hits it once, if at all.
-One marking strategy can't be good at both ends, so base primes are split into three
+One marking strategy can't be good at both ends, so base primes are split into
 tiers by expected hit count (mirroring primesieve's own EratSmall/EratMedium/
-EratBig split):
+EratBig split, with one extra tier -- med64 -- of this project's own):
 
-- **Small** (`p < L1d/2` bytes, roughly the smallest 80%+ of all marks): crossed off
-  one L1-sized sub-block of the segment at a time, so the marks land in L1 instead
-  of sweeping the whole (L2-sized) segment. This tier uses an **unrolled**,
-  byte-addressed loop (`erat_small.hpp`) whose per-hit bit masks and byte offsets
-  are *compile-time constants* -- a direct consequence of the mod-30 wheel meaning
-  one byte is exactly 30 numbers (§2): a prime's residue class mod 30 fully
-  determines which of the 8 bit positions in a byte it can ever hit and by how much
-  the byte index advances each 8-hit cycle, so none of that needs computing at
-  runtime. One list per residue class keeps that dispatch a compile-time template
-  parameter rather than a per-prime branch.
-- **Medium** (up to the segment width, a few hits per segment): a plain
+- **Small** (`p < small_limit` bytes, roughly the smallest 80%+ of all marks):
+  crossed off one L1-sized sub-block of the segment at a time, so the marks land in
+  L1 instead of sweeping the whole (L2-sized) segment. This tier uses an
+  **unrolled**, byte-addressed loop (`erat_small.hpp`) whose per-hit bit masks and
+  byte offsets are *compile-time constants* -- a direct consequence of the mod-30
+  wheel meaning one byte is exactly 30 numbers (§2): a prime's residue class mod 30
+  fully determines which of the 8 bit positions in a byte it can ever hit and by
+  how much the byte index advances each 8-hit cycle, so none of that needs
+  computing at runtime. One list per residue class keeps that dispatch a
+  compile-time template parameter rather than a per-prime branch.
+- **med64** (`small_limit <= p < med64_limit`, a bounded sub-band of the medium
+  tier closest to `small_limit`): reuses the small tier's own byte-marking
+  (`erat_small.hpp::cross_off<PR>`), but grouped into 64 lists keyed by (residue
+  class, entry phase) instead of one list per class, so every prime processed
+  together in one inner loop also shares its entry phase -- the entry-side
+  dispatch that's an unpredictable per-prime branch for the plain medium tier
+  becomes a well-predicted, always-the-same-outcome branch here. Applying this
+  64-list idea to the *whole* medium tier was tried twice and reverted both
+  times: the win at N=1e12 flipped into a regression at N=1e13, because the
+  medium tier's population keeps growing with N (until `sqrt(N)` passes the
+  segment width) and the extra cache footprint of 64 lists eventually outgrows
+  the instructions it saves. Scoping the same idea to a band that saturates at a
+  much smaller N -- and stays fixed in population past that -- avoids the
+  mechanism that sank the full-tier version. See
+  [RESEARCH.md](RESEARCH.md#segment_sievehpp) for the numbers behind both the
+  reverted full-tier attempts and this bounded version.
+- **Medium** (`med64_limit <= p <` segment width, a few hits per segment): a plain
   one-hit-per-iteration loop using `ONFLY_CORRECTION` (§2) to step to the next hit.
   The small tier's unrolled loop was measured *slower* here -- with only a few hits
   to amortize its entry/exit cost over, the unpredictable jump in and out of the
@@ -141,11 +161,17 @@ EratBig split):
   blocks per ring slot, primesieve's own EratBig
   design) won.
 
-The boundary between small and medium is itself tuned, not guessed: it's set so a
-prime counts as "small" once it has roughly 16+ hits per L1 sub-block, the point
-past which the unrolled loop's fixed entry/exit cost is reliably amortized on the
-hardware this was measured on (see `main.cpp`'s comment where `small_limit` is
-computed).
+Both `small_limit` and `med64_limit` are tuned, not guessed, and -- since
+`med64_limit`'s own lower bound *is* `small_limit` -- jointly rather than
+independently: `small_limit` defaults to `L1d/4` and `med64_limit` to
+`seg_k_width/12`, the pair that measured best (on every metric, not a trade-off)
+across a joint grid sweep confirmed at both N=1e12 and N=1e13. Both are
+overridable via `ERATOSTENES_SMALL_NUM`/`_DEN` and
+`ERATOSTENES_MED64_NUM`/`_DEN` (`main.cpp`) for further sweeps without
+recompiling; `ERATOSTENES_MED64_NUM=0` disables the med64 tier entirely,
+reproducing the pre-med64 three-tier baseline exactly. See `main.cpp`'s own
+comments where these are computed, and [RESEARCH.md](RESEARCH.md) for the full
+sweep.
 
 ## 7. Cache auto-tuning (`arg_parser.hpp`)
 
