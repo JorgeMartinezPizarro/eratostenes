@@ -462,11 +462,29 @@ each prime's own phase alignment, and a smaller, better-sized med64 population
 means less of that residual cost paid in aggregate. **Kept: `small_limit`
 default moved to `L1d/4`, `med64_limit` default moved to `seg_k_width/12`.**
 
-Not swept further: whether an even smaller `small_limit` (e.g. `/6`-`/8`, which
-looked competitive at N=1e12 with a correspondingly smaller med64 fraction) holds
-up at N=1e13 too -- the grid above is N=1e12-only except for the two confirmed
-points. If this default is revisited again, extend the grid to N=1e13 directly
-rather than assuming the N=1e12 landscape transfers.
+**Follow-up, done (2026-09-26): extended directly to N=1e13.** The N=1e12
+landscape's "smaller `small_limit` wants a smaller med64 fraction, and keeps
+improving" trend does NOT hold at N=1e13 -- single-rep cycles:u across the region
+that looked most promising at 1e12:
+
+| config | cycles:u (N=1e13) | vs `1/4,1/12` |
+|---|---:|---:|
+| `1/3, 1/10` | 18.205T | +0.25% |
+| **`1/4, 1/12` (kept default)** | **18.160T** | -- |
+| `1/5, 1/16` | 18.405T | +1.35% |
+| `1/6, 1/16` | 18.575T | +2.29% |
+| `1/6, 1/20` | 18.429T | +1.48% |
+| `1/8, 1/24` | 18.393T | +1.28% |
+
+`1/4, 1/12` is the best of everything tried, at both N -- going smaller keeps
+helping at 1e12 right up until it doesn't at 1e13, the same shape as this
+project's own `sparse_limit = seg_k_width/4` experiment and the original med64
+fraction sweep's own 1/16 point. Confirms the kept default sits at (or very near)
+the actual optimum for the N this project targets, not just the best point found
+on an 1e12-only search. A finer local sweep exactly around `1/4` (e.g. med64 =
+1/10, 1/11, 1/13, 1/14) was not run -- the margin over the next-best point
+(`1/3,1/10`, +0.25%) is small enough that it's plausible, but this closes the
+"extend to 1e13" question specifically.
 
 ### dTLB pressure at large N: investigated, ruled out (2026-09-25, external review, Opus 5.5)
 
