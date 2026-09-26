@@ -5,7 +5,10 @@ primes → wheel numbering → parallel chunking → per-segment tiered marking 
 Each section explains what the code does and why, at a level meant to make the
 design decisions legible without duplicating the exact formulas and derivations --
 those live as comments next to the code they justify (linked from each section
-below), since that's where they need to stay correct.
+below), since that's where they need to stay correct. The measured numbers behind
+every tried-and-reverted optimization attempt live separately, in
+[RESEARCH.md](RESEARCH.md), so the code comments stay focused on the design as it
+stands today.
 
 ## 1. Base primes (`base_sieve.hpp`)
 
@@ -125,17 +128,17 @@ EratBig split):
   unrolled cycle costs more than the unrolling saves. A later attempt to
   hand-interleave four medium primes' independent stepping chains (hoping to hide
   one prime's branch-misprediction latency behind the others' ready work) was tried
-  and measured as a clear regression too -- see the comment on `cross_off_medium`
-  for the numbers and why it didn't pay off.
+  and measured as a clear regression too -- see [RESEARCH.md](RESEARCH.md) for the
+  numbers and why it didn't pay off.
 - **Sparse** (at least the segment width, at most ~1 hit per segment): the only tier
   where a *bucket* actually earns its keep -- most segments have nothing to do for
   most of these primes, so each one is scheduled into whichever future segment its
   next hit actually falls in (a fixed-size ring of pooled block queues), and a given
   segment's processing only ever touches the few sparse primes genuinely due that
-  segment. `segment_sieve.hpp`'s own comment on `process_sparse_bucket` has the
-  history of several prior internal designs for this tier (an idx-indexed intrusive
-  list, an AoS relayout, a couple of division-free stepping variants) and why the
-  current one (fixed-size pooled blocks per ring slot, primesieve's own EratBig
+  segment. [RESEARCH.md](RESEARCH.md) has the history of several prior internal
+  designs for this tier (an idx-indexed intrusive list, an AoS relayout, a couple of
+  division-free stepping variants) and why the current one (fixed-size pooled
+  blocks per ring slot, primesieve's own EratBig
   design) won.
 
 The boundary between small and medium is itself tuned, not guessed: it's set so a

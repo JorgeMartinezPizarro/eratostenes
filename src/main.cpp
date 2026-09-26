@@ -118,13 +118,8 @@ const uint64_t SMALL_PRIMES_COUNT = WHEEL_PRIMES.size();
 // set once in main() from the detected L1d size -- see that assignment's
 // own comment for how a hybrid P-core/E-core CPU is handled: one
 // conservative machine-wide value (the smallest domain detected), not a
-// per-thread one. An earlier version sized each thread individually for
-// wherever it happened to be running (sched_getcpu() + a per-CPU table);
-// measured SLOWER on the actual target hardware (i5-13500, 2026-09,
-// ~28-30s vs ~26-27s at N=1e12) than this simpler "smallest domain, same
-// for everyone" version, even though the per-thread version was the
-// mathematically "fairer" one -- see git history (both the per-thread
-// version and the arithmetic bug it briefly had) for the full story.
+// per-thread one (a per-thread version was tried and measured slower --
+// see docs/RESEARCH.md).
 static uint64_t SUB_BLOCK_BYTES = 32 * 1024;
 
 struct ChunkRange {
@@ -327,86 +322,13 @@ struct ProgressGuard {
 // a thread that finishes an early, cheap chunk immediately pick up the
 // next available one instead of sitting idle.
 //
-// Investigated (2026-09-25, external review, Opus 5.5): hypothesis that
-// CHUNKS_PER_THREAD=16 is too coarse at large N -- a fixed chunk count
-// means each chunk gets proportionally WIDER as N grows (1e13: ~20s/chunk
-// on the server; 1e14 projected ~250s/chunk), and since split_ranges
-// carves chunks in original k-order, the LAST chunks (widest population,
-// per the comment above) could still leave most threads idle at the end
-// even with this shared-counter queue -- worse on the server's i5-13500
-// specifically if a straggler chunk lands on a slower E-core. Proposed
-// this file's ERATOSTENES_DEBUG_IDLE diagnostic as the cheap first step
-// before trying any fix, given the review's own honest caveat that
-// N=1e12 already sits at ratio 1.01 with the identical scheme.
-// Measured on the dev PC (i5-11400F, 12 symmetric P-cores, no E-cores):
-// idle=1.4% at N=1e12, idle=0.9% at N=1e13 -- LOWER at the larger N, not
-// higher, directly contradicting the "idle grows with N" half of the
-// hypothesis, and far too small either way to explain this machine's own
-// ~13% ratio gap at 1e13 (see README#benchmarks). The queue above is
-// already doing its job here. Caveat: this refutes the mechanism on
-// symmetric cores specifically -- the review's own strongest argument
-// (a straggler chunk landing on a slow E-core) has no equivalent on this
-// dev PC to test, since it has none. Re-run the same check on the
-// server -- which only has Docker, no compiler of its own, so this has
-// to go through the image (see Makefile's own run/run-pgo targets and
-// their -e ERATOSTENES_DEBUG_IDLE forwarding, and docker/Dockerfile for
-// the images themselves): `ERATOSTENES_DEBUG_IDLE=1 make run-pgo
-// ARGS="1e13 -t 20"` (or plain `run` for the non-PGO image).
-//
-// Done (2026-09-25, production server, i5-13500, 20 threads, real P/E
-// cores this time): idle=2.1% at N=1e12, idle=2.1% at N=1e13 -- flat
-// across N, same as the dev PC, and still nowhere near large enough to
-// explain this machine's own ~12% ratio gap at 1e13 (see
-// README#benchmarks). This closes the straggler-on-an-E-core mechanism
-// too, on the one machine that could actually exercise it: the queue
-// keeps every thread fed regardless of which core class picks up the
-// tail chunks. VERDICT: as an explanation for the ~12% ratio gap,
-// REJECTED on real target hardware, not just the dev PC -- 2.1% idle
-// can't be most of a 12-point gap. Chunk granularity/scheduling is not
-// worth re-investigating for THAT reason.
-//
-// Follow-up (2026-09-25, same review): a constant (not N-growing) ~2%
-// idle at BOTH N is still consistent with a simpler, smaller effect --
-// roughly half a chunk's worth of tail latency, independent of the ratio
-// gap entirely. Recovering it is cheap (CHUNKS_PER_THREAD 16->150 tried,
-// ~10 lines, doesn't touch any tier's hot path) even if it doesn't
-// explain the gap. Dev PC (i5-11400F) numbers looked promising at first
-// (idle 1.4%->0.2% at 1e12, 0.9%->0.2% at 1e13) but turned out unusable:
-// a same-config re-run drifted from 499.98s to 419.95s between two
-// points in the same session (16% apart, far past normal noise) after
-// hours of continuous heavy jobs on this machine -- almost certainly
-// residual contention (see this project's own "never run two
-// thread-heavy jobs at once on the dev PC" lesson, git history), not a
-// real effect; cycles:u under that same contention even flipped sign
-// once (+0.84% for 150 vs 16).
-//
-// Re-measured on the server (2026-09-25, i5-13500, 20 threads): idle DID
-// drop the same way (2.1%->0.2% at both N), and the first single-rep
-// wall-clock comparison looked like a wash (1e12 24.22s->24.81s, WORSE;
-// 1e13 330.54s->327.50s, better) -- but that turned out to be measuring
-// the wrong thing. `REPS=5 make docker-benchmark` (which rebuilds and
-// runs 1e10, then 5x1e11, then 5x1e12 back to back) showed 1e11 climbing
-// 1.65s->1.75s->2.04s->2.04s->2.04s and 1e12 drifting 25.49->25.58s
-// across its own 5 reps, SAME build, nothing else changed -- a
-// same-direction, reproducible slowdown under sustained load, not random
-// noise (thermal throttling or, if this is a burstable cloud instance,
-// exhausted CPU credit -- never confirmed which, but the shape matches
-// either). That contaminated every earlier server number in this
-// writeup, not just the k=150 ones: they were all taken after this
-// session's own hours of back-to-back heavy jobs. Once measured
-// cold/isolated instead (`make run`, nothing queued before or after,
-// repeated on different occasions): 1e12 consistently 23.91-23.92s,
-// 1e13 325.93s -- both BETTER than this project's own README figures for
-// this machine (24.51s, 330.38s) and never once worse across every clean
-// reading taken. KEPT at 150: idle drops from 2.1% to 0.2% (real,
-// reproduced every time it was checked) and the cold-measured wall-clock
-// never regressed, only improved slightly -- the earlier "REVERTED"
-// verdict above was itself a measurement artifact of the same
-// accumulated-load effect this paragraph just described, not a real
-// finding about CHUNKS_PER_THREAD. If revisiting this again, measure
-// cold (`make run`, isolated, no prior load that session) -- the
-// benchmark script's own REPS loop is NOT safe for this machine as
-// currently written, since later reps run hot.
+// CHUNKS_PER_THREAD=150 (not the more obvious-looking 16) was reached via
+// an idle-time investigation (ERATOSTENES_DEBUG_IDLE below) that measured
+// idle time too small to explain this project's ratio gap against
+// primesieve, but still found a real, if small, tail-latency win from a
+// bigger chunk count -- and a wall-clock measurement trap along the way
+// (sustained-load server drift masquerading as a regression). See
+// docs/RESEARCH.md for the full investigation.
 template <typename Fn>
 static void run_parallel_chunks(unsigned workers, unsigned num_chunks, Fn&& fn) {
     std::atomic<unsigned> next_chunk{0};
@@ -415,10 +337,9 @@ static void run_parallel_chunks(unsigned workers, unsigned num_chunks, Fn&& fn) 
     pool.reserve(workers);
     // ERATOSTENES_DEBUG_IDLE=1: per-thread finish timestamp, to measure
     // whether the shared-counter queue above actually keeps every thread
-    // busy or whether a handful of expensive
-    // tail chunks still leave most threads idle at the end -- see the
-    // 2026-09-25 finding this produced, in the comment on the loop right
-    // above (num_chunks > workers on purpose).
+    // busy or whether a handful of expensive tail chunks still leave most
+    // threads idle at the end -- see docs/RESEARCH.md for what this
+    // produced (CHUNKS_PER_THREAD's own tuning history, above).
     const bool debug_idle = std::getenv("ERATOSTENES_DEBUG_IDLE") != nullptr;
     auto t0 = std::chrono::steady_clock::now();
     std::vector<double> finish(debug_idle ? workers : 0);
@@ -517,25 +438,10 @@ int main(int argc, char** argv) {
     // SegmentSieve::sieve_and_emit), so the sub-block is the machine's real
     // L1 data cache (detected, like L2 for -s), and a prime counts as small
     // when it has >= ~16 hits per sub-block (p < sub-block bytes / 2; each
-    // p-byte cycle holds 8 hits). Measured on an i5-11400F (48KiB L1d),
-    // cycles:u at N=1e12 vs the old table/onfly tiers: 2414G ->
-    // 1730G (32KiB), 1693G (48KiB), 1798G (64KiB), 1935G (128KiB), 1931G
-    // (512KiB, i.e. no sub-blocking); cutoff at /4 and /1 both lost to /2
-    // at every size -- a lower cutoff leaves too many hits on the slower
-    // medium loop, a higher one pays the unrolled loop's unpredictable
-    // entry/exit on primes with too few hits to amortize it.
-    //
-    // Re-checked (2026-09-24) after the medium tier's mod-210 stepping
-    // (erat_small.hpp::cross_off_medium) made medium ~14% cheaper per hit:
-    // hypothesis was that a cheaper medium tier should pull small_limit
-    // down (fewer primes classified small, more ceded to the now-cheaper
-    // medium). Measured (i5-11400F, perf stat cycles:u, N=1e12, single run
-    // at a time): /2 (current, 1.4753T) vs /3 (1.4842T, +0.6%,
-    // instructions:u +4.3%) vs *2/3 i.e. K=1.5 (1.4920T, +1.1%, despite
-    // instructions:u -2.2%) -- both directions lost. The per-hit gap
-    // between small (~2 instructions) and medium (~8-9, even after the
-    // mod-210 cut) is still ~4x, far bigger than medium's 14% improvement,
-    // so the optimal cutoff didn't move. /2 confirmed still optimal.
+    // p-byte cycle holds 8 hits). /2 was tuned against several other
+    // candidate cutoffs (/1, /4, *2/3) at multiple sub-block sizes, and
+    // re-checked after the medium tier got cheaper per hit -- /2 won every
+    // time. See docs/RESEARCH.md for the numbers.
     uint64_t l1_bytes = opt.l1_bytes_override ? opt.l1_bytes_override : detect_l1d_cache_bytes();
     if (l1_bytes == 0) l1_bytes = 32 * 1024;
     SUB_BLOCK_BYTES = std::max<uint64_t>(8, l1_bytes / 8 * 8);
@@ -554,21 +460,14 @@ int main(int argc, char** argv) {
     // An earlier version sized each thread individually for wherever it
     // happened to be running (sched_getcpu() + a per-CPU table) instead of
     // this single conservative value -- measured SLOWER on the actual
-    // target hardware (i5-13500, 2026-09: ~28-30s vs ~26-27s at N=1e12)
-    // even though it was the mathematically "fairer" per-thread value.
-    // The uniform, smallest-wins version tracks a run where the buggy
-    // first version of the per-thread code (which -- by an unrelated
-    // arithmetic bug, since fixed -- ended up dividing every thread's
-    // share by an EXTRA 2 on top of the fair-share division) measured
-    // fastest of all (~25-26s): not because the bug's exact numbers were
-    // special, but because a smaller, safely-under-budget segment
-    // (skipped once for every thread, not per-thread-recomputed) seems to
-    // matter more on real many-thread-contended hardware than hitting
-    // each core's own "fair" cache share exactly -- see git history for
-    // the full A/B trail (dev PC and server) behind this. Skipped when
-    // the user already forced a value on purpose (-s, --l2-bytes,
-    // --l1-bytes) or detection found nothing (non-Linux, sysfs
-    // unavailable).
+    // target hardware than this simpler "smallest domain, same for
+    // everyone" version, even though the per-thread version was the
+    // mathematically "fairer" one; a smaller, safely-under-budget segment
+    // seems to matter more on real many-thread-contended hardware than
+    // hitting each core's own "fair" cache share exactly -- see
+    // docs/RESEARCH.md for the full A/B trail. Skipped when the user
+    // already forced a value on purpose (-s, --l2-bytes, --l1-bytes) or
+    // detection found nothing (non-Linux, sysfs unavailable).
     if ((!opt.segment_width_set && !opt.l2_bytes_override) || !opt.l1_bytes_override) {
         CpuCacheTopology topo = detect_cpu_cache_topology();
         // Gate on GENUINE heterogeneity (some other CPU's share is smaller
@@ -601,83 +500,22 @@ int main(int argc, char** argv) {
         }
     }
 
-    // EXPERIMENT IN PROGRESS (isolated test of point 1 from an external
-    // review, Opus 5.5, 2026-09-24, see segment_sieve.hpp's sparse-tier
-    // header comment): that tier's EratBig-style rewrite needs the segment
-    // width in BYTES to be a power of 2 for its bucket-slot math to be a
-    // shift/mask instead of a division. base_limit >= seg_k_width is a
-    // conservative check for "will any base prime actually end up sparse"
-    // (base_limit is isqrt(limit), an upper bound on the largest base
-    // prime) -- when it's false, no prime is classified sparse below and
-    // the width is left exactly as auto-tuned, same as before this
-    // experiment. small_limit/the small-vs-medium cutoff are untouched.
+    // The sparse tier's EratBig-style rewrite (segment_sieve.hpp) needs
+    // the segment width in BYTES to be a power of 2 for its bucket-slot
+    // math to be a shift/mask instead of a division. base_limit >=
+    // seg_k_width is a conservative check for "will any base prime
+    // actually end up sparse" (base_limit is isqrt(limit), an upper bound
+    // on the largest base prime) -- when it's false, no prime is
+    // classified sparse below and the width is left exactly as
+    // auto-tuned. small_limit/the small-vs-medium cutoff are untouched.
     //
-    // Attempt (first try, reverted): idea 1 from the same review's second
-    // round, 2026-09-24 -- decouple the medium/sparse cutoff from the
-    // segment width itself (sparse_limit = seg_k_width/4 instead of always
-    // p >= seg_k_width), on the theory that primesieve's own EratMedium/
-    // EratBig split (FACTOR_ERATMEDIUM=3.0 in its config.hpp) keeps a
-    // wider flat tier and pushes only the very sparsest hits (<1/segment
-    // on average) to the bucket ring, and that our medium tier's worst
-    // offenders -- per the reviewer's rdtsc-per-tier breakdown at N=1e14,
-    // 64% of cycles -- are exactly those closest to seg_k_width, paying a
-    // full DenseState touch most segments for zero hits.
-    // Measured (i5-11400F, perf stat cycles:u, single run at a time,
-    // natural auto -s): N=1e12 -- 1.4674T -> 1.4523T cycles:u (-1.0%,
-    // medianos 75773->40665, dispersos 0->35108); N=1e13 -- 19.583T ->
-    // 20.325T cycles:u (+3.8%, a real regression, medianos 152886->40665,
-    // dispersos 72036->184257 (2.6x)), cache-misses:u 15.26B -> 29.35B
-    // (+92%). The sparse tier's own bucket-ring sizing (BLK_BYTES,
-    // SPARSE_BLOCK_ENTRIES=128 in segment_sieve.hpp) was tuned for the
-    // EXISTING population, not one 2.6x bigger -- this project's own
-    // history already has one documented case of that exact tradeoff
-    // flipping sign with population size (segment_sieve.hpp's own
-    // SPARSE_BLOCK_ENTRIES 1024-vs-128 writeup). A gain at 1e12 that
-    // reverses at 1e13 is directionally the same failure mode as the
-    // reverted 64-list medium attempt (erat_small.hpp), just in a
-    // different tier -- reverted for the same reason: real at the N
-    // tested, but the wrong direction for this project's actual E14+
-    // target.
-    //
-    // Retry (2026-09-25): re-ran the exact same sparse_limit = seg_k_width/4
-    // cutoff WITHOUT re-tuning the ring first (wanted to re-confirm the
-    // baseline number on this machine before spending time on BLK_BYTES) --
-    // as expected, reproduced the same population split (medianos
-    // 152886->40665, dispersos 72036->184257) and the same-shaped
-    // regression, slightly worse this time: cycles:u 19.139T->20.713T
-    // (+8.2%), cache-misses:u 19.16B->31.09B (+62%). Reverted again.
-    // Re-tuning segment_sieve.hpp's BLK_BYTES/CHUNK_BLOCKS for this 2.6x
-    // bigger sparse population is still the untaken next step -- do that
-    // BEFORE re-measuring this cutoff again, not after.
-    //
-    // Taken (2026-09-25, follow-up session): retuned BLK_BYTES 1024->4096
-    // (128->512 entries/block, matching the ~2.6x population growth) and
-    // re-ran the same sparse_limit = seg_k_width/4 cutoff. Correctness
-    // held (pi(1e12) exact vs primecount) and it's a real, reproducible
-    // win at N=1e12 (dev PC, i5-11400F, wall-clock, no perf access this
-    // session -- see feedback on sudo/perf in project memory): ~30.8-31.0s
-    // vs a ~31.3-31.5s baseline, consistently 2 reps each. But at the
-    // *natural* N=1e13 cliff -- the actual N this change targets -- it
-    // reproduced as a regression across 3 separate runs against 2 clean
-    // baseline runs, non-overlapping ranges: experiment 437.60s/489.73s,
-    // baseline 415.33s/430.17s -- i.e. retuning the block size fixed the
-    // catastrophic +8.2%/+34% cycles:u blowup from the two attempts above,
-    // but didn't close the gap into a win; a real, still-negative effect
-    // remained. Reverted a third time (BLK_BYTES back to 1024, cutoff back
-    // to plain seg_k_width). Root cause, not further isolated (would need
-    // perf's cache-miss counters, unavailable this session): the 2.6x
-    // bigger sparse population's total memory footprint (population x
-    // sizeof(DenseState) = population x 8 bytes) doesn't shrink just
-    // because each block holds more entries -- BLK_BYTES only changes how
-    // that footprint is grouped/traversed, not its size, so it was never
-    // going to fully offset a genuinely bigger working set living in the
-    // bucket ring. This closes the "retune the ring first" angle this
-    // cutoff idea's prior two attempts left open -- three strikes now
-    // (unretuned/128 entries, unretuned/128 entries again, retuned/512
-    // entries), all regressing at 1e13 specifically. Don't re-propose
-    // sparse_limit independent of seg_k_width without a fundamentally
-    // different fix for the population's memory footprint itself, not
-    // just how it's grouped into blocks.
+    // Decoupling the medium/sparse cutoff from the segment width itself
+    // (sparse_limit = seg_k_width/4 instead of always p >= seg_k_width,
+    // matching primesieve's own wider EratMedium/EratBig split) was tried
+    // three times, including a bucket-ring retune meant to fix it, and
+    // reverted every time -- a real win at N=1e12 that turned into a
+    // regression at the natural N=1e13 cliff this project actually targets.
+    // See docs/RESEARCH.md for the numbers.
     if (base_limit >= seg_k_width) {
         uint64_t sb = seg_k_width / 8, p2 = 1;
         while (p2 * 2 <= sb) p2 *= 2;

@@ -210,12 +210,11 @@ inline CpuCacheTopology detect_cpu_cache_topology() {
 // same /2 on top of a share that's already divided by how many logical
 // CPUs share that L2 looked like double-counting the same headroom at
 // first (and briefly was fixed away as a bug) -- but measured, on the
-// actual target hardware (i5-13500, many real threads contending for
-// shared L3/memory bandwidth), the smaller resulting segment is reliably
-// faster than the "fair share, no extra margin" version, not slower --
-// see main.cpp's own comment on the per-CPU-minimum step, and git history
-// for the full A/B trail behind reversing that "fix". 0 falls back to a
-// conservative 256KiB.
+// actual target hardware (many real threads contending for shared
+// L3/memory bandwidth), the smaller resulting segment is reliably faster
+// than the "fair share, no extra margin" version, not slower -- see
+// docs/RESEARCH.md for the A/B trail behind reversing that "fix". 0 falls
+// back to a conservative 256KiB.
 inline uint64_t seg_k_width_from_l2_bytes(uint64_t l2_bytes) {
     if (l2_bytes == 0) l2_bytes = 256 * 1024;
     uint64_t l2_target_bytes = l2_bytes / 2;
@@ -436,21 +435,12 @@ inline Options parse_args(int argc, char** argv) {
         // helps it and only adds fixed per-segment cost (walking every
         // active prime's state, entering/exiting each tier's loop,
         // presieve fill) more often than necessary, for the medium and
-        // sparse tiers that DO still scale with segment count. Measured
-        // (perf stat cycles:u, i5-11400F): dropping the isqrt cap and
-        // always using the L2 budget is 12.4% faster at N=1e11, 6.0%
-        // faster at N=1e12 -- both regimes where isqrt(limit) used to be
-        // the smaller (binding) value (isqrt gave ~41KiB/~130KiB arrays
-        // there, versus the 256KiB this L2 budget allows). Past the N
-        // where isqrt(limit) alone would already exceed the L2 budget
-        // (roughly 1e13+ on this machine), this change is a no-op: the L2
-        // budget was already the smaller, binding value even with the old
-        // min(), so dropping isqrt from the comparison doesn't change the
-        // result there. That's a DIFFERENT question from how big the
-        // budget itself should be in that regime -- this project already
-        // measured removing the /2 halving (using the full L2 instead of
-        // L2/2) as a regression at N=1e13 (see this file's git history) --
-        // so the /2 stays.
+        // sparse tiers that DO still scale with segment count. Dropping
+        // the isqrt cap measured faster at every N where it used to bind,
+        // and a no-op elsewhere -- see docs/RESEARCH.md. That's a
+        // DIFFERENT question from how big the budget itself should be --
+        // removing the /2 halving below (using the full L2 instead of
+        // L2/2) was measured as a regression at N=1e13, so the /2 stays.
         uint64_t l2_bytes = opt.l2_bytes_override ? opt.l2_bytes_override : detect_l2_cache_bytes();
         if (l2_bytes == 0) l2_bytes = 256 * 1024;
         uint64_t l2_target_bytes = l2_bytes / 2;

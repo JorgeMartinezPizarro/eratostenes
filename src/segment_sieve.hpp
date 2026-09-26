@@ -21,50 +21,13 @@
 //     ONFLY_CORRECTION210: one multiply by qp=p/30, one shared-table
 //     lookup, one add -- 48 multiplier phases instead of the mod-30
 //     wheel's 8, skipping hits redundant with presieve's own coverage of
-//     7; -2.3%/-2.6% cycles:u at N=1e12/1e11, flat at 1e13 once the sparse
-//     tier starts absorbing this tier's largest primes -- see
-//     erat_small.hpp::cross_off_medium for the full numbers). The unrolled
-//     loop was measured
-//     slower here: with only a few hits per segment it can't amortize its
-//     unpredictable entry/exit (see erat_small.hpp::cross_off_medium). An
-//     EratMedium-style 64-list restructuring (byte marking like the small
-//     tier, keyed by (class, entry phase) so the entry point is a
-//     compile-time constant per list) was tried and reverted -- real win at
-//     N=1e12/1e13 tested but on a trend (cache-miss cost growing faster
-//     than the instruction savings) that argues against it holding up at
-//     this project's actual E14/E15 target range; see the full writeup on
-//     erat_small.hpp::cross_off_medium.
-//
-//     Retried (2026-09-24, idea 2 from an external review, Opus 5.5,
-//     second round): same 64-list idea, but backed by this class's own
-//     block-pool allocator (Blk, BLK_BYTES=1KiB, shared with the sparse
-//     ring below) instead of a std::vector per list, an entry re-filed
-//     into a different (pr, phase) slot every segment via cross_off<PR>'s
-//     own exit state -- structurally the sparse ring's own pattern, just
-//     keyed by (class, phase) instead of (future segment). Hypothesis was
-//     that pooled, promptly-recycled blocks would avoid the footprint
-//     growth that sank the std::vector version. It didn't: at N=1e12,
-//     instructions:u dropped 26.7% (1.9355T -> 1.4187T) but cycles:u was
-//     flat (1.4595T -> 1.4558T, -0.25%, noise) because IPC fell 1.33 ->
-//     0.97 and cache-misses:u roughly doubled (317M -> 533M); at N=1e13 a
-//     real regression (cycles:u 19.603T -> 21.238T, +8.3%, cache-misses:u
-//     16.10B -> 32.47B, +102%). The decisive test: at N=1e10, where the
-//     medium population is small enough that cache-misses:u are already
-//     near zero for BOTH versions (662K vs 290K -- med64 actually HALVES
-//     them here), instructions:u still dropped 23.8% (9.83B -> 7.49B) but
-//     cycles:u didn't move AT ALL (9.2236B -> 9.2263B, +0.03%) -- IPC fell
-//     1.07 -> 0.81 anyway. With cache-misses already negligible in both
-//     directions, this isolates the real bottleneck: NOT cache/memory
-//     footprint (the failure mode both this attempt and the original
-//     std::vector one were diagnosed against) but branch misprediction
-//     from cross_off<PR>'s own unpredictable entry/exit switch on primes
-//     with only a few hits per segment -- precisely what this tier's very
-//     first design note (just above) already said ruled out the unrolled
-//     loop here, restated with a number: it's a front-end/control-flow
-//     cost that no memory-layout change (vector or pool) can fix, because
-//     it was never a memory problem. Reverted; if ever revisited, the
-//     switch itself -- not the entries' storage -- is what would need to
-//     change.
+//     7 -- see erat_small.hpp::cross_off_medium for the full numbers).
+//     The unrolled loop was measured slower here: with only a few hits
+//     per segment it can't amortize its unpredictable entry/exit (see
+//     erat_small.hpp::cross_off_medium). An EratMedium-style 64-list
+//     restructuring (byte marking like the small tier, keyed by (class,
+//     entry phase)) was tried twice, in two different implementations,
+//     and reverted both times -- see docs/RESEARCH.md.
 //     Both flat tiers keep 8 bytes/prime of state (erat::DenseState),
 //     walked every segment in place -- there is never a segment these
 //     primes "skip", so a bucket would buy nothing.
@@ -74,130 +37,39 @@
 //     the ONFLY_CORRECTION loop for everything past that budget, both on
 //     the whole L2-sized segment: -26% at N=1e11, -30% at N=1e12.
 //
-// Investigated, ruled out (2026-09-25, external review, Opus 5.5): dTLB
-// pressure from a thread's whole working set at large N -- the 256KiB
-// segment array, ~1.2MB of medium-tier DenseState (152,886 primes * 8
-// bytes at the natural N=1e13 cliff, matches the review's own estimate)
-// walked whole every segment, plus the sparse ring's blocks scattered
-// across dozens of 4KiB pages -- all live at once per thread, and with
-// 2 threads/core sharing one STLB (true of this dev PC, i5-11400F, 6C/
-// 12T) that's plausible to blow. Measured before touching anything (perf
-// stat -e dTLB-load-misses,dTLB-loads,dTLB-store-misses,dTLB-stores):
-// N=1e12 -- 11.3M/434.4B loads (0.0026%), 3.8M/281.6B stores (0.0014%);
-// N=1e13 -- 226.9M/5,329.7B loads (0.0043%), 40.5M/3,182.3B stores
-// (0.0013%). Even generously costing every one of the ~267M total dTLB
-// misses at 1e13 at ~20-30 cycles (a full page-walk-from-cache penalty),
-// that's ~5.3-8.0B cycles against 19,274.6B total -- ~0.03-0.04%,
-// nowhere near enough to matter, let alone explain a double-digit ratio
-// gap against primesieve. Miss rate did grow ~1.6x relative from 1e12 to
-// 1e13, but off a base this small that doesn't project to anything
-// significant by 1e14 either. Not pursued further: no huge-pages
-// experiment, no madvise(MADV_HUGEPAGE) -- the measurement this review
-// itself proposed as the cheap first step already closes the question.
-//   - sparse_primes (p >= segment width, at most ~1 hit/segment): BUCKET.
+// dTLB pressure from a thread's whole working set at large N (the 256KiB
+// segment array, ~1.2MB of medium-tier DenseState at the N=1e13 cliff,
+// plus the sparse ring's blocks scattered across many 4KiB pages) was
+// investigated as a possible explanation for this project's ratio gap
+// against primesieve and ruled out -- measured dTLB miss rates are
+// ~0.003-0.004%, nowhere near enough to matter. See docs/RESEARCH.md.
 //
-//     EXPERIMENT IN PROGRESS (isolated test of point 1 from an external
-//     review, Opus 5.5, 2026-09-24): the ONFLY_CORRECTION-stepping tier
-//     documented below (attempts 1-7) has been swapped for an EratBig-style
-//     rewrite -- byte marking (not bit), a mod-210 multiplier wheel (48/210
-//     phases instead of 8/30 -- valid because any multiplier that's a
-//     multiple of 7 lands on a composite 7 itself already crosses off in
-//     its own small-tier pass, so those phases are redundant work here
-//     specifically, never a correctness gap), and pointer-aligned blocks
-//     (a tail pointer landing exactly on a block boundary means "full",
+//   - sparse_primes (p >= segment width, at most ~1 hit/segment): BUCKET,
+//     EratBig-style (adopted after an isolated A/B against the original
+//     design below) -- byte marking (not bit), a mod-210 multiplier wheel
+//     (48/210 phases instead of 8/30, same redundant-multiple-of-7
+//     reasoning as the medium tier above), and pointer-aligned blocks (a
+//     tail pointer landing exactly on a block boundary means "full",
 //     primesieve's own Bucket trick, no per-block count field to load).
 //     Requires a power-of-2 segment width in BYTES (see the constructor's
 //     has_sparse check) for the bucket-slot math to become a shift/mask
 //     instead of a division -- main.cpp floors seg_k_width to the nearest
-//     power of 2 whenever this tier is used. NOTE: rounding the
-//     auto-computed width down to a power of 2 was already tried in
-//     isolation for the OLD tier (attempt 7 below) and did NOT give a
-//     consistent win on this dev PC (cache-refs got 12.9% WORSE at N=1e13)
-//     -- since that rounding is now a hard requirement of this new tier's
-//     design, any win/loss measured here is the two effects bundled
-//     together, not the EratBig rewrite in isolation. Being measured with
-//     perf stat cycles:u at N=1e12/1e13 before deciding whether to keep
-//     this over the documented-below original. The small/medium tiers are
-//     untouched by this experiment.
+//     power of 2 whenever this tier is used.
 //
-//     Below this experiment note, the ORIGINAL tier's history (BUCKET
-//     design rationale, attempts 1-7): most segments have nothing
-//     to do for most of these primes, so scheduling each one into the
-//     future segment where its next hit actually falls (a fixed-size
-//     ring of block-pooled queues, see process_sparse_bucket's attempt-6
-//     comment) means a segment's processing only ever looks at the (few)
-//     sparse primes actually due, not all of them. Steps forward the same
-//     qp*GAP_K[j] + ONFLY_CORRECTION[pr][j] way the medium tier does -- no
-//     division by the runtime value p anywhere in this tier (see attempt 5
-//     below) -- with qp/pr/the wheel phase j packed into one word
+//     Most segments have nothing to do for most of these primes, so
+//     scheduling each one into the future segment where its next hit
+//     actually falls (a fixed-size ring of block-pooled queues, see
+//     process_big's own comment) means a segment's processing only ever
+//     looks at the (few) sparse primes actually due, not all of them.
+//     Steps forward the same qp*GAP_K[j] + ONFLY_CORRECTION[pr][j] way the
+//     medium tier does -- no division by the runtime value p anywhere in
+//     this tier -- with qp/pr/the wheel phase j packed into one word
 //     (erat::DenseState::qw, same layout as the dense tiers) alongside a
 //     `pos` relative to whichever segment the entry is due in, 8 bytes
-//     total per live entry.
-//
-//     Five changes to this tier's *stepping math* were tried and
-//     reverted as net regressions -- two predate splitting
-//     process_sparse_bucket (below) into its own noinline function (see
-//     that split's own commit): a shared-table scheme like
-//     ONFLY_CORRECTION above (~2x slower at N=1e12 with a third of base
-//     primes forced sparse) and an AoS relayout of its per-prime state for
-//     locality (~2.25x slower), both measured while this whole function
-//     (dense + onfly + sparse) was still fully inlined and suffering real
-//     register spilling -- any change adding live variables looked
-//     catastrophic there regardless of its own merit.
-//       - attempt 3 (dev PC session, N=1e13, natural auto -s, 72,036/
-//         227,647 base primes sparse): retried the shared-table scheme
-//         *after* the noinline split, on the theory that attempt 1's loss
-//         was purely the register-spilling confound. It wasn't -- clean
-//         same-session A/B via perf stat cycles:u (frequency-independent,
-//         not wall-clock): 48.11T cycles vs 42.68T baseline, +12.7%; IPC
-//         0.96->0.85; cache-miss rate 9.52%->12.55%. Root cause: this
-//         scheme needs qp+pr per prime (OnFlyPrime, 24 bytes padded)
-//         instead of the plain uint64_t p (8 bytes) sparse_primes held
-//         before, nearly tripling that array's footprint right in the
-//         tier accessed in pseudo-random order (via the bucket ring's
-//         intrusive list, no locality to begin with) -- costs more in
-//         cache pressure than the division (measured elsewhere as ~2.6%
-//         of this tier's cycles) saves. Register spilling was real for
-//         attempts 1-2, but wasn't the whole story either apparently --
-//         or this tier's memory-footprint sensitivity is itself the
-//         thing that changed between N=1e12 (attempts 1-2) and N=1e13
-//         (attempt 3), given how much bigger the sparse population is at
-//         the natural cliff vs a forced-small-N proxy. Reverted.
-//       - attempt 4 (superseded by attempt 5 below -- dev PC, N=1e13,
-//         natural auto -s, same 72,036/227,647 sparse split as attempt 3):
-//         same division-free goal as attempt 3, but stores m instead of adding
-//         qp/pr fields, so there's no memory-footprint growth to fight the
-//         division's removal with -- wheel_index(p*m) (a multiply plus a
-//         compile-time-constant divide) replaces both the old
-//         wheel_number(k)/p division *and* the extra per-prime storage
-//         attempt 3 needed. Clean same-session A/B via perf stat
-//         cycles:u: 41.39T vs 42.68T baseline, -3.0%; wall-clock 1011.38s
-//         vs 1094.00s, -7.55%; IPC 0.96->1.00; cache-miss rate flat
-//         (9.52%->9.63%, confirming no footprint growth this time).
-//       - attempt 5 (dev PC session, same day): a division-by-p removal
-//         that fixes attempt 3's actual failure (memory footprint, not
-//         the division itself) directly, instead of attempt 4's
-//         alternative fix (wheel_index(p*m) instead of the shared-table
-//         step). qp=p/WHEEL_MOD and pr=p%WHEEL_MOD are recomputed from p
-//         per due-check rather than stored -- both are divisions by the
-//         *compile-time* constant WHEEL_MOD, a cheap multiply-shift, not
-//         the runtime-p division being removed -- and k+j are packed into
-//         one word (sparse_kj_) instead of two, so total per-prime memory
-//         stays exactly what attempt 4's plain k took. Measured two ways:
-//         a forced-heavy-sparse proxy (N=1e12, -s 500000, 84% sparse, the
-//         same trick used elsewhere in this file to test this tier
-//         cheaply) showed a clean win -- cycles:u 4.480T->4.112T (-8.2%),
-//         wall-clock 96.57s->89.06s (-7.8%), instructions:u down too (not
-//         just cycles), cache-miss rate 4.04%->3.48%. At the *natural*
-//         N=1e13 cliff (31.6% sparse, this tier only ~17% of total cycles
-//         per a perf profile taken this session) the same fix only moved
-//         wall-clock 898.63s->892.09s (-0.7%) -- small because the tier
-//         itself is still a minority of the work at this N, not because
-//         the fix doesn't hold up; instructions:u still dropped
-//         (42.819e9->42.293e9), confirming a real if modest effect here,
-//         expected to matter more as N grows past 1e13 and this tier's
-//         share of total cycles grows with it (see main.cpp's comment on
-//         the segment-width L2 cliff). Kept.
+//     total per live entry. Several earlier designs for this tier's
+//     stepping math (a shared-table scheme, an AoS relayout, a couple of
+//     division-free variants) were tried and reverted before landing on
+//     this one -- see docs/RESEARCH.md for that history.
 //
 // Extraction (turning the finished bit array into actual prime values):
 // invert each word, decompose into (q, r) = (k / WHEEL_SIZE, k %
@@ -509,170 +381,47 @@ private:
 
     // Processes exactly the sparse-tier entries due this segment: mark,
     // advance, reschedule into whichever future bucket the next hit lands
-    // in -- see the block-pool comment right below (attempt 6) for how a
-    // due entry gets there and where it goes next.
+    // in -- see the block-pool comment right below for how a due entry
+    // gets there and where it goes next.
     //
     // Pulled out of sieve_and_emit into its own function, and marked
     // noinline to make sure it stays that way even under -O3/-flto: with
     // dense/onfly/sparse all fully inlined into one function, perf showed
     // real cycles going to a spilled-to-stack reload of a loop-invariant
-    // member (num_buckets_) inside what's now schedule_sparse -- the
-    // *number* of values simultaneously live across all three tiers was
-    // forcing spills, not a poor choice of which value to spill. Passing
-    // values in as explicit parameters instead of member reads didn't
-    // change anything measured (see git history) because that doesn't
-    // reduce how many values are live at once, only where they come from.
-    // Giving this tier its own function gives it its own register
-    // allocation scope instead, so its live ranges stop competing with
-    // the other two tiers' for the same register file. Confirmed with
-    // perf stat, not just wall-clock (which turned out noisy for this
-    // tier -- see README#benchmarks): at N=1e12 with a third of base
-    // primes forced sparse (-s 500000), cycles dropped ~5-9% and IPC rose
-    // from 1.07 to 1.14-1.19 across repeated runs, consistently. The
-    // flip side of a real function call is real call overhead, paid once
-    // per segment even when this tier has nothing due -- sieve_and_emit
-    // below skips the call entirely when sparse_primes is empty for the
-    // whole run (every N up to 1e12 tested on this machine), which is
-    // what keeps the dense-only case's numbers unchanged from before this
-    // split.
-    // Attempt 6 (this session): replaces the idx-indexed intrusive list
-    // (sparse_kj_/sparse_next_/sparse_primes, attempts 1-5 above) with
-    // fixed-size blocks of erat::DenseState pulled from a pool, one queue
+    // member (num_buckets_) -- the *number* of values simultaneously live
+    // across all three tiers was forcing spills, not a poor choice of
+    // which value to spill. Giving this tier its own function gives it its
+    // own register allocation scope instead, so its live ranges stop
+    // competing with the other two tiers' for the same register file.
+    // Confirmed with perf stat, not just wall-clock: at N=1e12 with a
+    // third of base primes forced sparse (-s 500000), cycles dropped ~5-9%
+    // and IPC rose from 1.07 to 1.14-1.19 across repeated runs,
+    // consistently. The flip side of a real function call is real call
+    // overhead, paid once per segment even when this tier has nothing due
+    // -- sieve_and_emit below skips the call entirely when sparse_primes
+    // is empty for the whole run, which is what keeps the dense-only
+    // case's numbers unchanged from before this split.
+    //
+    // Fixed-size blocks of erat::DenseState pulled from a pool, one queue
     // (linked list of blocks) per ring slot -- primesieve's own EratBig
-    // design. The entry itself now carries everything needed to process
-    // it (qp/pr/j packed into `qw`, `pos` relative to whichever segment
-    // it's due in, same layout as the dense tiers' DenseState), so
-    // rescheduling COPIES the entry into the target slot's tail block
-    // instead of relinking an index -- both the read (draining a slot's
-    // blocks front to back) and the write (appending to a tail) are
-    // sequential, unlike the old scheme's pointer-chase over sparse_kj_/
-    // sparse_next_/sparse_primes at effectively random idx values. This is
-    // NOT attempt 3's AoS relayout (which kept the idx-array pointer-chase
-    // and only repacked its fields, and lost to cache-footprint growth) --
-    // here nothing is indexed by idx at all any more, and a live entry
-    // costs exactly 8 bytes (sizeof(DenseState)) at any one time, less
-    // than attempt 5's 12 bytes/active-prime (8 for sparse_kj_ + 4 for
-    // sparse_next_, p amortized via the shared sparse_primes array).
+    // design, replacing an earlier idx-indexed intrusive list (see
+    // docs/RESEARCH.md for that history and why it lost). The entry itself
+    // carries everything needed to process it (qp/pr/j packed into `qw`,
+    // `pos` relative to whichever segment it's due in, same layout as the
+    // dense tiers' DenseState), so rescheduling COPIES the entry into the
+    // target slot's tail block instead of relinking an index -- both the
+    // read (draining a slot's blocks front to back) and the write
+    // (appending to a tail) are sequential. A live entry costs exactly 8
+    // bytes (sizeof(DenseState)) at any one time.
     //
-    // SPARSE_BLOCK_ENTRIES matters more than it looks: a first pass at
-    // 1024 (8 KiB/block, primesieve's own EratBig default) won cleanly at
-    // the *natural* N=1e13 cliff (cycles:u 23.16T->20.81T, -10.2%;
-    // wall-clock 506.64s->449.13s; IPC 1.25->1.41; cache-misses
-    // 22.00B->17.22B) but *lost* on this file's usual fast proxy (N=1e12,
-    // -s 500000, 84% sparse forced): cycles:u 3.484T->3.775T, +8.3%;
-    // wall-clock 75.43s->90.83s, +20.4% -- the opposite of every other
-    // attempt in this tier's history, where the proxy and the natural N
-    // agreed on direction even when they disagreed on magnitude. Root
-    // cause: the proxy's tiny forced segment width needs many more ring
-    // slots (num_buckets_ scales with 1/seg_k_width_), so its ~66k active
-    // sparse primes per chunk spread thin across ~64 slots -- ~86 live
-    // entries/slot, each getting its own mostly-empty 1024-entry block
-    // (cache-references 84.79B, next to all of it pool padding no prime
-    // ever occupies). The natural N=1e13 cliff has far fewer ring slots
-    // (a much wider auto segment) and a comparable population, so its
-    // blocks stay reasonably full and never hit this. Shrinking to 128
-    // (1 KiB/block) fixed the proxy without giving back the natural-N win
-    // -- both now agree: proxy cycles:u 3.484T->3.190T (-8.4%), cache-refs
-    // 84.79B->18.49B (-78%), cache-misses 2.10B->0.258B (-87.7%); natural
-    // N=1e13 cycles:u 23.16T->20.78T (-10.3%), wall-clock 506.64s->447.74s
-    // (-11.6%), cache-refs 400.5B->295.8B (-26.1%). Kept at 128 -- if this
-    // tier's population/ring-slot ratio changes a lot on a future
-    // machine or N, re-check both regimes again rather than assuming
-    // either one predicts the other for a block-size change specifically.
-    //
-    // Attempt 7 (tried, reverted): schedule_sparse's ring-slot placement
-    // divides by seg_k_width_, a runtime value -- rounding main.cpp's
-    // *auto*-computed width down to the nearest power of 2 (leaving an
-    // explicit -s exactly as given) turns that into a shift. Measured at
-    // both natural N this tier's history already tracks: N=1e12 cycles:u
-    // 1.6571T->1.6646T (+0.45%, noise-level), cache-refs 14.30B->13.45B
-    // (-5.9%); N=1e13 cycles:u 20.776T->20.818T (+0.2%, also noise-level)
-    // but cache-refs 295.8B->333.9B (+12.9%) and cache-misses 16.20B->
-    // 18.04B (+11.4%) -- worse, and in the OPPOSITE direction from N=1e12.
-    // Net: no consistent win on the metric this tier's history actually
-    // trusts (cycles:u flat both times, within noise), and the cache
-    // impact of rounding the *width itself* down doesn't even agree in
-    // sign between the two N tried, let alone offset what the shift
-    // saves. Whatever the auto-tuned width was doing (see arg_parser.hpp's
-    // own comment on the sqrt/L2 tradeoff) is sensitive enough that even
-    // rounding it *down* -- the safe direction, unlike Finding 2's already-
-    // reverted rounding-up-to-fill-L2 attempt -- isn't free. Reverted;
-    // the division itself was never shown to cost anything on its own
-    // here, only entangled with a width change that didn't pay for itself.
-    //   - attempt 8 (dev PC, N=1e12 forced-sparse proxy, -s 500000, 84%
-    //     sparse, two reps): software-prefetched s[(it+4)->pos] in
-    //     process_big()'s hit loop below, on the theory that it's this
-    //     tier's one genuinely scattered access and the target is already
-    //     knowable (it+N's pos was written when it was scheduled last
-    //     segment, so it's valid data, not something this iteration has to
-    //     compute first). Regressed on both metrics, both reps: cycles:u
-    //     2.2092T->2.2858T (+3.5%) then 2.2262T->2.2603T (+1.5%);
-    //     cache-misses:u 377.1M->1182.3M (+213%!) then 676.9M->777.3M
-    //     (+14.8%) -- worse in the SAME direction both times, unlike
-    //     attempt 7's sign flip, so not noise. Root cause (inferred, not
-    //     independently confirmed): the segment array is L2-sized by
-    //     design (see this file's top header), so a byte scattered across
-    //     it isn't the long-latency miss a software prefetch usually hides
-    //     -- the extra prefetch is then just added memory traffic, and
-    //     with 12 threads all issuing it at once, contends for MSHRs/L2
-    //     bandwidth instead of hiding anything. Reverted.
-    //   - attempt 9 (dev PC, same forced-sparse proxy, two reps): 4-way
-    //     software-pipelined process_big()'s hit loop below -- load/table-
-    //     lookup all 4 entries first, then all 4 writes, then all 4
-    //     reschedules (pushes kept in original 0,1,2,3 order for block-
-    //     chain correctness). perf annotate on the scalar version showed
-    //     ~65% of this function's own cycles in one dependent chain per
-    //     hit (load DenseState -> index big::TABLE -> compute next pos/
-    //     slot -> check head_[slot]); unlike cross_off_medium's while loop
-    //     (data-dependent trip count, why ITS 4-lane attempt lost -- see
-    //     erat_small.hpp), this for loop always does exactly one pass per
-    //     entry, so no lane can finish early and idle waiting on the
-    //     others -- that specific failure mode genuinely doesn't apply
-    //     here. IPC did improve (1.33-1.34->1.36-1.37) and cache-misses:u
-    //     didn't get worse (757.7M-835.0M -> 764.7M-773.9M, flat to
-    //     better) -- the ILP hypothesis wasn't wrong. But instructions:u
-    //     rose 3.1% (3.0413T->3.1366T, both reps identically -- the
-    //     remainder loop for block sizes not a multiple of 4, plus extra
-    //     live registers/moves from unrolling) and that outweighed the ILP
-    //     gain: cycles:u 2.2791T->2.3050T (+1.1%) then 2.2705T->2.2960T
-    //     (+1.1%) -- small but consistent both reps, not noise. Reverted;
-    //     if ever revisited, the remainder-loop overhead (not the
-    //     pipelining idea itself) is the part that would need to shrink,
-    //     e.g. by only pipelining when a block is known full-size (it's
-    //     the LAST block in a chain, per push_sparse_entry's alignment
-    //     trick, that's ever partial).
-    //   - attempt 10 (dev PC): replaced head_/tail_'s modular ring
-    //     (power-of-2 size, 2x margin, `(cur_segment_+ahead) & bmask` on
-    //     every push) with a SLIDING WINDOW, matching how primesieve's own
-    //     EratBig::crossOff does it (read from its actual v12.7 source,
-    //     not from memory -- include/primesieve/Bucket.hpp,
-    //     src/EratBig.cpp): slot 0 always means "due this segment", a push
-    //     uses `ahead` directly (no AND-mask, no absolute segment
-    //     counter), and once slot 0 is fully drained the whole window
-    //     shifts left by one (std::copy) instead. On the usual forced-
-    //     sparse proxy (N=1e12, -s 500000, 84% sparse, two reps) this
-    //     looked like a real if modest win: cycles:u 2.2689T->2.2632T
-    //     (-0.25%) then 2.2766T->2.2691T (-0.33%), instructions:u down
-    //     1.79% both reps. But at the *natural* N=1e13 cliff it reversed:
-    //     cycles:u 19.738T->20.118T (+1.93%), cache-misses:u 20.49B->
-    //     21.67B (+5.8%), cache-references:u +5.0% -- a real regression,
-    //     not noise. Root cause: the shift is unconditional, paid on
-    //     EVERY process_big() call regardless of whether anything was
-    //     actually due that segment -- and at natural N, sparse density is
-    //     low (this tier was only ~2.66% of total cycles at 1e13, see
-    //     erat_small.hpp's session notes), so most calls have nothing due
-    //     at all. The old modular ring's equivalent no-op case was one
-    //     `while (head_[slot])` check against false -- cheap and highly
-    //     predictable. The forced-sparse proxy hides this because it's
-    //     deliberately built to make nearly every segment have something
-    //     due, so the shift's fixed cost gets amortized against real work
-    //     almost every call there -- the exact same proxy-vs-natural sign
-    //     flip attempt 6 already hit once before in this tier's history,
-    //     which is why both are always checked here before keeping
-    //     anything. Reverted; if ever revisited, the shift would need to
-    //     be skipped (or made cheaper than a full-window copy) on segments
-    //     where the window is already all-nullptr, which is the common
-    //     case at realistic N.
+    // SPARSE_BLOCK_ENTRIES=128 (1 KiB/block) was tuned against both a
+    // forced-heavy-sparse proxy and the natural N=1e13 cliff after the two
+    // regimes initially disagreed at the primesieve-default 1024 -- see
+    // docs/RESEARCH.md for the numbers and why they disagreed. Several
+    // further changes (rounding the ring-slot division away, prefetching
+    // the hit loop's next target, 4-way software-pipelining it, a
+    // sliding-window ring instead of the modular one below) were all tried
+    // and reverted -- see docs/RESEARCH.md.
     // Drains this segment's ring slot: for each due entry, mark its one
     // hit (byte marking, mod-210 table lookup for mask/step -- see
     // wheel210_big.hpp), advance to the next hit, and re-file it (usually

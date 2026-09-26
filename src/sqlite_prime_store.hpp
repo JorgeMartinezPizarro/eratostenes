@@ -41,14 +41,9 @@ public:
         exec("PRAGMA page_size=4096;");
         exec("PRAGMA journal_mode=WAL;");
         exec("PRAGMA synchronous=NORMAL;");
-        // Tried, reverted (2026-09-25): PRAGMA cache_size=-524288 (512MB,
-        // up from SQLite's own default -2000/2MB), on the hypothesis that
-        // a bigger internal page cache would cut down on re-fetching
-        // block_data's B-tree pages as it grows into millions of rows at
-        // large N. Measured WORSE on the server at both N=1e12 and N=1e13
-        // (user's own A/B, this same session) -- reverted. Root cause not
-        // isolated; don't re-propose a bigger cache_size without new
-        // evidence for why the default would be the bottleneck.
+        // A bigger PRAGMA cache_size (512MB, up from SQLite's own default
+        // 2MB) was tried and measured worse on the server at both N=1e12
+        // and N=1e13 -- see docs/RESEARCH.md.
         exec("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);");
         // Metadata (small, mutable -- start_index gets corrected after the
         // fact, see fix_offsets) lives apart from the compressed payload

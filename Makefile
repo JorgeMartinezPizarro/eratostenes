@@ -101,34 +101,27 @@ $(OBJ_DIR_DEBUG)/%.o: $(SRC_DIR)/%.cpp $(HEADERS) | $(OBJ_DIR_DEBUG)
 #     happens to land mostly on one tier on a given machine -- robust
 #     across machines because it depends only on N and -s, not on
 #     detected cache sizes the way small_limit does.
+#     (A natural `1e13` pass, to give the sparse tier real-proportion data
+#     instead of just forced-tiny-width coverage, was tried and abandoned
+#     -- doesn't scale, an instrumented build is far slower than release
+#     and a full 1e13 count-only pass didn't finish in 45+ minutes. See
+#     docs/RESEARCH.md.)
 # -fprofile-update=prefer-atomic on the instrumented build: plain
 # (non-atomic) counters race and undercount under this program's own
 # thread pool. -fprofile-correction + -Wno-coverage-mismatch on the final
 # build: the CFG built from -flto=auto isn't byte-identical to the
 # instrumented run's, which GCC otherwise treats as a hard mismatch
-# instead of just missing coverage. Measured on the dev PC (perf stat
-# cycles:u, count-only, N=1e10..1e13, BEFORE the two forced-sparse runs
-# were added): ~2-4% fewer cycles, consistent in direction across the
-# whole range -- see README#benchmarks; not yet re-measured with the
-# sparse-tier training added. Overwrites $(BIN) in place, like `portable`
-# does; run `make re` afterwards to get back a plain release build.
+# instead of just missing coverage. Overwrites $(BIN) in place, like
+# `portable` does; run `make re` afterwards to get back a plain release
+# build.
 #
-# VERDICT (2026-09-25, production server, via docker-pgo/run-pgo below,
-# real hardware not the dev PC): NOT ADOPTED. N=1e12: several PGO runs
-# clustered ~24.5-25s vs the non-PGO README figure of 24.51s -- no visible
-# separation from run-to-run noise. N=1e13: 328.49s (PGO) vs 330.38s
-# (non-PGO, README) -- a 0.57% difference, again indistinguishable from
-# single-run wall-clock noise. Unlike the dev PC, the server has no
-# perf/cycles:u available to look past that noise the way this project
-# normally would (see BENCHMARK section of this file's own git history
-# for why cycles:u is trusted over wall-clock here) -- so on the one
-# machine this was actually built for, PGO's payoff can't even be
-# confirmed, let alone justified against its real costs: a longer build,
-# and an image/binary tied to the exact machine it's compiled on. Kept as
-# opt-in infrastructure (not part of default `make`/`make docker`) since
-# it's harmless sitting unused, but don't re-run this validation again
-# without a new reason to expect a different answer -- this was checked
-# on real production hardware, not extrapolated from the dev PC.
+# NOT ADOPTED: measured a real ~2-4% win on the dev PC, but no measurable
+# difference on the production server (the actual target hardware, which
+# has no perf/cycles:u available to look past wall-clock noise the way
+# this project normally would) -- see docs/RESEARCH.md. Kept as opt-in
+# infrastructure (not part of default `make`/`make docker`) since it's
+# harmless sitting unused, but don't re-run this validation again without
+# a new reason to expect a different answer.
 pgo: $(NTH_BIN)
 	rm -rf $(OBJ_DIR_PGO)
 	mkdir -p $(PROF_DIR)
@@ -189,9 +182,9 @@ run:
 # baked in at both the instrumented AND the final compile -- see
 # Dockerfile's own warning on pgo-builder) and takes noticeably longer to
 # build (the training passes run during the image build itself).
-# VERDICT: not adopted -- tried on the actual production server, no
-# measurable win. See the `pgo` target's own comment above for the numbers
-# before repeating this investigation.
+# Not adopted -- tried on the actual production server, no measurable win.
+# See the `pgo` target's own comment above and docs/RESEARCH.md for the
+# numbers before repeating this investigation.
 docker-pgo:
 	$(COMPOSE) build eratostenes-pgo
 

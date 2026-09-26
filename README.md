@@ -85,7 +85,7 @@ Below the results for `./eratostenes limit -o base.db`:
 
 ## Techniques
 
-What this project is built from, one term each — follow the link for the concept itself. See [docs/ALGORITHM.md](docs/ALGORITHM.md) for how they combine.
+What this project is built from, one term each — follow the link for the concept itself. See [docs/ALGORITHM.md](docs/ALGORITHM.md) for how they combine, and [docs/RESEARCH.md](docs/RESEARCH.md) for the log of tried, measured, and reverted optimization attempts behind the current design.
 
 - [Segmented sieve](https://en.wikipedia.org/wiki/Sieve_of_Eratosthenes#Segmented_sieve)
 - [Wheel factorization](https://en.wikipedia.org/wiki/Wheel_factorization)
