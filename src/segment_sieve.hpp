@@ -28,6 +28,20 @@
 //     restructuring (byte marking like the small tier, keyed by (class,
 //     entry phase)) was tried twice, in two different implementations,
 //     and reverted both times -- see docs/RESEARCH.md.
+//
+//     EXPERIMENT (med64_primes, process_med64): a THIRD variant of that
+//     same 64-list idea, scoped to only the sub-band of medium primes
+//     closest to small_limit ([small_limit, med64_limit), main.cpp) --
+//     the two prior attempts applied it to the whole medium tier, whose
+//     population keeps growing with N past small_limit's own saturation
+//     point (see erat_small.hpp), which is what sank both of them at
+//     large N; this band's own population saturates far earlier (at or
+//     before small_limit's), so it shouldn't. Double-buffered like the
+//     second prior attempt (m64_cur_/m64_nxt_, swapped per segment) --
+//     see process_med64's own comment. Swept via
+//     ERATOSTENES_MED64_NUM/_DEN (main.cpp): 1/8 kept as the default,
+//     measured a real win at both N=1e12 and N=1e13 (unlike the full-tier
+//     attempts above) -- see docs/RESEARCH.md for the full sweep.
 //     Both flat tiers keep 8 bytes/prime of state (erat::DenseState),
 //     walked every segment in place -- there is never a segment these
 //     primes "skip", so a bucket would buy nothing.
@@ -75,12 +89,14 @@
 // invert each word, decompose into (q, r) = (k / WHEEL_SIZE, k %
 // WHEEL_SIZE) once per word, then walk set bits with ctz + clear-lowest-bit.
 
+#include <array>
 #include <cstdint>
 #include <vector>
 #include <memory>
 #include <cstdlib>
 #include <algorithm>
 #include <stdexcept>
+#include <utility>
 
 #include "erat_small.hpp"
 #include "presieve.hpp"
@@ -152,9 +168,12 @@ public:
     void begin_chunk() {
         cur_segment_ = 0;
         next_small_idx_ = 0;
+        next_med64_idx_ = 0;
         next_medium_idx_ = 0;
         next_sparse_idx_ = 0;
         for (auto& v : small_) v.clear();
+        for (auto& v : m64_cur_) v.clear();
+        for (auto& v : m64_nxt_) v.clear();
         for (auto& v : medium_) v.clear();
         std::fill(head_.begin(), head_.end(), nullptr);
         std::fill(tail_.begin(), tail_.end(), nullptr);
@@ -170,6 +189,7 @@ public:
     template <typename Writer>
     void sieve_and_emit(uint64_t k_low, uint64_t k_high,
                          const std::vector<uint64_t>& small_primes,
+                         const std::vector<uint64_t>& med64_primes,
                          const std::vector<uint64_t>& medium_primes,
                          const std::vector<uint64_t>& sparse_primes,
                          Writer& out, uint64_t& prime_count) {
@@ -183,11 +203,24 @@ public:
         uint64_t low_n = wheel_number(k_low);
 
         // Activate any base primes that just became relevant (p*p < high_n).
-        // Each of the three lists is sorted by p and gets its own
+        // Each of the four lists is sorted by p and gets its own
         // monotonically-advancing pointer, so every prime is visited here
         // exactly once for the whole chunk, not once per segment.
         //
+        // med64_'s own lists reserve capacity once, on this SegmentSieve's
+        // very first activation (not per chunk -- a vector's capacity
+        // survives clear(), so this only needs to happen once ever), to
+        // avoid growing 64 small vectors one push_back at a time while
+        // hot. Distribution across (class, phase) is expected to be close
+        // to uniform, not exact, hence the margin.
+        if (!med64_reserved_ && !med64_primes.empty()) {
+            size_t per_list = med64_primes.size() / 64 * 2 + 16;
+            for (auto& v : m64_cur_) v.reserve(per_list);
+            for (auto& v : m64_nxt_) v.reserve(per_list);
+            med64_reserved_ = true;
+        }
         activate_dense(small_primes, next_small_idx_, small_, true, high_n, low_n, k_low);
+        activate_med64(med64_primes, next_med64_idx_, m64_cur_.data(), high_n, low_n, k_low);
         activate_medium(medium_primes, next_medium_idx_, medium_, high_n, low_n, k_low);
 
         // EratBig-style activation (see header comment): find the smallest
@@ -241,6 +274,32 @@ public:
         }
         // Wheel index 0 is the number 1: not prime, and nothing marks it.
         if (k_low == 0) words_[0] |= 1;
+
+        // med64 tier (see docs/RESEARCH.md and this class's header comment
+        // for why this is scoped to a bounded sub-band rather than the
+        // whole medium tier): byte marking like the small tier, but one
+        // pass over the WHOLE segment (no sub-blocking -- this tier's
+        // point is amortizing cross_off<PR>'s entry/exit cost over many
+        // hits, not L1 residency for a huge population). process_med64<PR>
+        // reads this segment's due entries from m64_cur_ and pushes each
+        // one's next hit into m64_nxt_, grouped by its OUTGOING phase so
+        // next segment's calls again share one entry phase per list; the
+        // segment-wide rebase (pos -= bytes_needed) matches cross_off_class's
+        // own end-of-sub-block rebase above. Skipped entirely when this
+        // run has no med64 primes, matching the sparse tier's own
+        // skip-when-empty guard below.
+        if (!med64_primes.empty()) {
+            process_med64<0>(bytes, bytes_needed);
+            process_med64<1>(bytes, bytes_needed);
+            process_med64<2>(bytes, bytes_needed);
+            process_med64<3>(bytes, bytes_needed);
+            process_med64<4>(bytes, bytes_needed);
+            process_med64<5>(bytes, bytes_needed);
+            process_med64<6>(bytes, bytes_needed);
+            process_med64<7>(bytes, bytes_needed);
+            for (auto& v : m64_cur_) v.clear();
+            std::swap(m64_cur_, m64_nxt_);
+        }
 
         // Medium tier: one pass over the whole segment each, one list per
         // residue class (medium_[pr]) so PR is a compile-time template
@@ -351,6 +410,34 @@ private:
         }
     }
 
+    // med64 tier: exactly activate_dense's small-tier derivation (mod-30,
+    // byte position, (qp<<6)|(pr<<3)|j packing) -- the only difference is
+    // the push target: a 64-way (class, entry phase) split (state64[pr*8+j])
+    // instead of activate_dense's 8-way (class only) split, since
+    // process_med64<PR> (below) groups entries so every call into
+    // cross_off<PR> for a given list shares one entry phase.
+    static void activate_med64(const std::vector<uint64_t>& primes, size_t& next,
+                                std::vector<erat::DenseState>* state64,
+                                uint64_t high_n, uint64_t low_n, uint64_t k_low) {
+        while (next < primes.size()) {
+            uint64_t p = primes[next];
+            if (p * p >= high_n) break;
+            uint64_t start_val = std::max(p * p, low_n);
+            uint64_t pr = static_cast<uint64_t>(WHEEL_POS[p % WHEEL_MOD]);
+            uint64_t m = (start_val + p - 1) / p;
+            uint64_t r = m % WHEEL_MOD;
+            uint64_t step = STEP_TO_COPRIME[r];
+            m += step;
+            r += step;
+            if (r >= WHEEL_MOD) r -= WHEEL_MOD;
+            uint64_t pos = (p * m) / WHEEL_MOD - k_low / 8;
+            uint64_t j = static_cast<uint64_t>(WHEEL_POS[r]);
+            state64[pr * 8 + j].push_back({static_cast<uint32_t>(((p / WHEEL_MOD) << 6) | (pr << 3) | j),
+                                           static_cast<uint32_t>(pos)});
+            ++next;
+        }
+    }
+
     // Medium tier: smallest m coprime with 210 (not just 30) with
     // p*m >= start_val -- every medium prime is > 163, so multiples of 7
     // are always redundant here (see erat_small.hpp::cross_off_medium).
@@ -376,6 +463,40 @@ private:
             medium[pr].push_back({static_cast<uint32_t>(((p / WHEEL_MOD) << 6) | w),
                                    static_cast<uint32_t>(pos)});
             ++next;
+        }
+    }
+
+    // med64 tier (EXPERIMENT -- see docs/RESEARCH.md): PR a compile-time
+    // template parameter like cross_off_class<PR>/cross_off_medium<PR>
+    // above, looping over that class's own 8 entry-phase lists
+    // (m64_cur_[PR*8+j]) so every cross_off<PR> call within one inner loop
+    // shares the same entry phase j -- the entry-side switch in cross_off
+    // becomes a well-predicted branch (same outcome every call in that
+    // loop) instead of an unpredictable per-prime dispatch. The exit side
+    // (cross_off's own straight-line ERAT_HIT chain) still depends on each
+    // individual prime's own phase alignment against the segment boundary
+    // and isn't fixed by this grouping -- see docs/RESEARCH.md if
+    // branch-misses:u turns out to still dominate.
+    // Runs over the WHOLE segment (bytes_needed), not sub-blocked like the
+    // small tier: this tier's population is bounded/saturated by
+    // small_limit's own tuning (see main.cpp), not chasing L1 residency
+    // for a large one. Each entry is read from m64_cur_, stepped by
+    // cross_off<PR>, and re-filed into m64_nxt_ keyed by its NEW exit
+    // phase and rebased by bytes_needed (this segment's own width, since
+    // there's no sub-block rebase to chain off) -- sieve_and_emit clears
+    // m64_cur_ and swaps the two buffers once every PR has run, so next
+    // segment reads what this one just wrote.
+    template <int PR>
+    void process_med64(uint8_t* bytes, uint64_t bytes_needed) {
+        for (int j = 0; j < 8; ++j) {
+            for (erat::DenseState& st : m64_cur_[PR * 8 + j]) {
+                uint64_t i = st.pos;
+                uint64_t qp = st.qw >> 6;
+                uint32_t jj = st.qw & 7;
+                erat::cross_off<PR>(bytes, bytes_needed, qp, i, jj);
+                m64_nxt_[PR * 8 + jj].push_back(
+                    {static_cast<uint32_t>((qp << 6) | (PR << 3) | jj), static_cast<uint32_t>(i - bytes_needed)});
+            }
         }
     }
 
@@ -524,11 +645,22 @@ private:
     std::vector<erat::DenseState> small_[8]; // one list per residue class p % 30
     std::vector<erat::DenseState> medium_[8]; // one list per residue class p % 30
 
+    // med64 tier (EXPERIMENT, see docs/RESEARCH.md): double-buffered, one
+    // pair of (class, entry phase) lists swapped every segment instead of
+    // migrating entries in place -- see process_med64's own comment.
+    // med64_reserved_ survives begin_chunk() on purpose: a vector's
+    // capacity survives clear(), so the one-time reserve (sieve_and_emit)
+    // only needs to happen once per SegmentSieve instance, not per chunk.
+    std::array<std::vector<erat::DenseState>, 64> m64_cur_{};
+    std::array<std::vector<erat::DenseState>, 64> m64_nxt_{};
+    bool med64_reserved_ = false;
+
     uint32_t log2_sb_ = 0; // log2(segment width in bytes) -- see constructor
     uint64_t num_buckets_ = 1;
     uint64_t cur_segment_ = 0;
 
     size_t next_small_idx_ = 0;
+    size_t next_med64_idx_ = 0;
     size_t next_medium_idx_ = 0;
     size_t next_sparse_idx_ = 0;
 };

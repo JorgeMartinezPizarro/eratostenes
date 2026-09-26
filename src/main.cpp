@@ -164,6 +164,7 @@ static std::vector<ChunkRange> split_ranges(uint64_t limit, unsigned threads) {
 template <typename Writer>
 static void sieve_chunk(ChunkRange range, uint64_t seg_k_width, uint64_t base_prime_max,
                          const std::vector<uint64_t>& small_primes,
+                         const std::vector<uint64_t>& med64_primes,
                          const std::vector<uint64_t>& medium_primes,
                          const std::vector<uint64_t>& sparse_primes,
                          const Presieve& presieve,
@@ -173,7 +174,7 @@ static void sieve_chunk(ChunkRange range, uint64_t seg_k_width, uint64_t base_pr
     sieve.begin_chunk();
     for (uint64_t k_low = range.low; k_low < range.high; k_low += seg_k_width) {
         uint64_t k_high = std::min(k_low + seg_k_width, range.high);
-        sieve.sieve_and_emit(k_low, k_high, small_primes, medium_primes, sparse_primes, out, local_count);
+        sieve.sieve_and_emit(k_low, k_high, small_primes, med64_primes, medium_primes, sparse_primes, out, local_count);
         progress.fetch_add(k_high - k_low, std::memory_order_relaxed);
     }
 }
@@ -181,13 +182,14 @@ static void sieve_chunk(ChunkRange range, uint64_t seg_k_width, uint64_t base_pr
 // Count-only pass: no I/O, no byte accounting, just the prime count.
 static void count_only_worker(ChunkRange range, uint64_t seg_k_width, uint64_t base_prime_max,
                                const std::vector<uint64_t>& small_primes,
+                               const std::vector<uint64_t>& med64_primes,
                                const std::vector<uint64_t>& medium_primes,
                                const std::vector<uint64_t>& sparse_primes,
                                const Presieve& presieve,
                                uint64_t& out_count, std::atomic<uint64_t>& progress) {
     NullSink sink;
     uint64_t local_count = 0;
-    sieve_chunk(range, seg_k_width, base_prime_max, small_primes, medium_primes, sparse_primes, presieve, sink, local_count, progress);
+    sieve_chunk(range, seg_k_width, base_prime_max, small_primes, med64_primes, medium_primes, sparse_primes, presieve, sink, local_count, progress);
     out_count = local_count;
 }
 
@@ -195,6 +197,7 @@ static void count_only_worker(ChunkRange range, uint64_t seg_k_width, uint64_t b
 // thread's primes will take.
 static void count_worker(ChunkRange range, uint64_t seg_k_width, uint64_t base_prime_max,
                           const std::vector<uint64_t>& small_primes,
+                          const std::vector<uint64_t>& med64_primes,
                           const std::vector<uint64_t>& medium_primes,
                           const std::vector<uint64_t>& sparse_primes,
                           const Presieve& presieve,
@@ -202,7 +205,7 @@ static void count_worker(ChunkRange range, uint64_t seg_k_width, uint64_t base_p
                           std::atomic<uint64_t>& progress) {
     ByteCounter counter;
     uint64_t local_count = 0;
-    sieve_chunk(range, seg_k_width, base_prime_max, small_primes, medium_primes, sparse_primes, presieve, counter, local_count, progress);
+    sieve_chunk(range, seg_k_width, base_prime_max, small_primes, med64_primes, medium_primes, sparse_primes, presieve, counter, local_count, progress);
     out_bytes = counter.total_bytes;
     out_count = local_count;
 }
@@ -211,6 +214,7 @@ static void count_worker(ChunkRange range, uint64_t seg_k_width, uint64_t base_p
 // into its (disjoint) region of the final file.
 static void emit_worker(int idx, ChunkRange range, uint64_t seg_k_width, uint64_t base_prime_max,
                          const std::vector<uint64_t>& small_primes,
+                         const std::vector<uint64_t>& med64_primes,
                          const std::vector<uint64_t>& medium_primes,
                          const std::vector<uint64_t>& sparse_primes,
                          const Presieve& presieve,
@@ -223,7 +227,7 @@ static void emit_worker(int idx, ChunkRange range, uint64_t seg_k_width, uint64_
         out.write_raw(SMALL_PRIMES_TEXT.data(), SMALL_PRIMES_BYTES);
     }
 
-    sieve_chunk(range, seg_k_width, base_prime_max, small_primes, medium_primes, sparse_primes, presieve, out, local_count, progress);
+    sieve_chunk(range, seg_k_width, base_prime_max, small_primes, med64_primes, medium_primes, sparse_primes, presieve, out, local_count, progress);
     out.flush();
 }
 
@@ -238,6 +242,7 @@ static void emit_worker(int idx, ChunkRange range, uint64_t seg_k_width, uint64_
 // inserted in either way.
 static void emit_db_worker(int idx, ChunkRange range, uint64_t seg_k_width, uint64_t base_prime_max,
                             const std::vector<uint64_t>& small_primes,
+                            const std::vector<uint64_t>& med64_primes,
                             const std::vector<uint64_t>& medium_primes,
                             const std::vector<uint64_t>& sparse_primes,
                             const Presieve& presieve,
@@ -253,7 +258,7 @@ static void emit_db_worker(int idx, ChunkRange range, uint64_t seg_k_width, uint
         for (uint64_t p : WHEEL_PRIMES) sink.write_uint64(p);
     }
 
-    sieve_chunk(range, seg_k_width, base_prime_max, small_primes, medium_primes, sparse_primes, presieve, sink, local_count, progress);
+    sieve_chunk(range, seg_k_width, base_prime_max, small_primes, med64_primes, medium_primes, sparse_primes, presieve, sink, local_count, progress);
     sink.flush();
     out_count = local_count;
 }
@@ -525,6 +530,40 @@ int main(int argc, char** argv) {
         }
     }
 
+    // med64 tier (see docs/RESEARCH.md's "erat_small.hpp: EratMedium-style
+    // 64-list restructuring" for why a full-medium-tier version of this
+    // was tried and reverted): primes in [small_limit, med64_limit) use
+    // erat_small.hpp's byte-marking cross_off<PR> (via
+    // SegmentSieve::process_med64), grouped into 64 (class, entry phase)
+    // lists so every call sharing a list also shares its entry phase --
+    // the same idea, but scoped to a bounded sub-band close to
+    // small_limit instead of the whole medium tier, so its population
+    // doesn't keep growing with N past small_limit's own saturation point
+    // the way the full tier's did.
+    //
+    // med64_limit is swept via ERATOSTENES_MED64_NUM/_DEN (numerator/
+    // denominator of seg_k_width) without recompiling; NUM=0 (or any
+    // num/den <= small_limit/seg_k_width) disables the tier, degenerating
+    // med64_limit to <= small_limit so no prime ever qualifies -- exactly
+    // reproduces the pre-med64 baseline (verified: pi(N) and cycles:u both
+    // unchanged). 1/8 measured best of {1/8, 1/4, 3/8, 1/2} on the dev PC
+    // (perf stat cycles:u, 2 reps): -5.5%/-5.6% at N=1e12, -4.07%/-4.17%
+    // at N=1e13 -- a real win at both N, unlike the full-medium-tier
+    // attempts (see docs/RESEARCH.md), which won at 1e12 but regressed at
+    // 1e13 as their unbounded population grew. Narrower still (1/16)
+    // measured slightly worse than 1/8 (-3.94% at 1e13) -- 1/8 sits at or
+    // near the actual optimum, not just the smallest fraction that still
+    // helps. See docs/RESEARCH.md for the full sweep, including a
+    // follow-up finding that a smaller small_limit (L1/5 instead of L1/2)
+    // combined with 1/8 measured even better (-6.67% at 1e13) -- not yet
+    // separately re-tuned; small_limit itself stays at its own
+    // already-validated L1/2 default here.
+    uint64_t med64_num = 1, med64_den = 8;
+    if (const char* s = std::getenv("ERATOSTENES_MED64_NUM")) med64_num = std::strtoull(s, nullptr, 10);
+    if (const char* s = std::getenv("ERATOSTENES_MED64_DEN")) med64_den = std::strtoull(s, nullptr, 10);
+    if (med64_den == 0) med64_den = 8;
+    uint64_t med64_limit = seg_k_width * med64_num / med64_den;
+
     // Primes also covered by the pre-sieve pattern (see presieve.hpp) are
     // skipped here: they're never scheduled as active markers, their
     // multiples come pre-marked from the pattern buffer instead. They
@@ -532,11 +571,14 @@ int main(int argc, char** argv) {
     // themselves composite either way, so they survive extraction exactly
     // as before.
     //
-    // The rest split into three tiers by expected hits (see
+    // The rest split into four tiers by expected hits (see
     // segment_sieve.hpp / erat_small.hpp):
     //   - small_primes (p < small_limit): many hits per L1 sub-block,
     //     crossed off one sub-block at a time so the marks land in L1.
-    //   - medium_primes (small_limit <= p < seg_k_width): a few hits per
+    //   - med64_primes (small_limit <= p < med64_limit): still many hits
+    //     per segment, byte-marked like the small tier but over the whole
+    //     segment at once (see above).
+    //   - medium_primes (med64_limit <= p < seg_k_width): a few hits per
     //     segment, one pass over the whole segment each.
     //   - sparse_primes (p >= seg_k_width): at most ~1 hit/segment, bucket
     //     ring, EratBig-style (see segment_sieve.hpp's process_big).
@@ -545,13 +587,16 @@ int main(int argc, char** argv) {
         presieve_primes_flat.insert(presieve_primes_flat.end(), group.begin(), group.end());
 
     std::vector<uint64_t> small_primes;
+    std::vector<uint64_t> med64_primes;
     std::vector<uint64_t> medium_primes;
     std::vector<uint64_t> sparse_primes;
     for (uint64_t p : base_primes) {
         if (p < FIRST_WHEEL_PRIME) continue;
         if (std::find(presieve_primes_flat.begin(), presieve_primes_flat.end(), p) != presieve_primes_flat.end()) continue;
         if (p < seg_k_width) {
-            (p < small_limit ? small_primes : medium_primes).push_back(p);
+            if (p < small_limit) small_primes.push_back(p);
+            else if (p < med64_limit) med64_primes.push_back(p);
+            else medium_primes.push_back(p);
         } else {
             sparse_primes.push_back(p);
         }
@@ -571,14 +616,14 @@ int main(int argc, char** argv) {
     Presieve presieve = build_presieve(PRESIEVE_GROUPS, seg_k_width);
 
     std::fprintf(stderr, "Iniciando %u hilos, limite=%llu, segmento=%llu, rueda mod %llu (%zu primos), "
-                 "%zu primos base pequenos (sub-bloque %llu KiB), %zu medianos, %zu dispersos...\n",
+                 "%zu primos base pequenos (sub-bloque %llu KiB), %zu med64, %zu medianos, %zu dispersos...\n",
                  actual_threads,
                  static_cast<unsigned long long>(opt.limit),
                  static_cast<unsigned long long>(opt.segment_width),
                  static_cast<unsigned long long>(WHEEL_MOD),
                  WHEEL_PRIMES.size(),
                  small_primes.size(), static_cast<unsigned long long>(SUB_BLOCK_BYTES / 1024),
-                 medium_primes.size(), sparse_primes.size());
+                 med64_primes.size(), medium_primes.size(), sparse_primes.size());
 
     // Every pass below runs worker threads that can throw (pwrite() on a
     // full disk, or the bucket-sieve sizing check) -- see run_parallel_chunks
@@ -597,7 +642,7 @@ int main(int argc, char** argv) {
                 ProgressGuard guard{done, prog};
 
                 run_parallel_chunks(actual_threads, num_chunks, [&](unsigned i) {
-                    count_only_worker(ranges[i], seg_k_width, base_limit, small_primes,
+                    count_only_worker(ranges[i], seg_k_width, base_limit, small_primes, med64_primes,
                                        medium_primes, sparse_primes, presieve, prime_counts[i], progress);
                 });
             } // guard destructs here: progress thread joined before the summary prints below
@@ -644,7 +689,7 @@ int main(int argc, char** argv) {
 
                 run_parallel_chunks(actual_threads, num_chunks, [&](unsigned i) {
                     emit_db_worker(static_cast<int>(i), ranges[i], seg_k_width, base_limit,
-                                    small_primes, medium_primes, sparse_primes, presieve,
+                                    small_primes, med64_primes, medium_primes, sparse_primes, presieve,
                                     store, opt.db_block_size, opt.zstd_level, prime_counts[i], progress);
                 });
             }
@@ -685,7 +730,7 @@ int main(int argc, char** argv) {
             ProgressGuard guard{done, prog};
 
             run_parallel_chunks(actual_threads, num_chunks, [&](unsigned i) {
-                count_worker(ranges[i], seg_k_width, base_limit, small_primes,
+                count_worker(ranges[i], seg_k_width, base_limit, small_primes, med64_primes,
                              medium_primes, sparse_primes, presieve, byte_counts[i], prime_counts[i], progress);
             });
         }
@@ -723,7 +768,7 @@ int main(int argc, char** argv) {
             try {
                 run_parallel_chunks(actual_threads, num_chunks, [&](unsigned i) {
                     emit_worker(static_cast<int>(i), ranges[i], seg_k_width, base_limit,
-                                small_primes, medium_primes, sparse_primes, presieve, fd, offsets[i], progress);
+                                small_primes, med64_primes, medium_primes, sparse_primes, presieve, fd, offsets[i], progress);
                 });
             } catch (...) {
                 ::close(fd);

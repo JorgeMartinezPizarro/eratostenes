@@ -349,6 +349,66 @@ bytes/prime, capped by an L3/2 budget) plus the `ONFLY_CORRECTION` loop for
 everything past that budget, both on the whole L2-sized segment: -26% at N=1e11,
 -30% at N=1e12.
 
+### Medium tier: 64-list restructuring scoped to a bounded sub-band (`med64_primes`, KEPT, 2026-09-26)
+
+A third variant of the same 64-list idea as the two attempts above (byte marking
+via `erat_small.hpp::cross_off<PR>`, grouped into 64 `(class, entry phase)` lists,
+double-buffered like the second attempt) -- but this time scoped to only
+`[small_limit, med64_limit)`, a bounded sub-band of the medium tier close to
+`small_limit`, instead of the whole tier up to `seg_k_width`. `med64_limit =
+seg_k_width * ERATOSTENES_MED64_NUM / ERATOSTENES_MED64_DEN` (env vars, default
+1/8), computed and classified in `main.cpp`; processed by
+`SegmentSieve::process_med64<PR>` between the small and (flat) medium tiers each
+segment.
+
+The hypothesis: both prior attempts won at N=1e12 but regressed at N=1e13 because
+the *whole* medium tier's population keeps growing with N until `sqrt(N)` passes
+`seg_k_width` (see `erat_small.hpp`'s own note on this saturation point) -- and the
+CONFIRMED attempt's own cache-misses:u growth (20.06B->39.29B, +95.8%) tracked
+almost exactly with that population's growth (75,773->152,886, +101.8%) between
+those two N. A sub-band bounded well below `seg_k_width` saturates at a much
+smaller N and then stays fixed population-wise, so that specific growth mechanism
+shouldn't recur. Verified directly on the dev PC before writing any code: at
+`seg_k_width=2,097,152`/`small_limit=24,576` (this machine's own auto-tuned
+values), the band `[24576, 786432)` (3/8 fraction) holds exactly 60,221 primes at
+*both* N=1e12 and N=1e13 (`pi(786432)-pi(24576)`, using the project's own binary to
+count) -- fully saturated already at 1e12, while 100% of the medium tier's growth
+between those two N (75,773->152,886) falls in the untouched remainder
+`[786432, seg_k_width)` (15,552->92,665).
+
+Measured (dev PC, i5-11400F -- via WSL2 this session, `perf stat
+cycles:u,instructions:u,cache-misses:u,branch-misses:u`, 2 reps each, cold, natural
+auto -s):
+
+| fraction | N=1e12 cycles:u | N=1e13 cycles:u |
+|---|---|---|
+| baseline (NUM=0) | 1.4819T / 1.4901T | 19.256T / 19.347T |
+| 1/2 | -- | +0.50% (regression) |
+| 3/8 (initial guess, matching primesieve's FACTOR_ERATMEDIUM=3.0 loosely) | -3.8% / -3.7% | -0.91% / -1.21% |
+| 1/4 | -- | -2.75% |
+| **1/8** | **-5.5% / -5.6%** | **-4.07% / -4.17%** |
+| 1/16 | -- | -3.94% (worse than 1/8 -- 1/8 is at or near the actual optimum, not just "smaller is better") |
+
+1/8 wins cleanly at both N, unlike the two prior full-tier attempts -- this
+directly confirms the population-saturation hypothesis: instructions:u dropped
+substantially at 1/8 (24.728T->19.632T-ish range, ~-20%) same as before, but
+cache-misses:u grew only +55.5% at 1e13 (18.0B->28.0B) instead of the CONFIRMED
+attempt's +95.8%, and critically that growth no longer erases the instruction
+savings the way it did before. **Kept at 1/8.**
+
+Follow-up finding, not yet acted on: re-running the winning 1/8 cutoff with
+`small_limit` itself lowered from its own already-validated `L1d/2` to `L1d/5`
+(primesieve uses ~0.2*L1d) measured *even better* at N=1e13, -6.67% vs the original
+L1/2-and-no-med64 baseline (vs -4.1% for L1/2-and-med64) -- a single, unreplicated
+rep, tested by temporarily editing the divisor (no runtime override exists for it).
+This suggests `small_limit`'s own optimal cutoff shifted once med64 exists as a
+cheaper alternative destination for high-hit-count primes -- plausible, since
+med64's own per-segment bookkeeping cost is now competitive with the small tier's
+sub-block dispatch for exactly the primes near that boundary. Not re-tuned here;
+`small_limit` stays at its own existing L1/2 default (see its own entry above) --
+re-sweeping `small_limit` jointly with `med64_limit`, with more reps, is the
+natural next step if this tier's default is revisited again.
+
 ### dTLB pressure at large N: investigated, ruled out (2026-09-25, external review, Opus 5.5)
 
 Hypothesis: dTLB pressure from a thread's whole working set at large N -- the
