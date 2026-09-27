@@ -204,6 +204,12 @@ cut its cost by roughly 7-8%):
 | 1e11 | 39.6% | 46.1% | 6.0% | -- | 5.4% | 2.1% |
 | 1e12 | 30.9% | 35.3% | 27.5% | -- | 4.4% | 1.6% |
 | 1e13 | 21.6% | 25.4% | 45.4% | 2.9% | 3.0% | 1.2% |
+| 1e14 (after) | 13.7% | 19.8% | 38.8% | 24.2% | 2.3% | 0.9% |
+
+(The 1e14 row is with the byte-position medium tier. At that N medium's IPC drops
+to 0.89 from 1.27 at 1e12 and it takes 45% of all L2 misses and 58% of branch
+misses: the sparse tier's ~4 MiB per thread of in-flight bucket entries pushes the
+segment and medium's state out of L2.)
 
 What bounds each tier, as far as measured (IPC per hyperthread at 1e12: med64
 0.80, small 0.91, medium 1.41 before the byte change, extraction 2.45): the small

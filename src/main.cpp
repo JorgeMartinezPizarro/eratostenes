@@ -128,13 +128,14 @@ struct ChunkRange {
 // k=0 is the number 1 (not prime; SegmentSieve clears it itself);
 // k_end_exclusive is wheel_count_upto(limit), the first index whose number
 // exceeds limit.
-static std::vector<ChunkRange> split_ranges(uint64_t limit, unsigned threads) {
+static std::vector<ChunkRange> split_ranges(uint64_t limit, unsigned threads, uint64_t start = 0) {
     std::vector<ChunkRange> ranges;
     // Starts at k=0 (the number 1, cleared by SegmentSieve itself) rather
     // than k=1, and every chunk boundary is a multiple of 64: the
     // byte-addressed dense tiers (erat_small.hpp) need each segment to
-    // start on a word boundary.
-    uint64_t k_start = 0;
+    // start on a word boundary. `start` > 0 (ERATOSTENES_START, see main)
+    // sieves only the tail [start, limit], rounded down to that boundary.
+    uint64_t k_start = start ? wheel_count_upto(start) / 64 * 64 : 0;
     uint64_t k_end = wheel_count_upto(limit);
     if (k_end <= k_start) return ranges;
 
@@ -561,7 +562,25 @@ int main(int argc, char** argv) {
         : wheel_count_upto(opt.limit) / (min_segs_per_chunk * seg_k_width);
     unsigned target_chunks = static_cast<unsigned>(std::max<uint64_t>(opt.threads,
         std::min<uint64_t>(uint64_t{opt.threads} * CHUNKS_PER_THREAD, width_cap)));
-    auto ranges = split_ranges(opt.limit, target_chunks);
+    // ERATOSTENES_START=N0 (benchmarking only): sieve just [N0, N] instead
+    // of [0, N]. Every base prime is still activated for that range, so a
+    // tail of a large N costs exactly what the same segments cost in a full
+    // run -- e.g. the last 1% of 1e14 in about a minute instead of the
+    // whole run. The printed count is then only for that tail (plus the
+    // wheel primes), not pi(N).
+    uint64_t range_start = 0;
+    if (const char* s = std::getenv("ERATOSTENES_START")) range_start = static_cast<uint64_t>(std::strtod(s, nullptr));
+    if (range_start >= opt.limit) range_start = 0;
+    if (range_start) {
+        std::fprintf(stderr, "AVISO: ERATOSTENES_START=%llu -- solo se criba [%llu, %llu]; el recuento NO es pi(N).\n",
+                     static_cast<unsigned long long>(range_start), static_cast<unsigned long long>(range_start),
+                     static_cast<unsigned long long>(opt.limit));
+        // Same chunk width as the full run, so per-chunk setup (activating
+        // every base prime) weighs what it does there.
+        double frac = 1.0 - static_cast<double>(wheel_count_upto(range_start)) / static_cast<double>(wheel_count_upto(opt.limit));
+        target_chunks = static_cast<unsigned>(std::max<double>(opt.threads, target_chunks * frac + 0.5));
+    }
+    auto ranges = split_ranges(opt.limit, target_chunks, range_start);
     unsigned num_chunks = static_cast<unsigned>(ranges.size());
     unsigned actual_threads = std::min<unsigned>(opt.threads, num_chunks);
 

@@ -58,6 +58,7 @@ throughout below).
   - [Chunk-width floor: at least 4 segments per chunk (kept, 2026-09-27)](#chunk-width-floor-at-least-4-segments-per-chunk-kept-2026-09-27)
   - [`small_limit` cutoff tuning](#small_limit-cutoff-tuning)
   - [Cache-topology sizing: per-CPU-minimum step (kept)](#cache-topology-sizing-per-cpu-minimum-step-kept)
+  - [Medium/sparse cutoff raised above `seg_k_width` (tried, reverted, 2026-09-27)](#mediumsparse-cutoff-raised-above-seg_k_width-tried-reverted-2026-09-27)
   - [EratBig-style sparse tier: forcing a power-of-2 segment width, and `sparse_limit = seg_k_width/4` (all attempts reverted)](#eratbig-style-sparse-tier-forcing-a-power-of-2-segment-width-and-sparse_limit--seg_k_width4-all-attempts-reverted)
 - [arg_parser.hpp](#arg_parserhpp)
   - [`--zstd-level` default: 1 measured faster than 3, not yet made the default (open)](#--zstd-level-default-1-measured-faster-than-3-not-yet-made-the-default-open)
@@ -1475,6 +1476,31 @@ loses every rep, so the minimum stays right for the segment. Now: segment from t
 smallest L2 share, sub-block from the LARGEST L1d, both still uniform for every
 thread (threads migrate between core types at runtime, so per-thread sizing by the
 core a thread starts on isn't reliable). No-op on uniform machines (dev PC).
+
+### Medium/sparse cutoff raised above `seg_k_width` (tried, reverted, 2026-09-27)
+
+The cutoff compares a prime's *value* with `seg_k_width`, a width in *wheel
+indices*; a segment spans `seg_k_width * 30/8` numbers, so sparse primes between
+2.1M and 7.86M (on a 256KiB segment) still hit every segment 1-3 times, which
+looked like bucket work the (now cheaper, byte-position) medium tier could do
+better. Every earlier attempt on this cutoff *lowered* it; this raised it, via an
+`ERATOSTENES_SPARSE_NUM/_DEN` multiplier. Measured on the last 1% of 1e14
+(`ERATOSTENES_START=9.9e13`, cycles:u, identical counts across all variants,
+pi(1e11)/pi(1e12) exact with the raised cutoff):
+
+| cutoff | medium / sparse primes | cycles:u |
+|---|---|---:|
+| 1x (current) | 139714 / 508968 | 2.910T (control rerun 2.890T) |
+| 1.5x | 210652 / 438030 | 2.949T (+1.3%) |
+| 2x | 280050 / 368632 | 3.083T (+5.9%) |
+| 3x | 415605 / 233077 | 3.535T (+21%) |
+| 4x | 548266 / 100416 | 4.060T (+39%) |
+
+Monotonically worse. The sparse tier handles 1-3 hits per segment fine; a medium
+prime pays a fixed cost every segment (8-byte state read and write, plus ~0.5 loop
+exit mispredicts per call at 1e14), which is what dominates medium there. With
+the three lowering attempts, the cutoff has now been measured in both directions:
+`p < seg_k_width` stays.
 
 ### EratBig-style sparse tier: forcing a power-of-2 segment width, and `sparse_limit = seg_k_width/4` (all attempts reverted)
 
