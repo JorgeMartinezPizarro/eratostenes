@@ -26,6 +26,7 @@ throughout below).
   - [`cross_off_medium`: EratMedium-style 64-list restructuring](#cross_off_medium-eratmedium-style-64-list-restructuring)
   - [med64: mod-210 stepping, two variants (tried, both reverted, 2026-09-26, external review, Opus 5.5)](#med64-mod-210-stepping-two-variants-tried-both-reverted-2026-09-26-external-review-opus-55)
   - [Small tier: mod-210 stepping as 7 unrolled mod-30 copies (tried, reverted, 2026-09-27)](#small-tier-mod-210-stepping-as-7-unrolled-mod-30-copies-tried-reverted-2026-09-27)
+  - [`cross_off`: branchless tail for the small and med64 tiers (tried, reverted, 2026-09-27)](#cross_off-branchless-tail-for-the-small-and-med64-tiers-tried-reverted-2026-09-27)
 - [wheel.hpp](#wheelhpp)
   - [Wheel size: mod 6 vs. mod 30 vs. mod 210 (historical, pre-tiered-marking architecture)](#wheel-size-mod-6-vs-mod-30-vs-mod-210-historical-pre-tiered-marking-architecture)
   - [`ONFLY_CORRECTION`/`GAP_K`: shared table replacing a per-prime `delta[]` (kept)](#onfly_correctiongap_k-shared-table-replacing-a-per-prime-delta-kept)
@@ -473,6 +474,28 @@ prime per sub-block).
 Might behave differently on a core with a bigger LSD/DSB (Golden Cove P-cores
 on the i5-13500), but not tested there. Anyone retrying this needs the loop
 body under the LSD size, not just fewer stores.
+
+### `cross_off`: branchless tail for the small and med64 tiers (tried, reverted, 2026-09-27)
+
+At 1e11, med64 was ~47% of branch-misses:u (0.31G, ~1.6 per cross_off call, all
+conditional) and the small tier ~33%. After the unrolled loop exits, the hits
+still below `end` are a prefix of j = 0..6 (offsets grow with j), and the checked
+`ERAT_HIT` chain leaves at a data-dependent j -- about one mispredict per call.
+Replaced it with 7 unconditional stores, the out-of-range ones redirected to
+`s[end + j]` (a pad word past the segment; for a small-tier sub-block, the next
+sub-block's first word, which `Presieve::fill` overwrites) and j = number that
+fit. `make test` green.
+
+- Both tiers: branch-misses:u -36%, instructions:u +17%, **cycles:u +3.4%** at
+  1e11. The small tier is frontend/store-bound (see the mod-210 entry above), so
+  ~3.5 wasted stores per call cost more than the mispredict saved.
+- med64 only: branch-misses:u -16/-20/-9% at 1e10/1e11/1e12, cycles:u -1.7%,
+  +0.4%, 0.0% (3 interleaved reps each) -- noise at the N that matters.
+
+Where med64's cost actually sits, for whoever looks next: 77% of all L1 load
+misses at 1e11 (~7.4G, ~85% of its hits), 95.5% of which hit L2 (L3 traffic
+negligible) -- every med64 prime sweeps the whole 256KiB segment. ~5.4
+cycles:u/hit vs ~2.8 for the small tier.
 
 ## wheel.hpp
 
