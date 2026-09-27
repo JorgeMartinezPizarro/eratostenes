@@ -230,7 +230,11 @@ for when detection can't be trusted) rather than a fixed guess:
 
 - **Segment width**: half the detected L2, so the segment's own bit array stays
   cache-resident alongside a hyperthread sibling and the tiers' state. Past that
-  width, some base primes fall into the sparse tier on purpose.
+  width, some base primes fall into the sparse tier on purpose. Once any would
+  (`isqrt(N) >= seg_k_width`), the width is doubled to the whole L2 share: from
+  there on, the medium tier's fixed cost per prime per segment outweighs the
+  extra cache pressure (-2.5% at 1e13, -10..-16% at 1e14 on the dev PC; +6.5% at
+  1e12, where there's no sparse tier, which is why it's conditional).
 - **Small-tier sub-block**: half the detected L1d -- that tier's whole point (§6)
   is keeping its marks inside L1, and the other half leaves room for the tier's
   own per-prime state and the presieve reads alongside the sub-block.

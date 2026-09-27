@@ -181,9 +181,9 @@ inline uint64_t wheel_count_upto(uint64_t limit) {
 
 // The wheel-index advance when a multiplier of p moves from phase jj to
 // phase jj+1 (n grows by p*WHEEL_GAP[jj]); p_mod is p % WHEEL_MOD. Only
-// used to build presieve tables (compute_wheel_deltas) and as the
-// derivation behind ONFLY_CORRECTION below -- the hot loops use
-// erat_small.hpp (small primes) or ONFLY_CORRECTION (medium/sparse).
+// used to build presieve tables (compute_wheel_deltas) -- the marking
+// tiers step with erat_small.hpp's constant offsets (small, med64) or
+// wheel210_big.hpp's mod-210 tables (medium, sparse).
 inline uint64_t wheel_delta_at(uint64_t p, uint64_t p_mod, int jj) {
     uint64_t rp = (p_mod * WHEEL_R[jj]) % WHEEL_MOD;
     uint64_t d = p * WHEEL_GAP[jj];
@@ -196,58 +196,6 @@ inline uint64_t wheel_delta_at(uint64_t p, uint64_t p_mod, int jj) {
                           + (pos_after - pos_before);
     return static_cast<uint64_t>(signed_delta);
 }
-
-// Shared (residue class of p mod WHEEL_MOD, phase j) correction table for
-// on-the-fly wheel stepping (medium and sparse tiers), replacing per-hit calls to
-// wheel_delta_at. Derivation: writing p = qp*WHEEL_MOD + p_mod (qp = p /
-// WHEEL_MOD), wheel_delta_at's own floor_term = floor((rp + p*WHEEL_GAP[j])
-// / WHEEL_MOD) splits as
-//
-//   floor_term = qp*WHEEL_GAP[j] + floor((rp + p_mod*WHEEL_GAP[j]) / WHEEL_MOD)
-//
-// because p*WHEEL_GAP[j] = qp*WHEEL_MOD*WHEEL_GAP[j] + p_mod*WHEEL_GAP[j],
-// and the first term is an exact multiple of WHEEL_MOD. The second term
-// above -- and likewise (rp + p*WHEEL_GAP[j]) mod WHEEL_MOD, which the
-// dropped multiple of WHEEL_MOD doesn't change either -- depend only on
-// (p_mod, j), not on qp (i.e. not on p's actual magnitude). So the whole
-// k-space delta reduces to
-//
-//   delta(p, j) = qp * GAP_K[j] + ONFLY_CORRECTION[pr][j]
-//
-// where pr = WHEEL_POS[p_mod] and GAP_K[j] = WHEEL_GAP[j]*WHEEL_SIZE (both
-// tiny, WHEEL_SIZE-sized tables). Per hit this is one multiply (by qp,
-// unavoidable) plus one lookup into a WHEEL_SIZE x WHEEL_SIZE shared table
-// plus one add -- no runtime mod, no div. Replaced an older per-prime
-// delta[] table (whose footprint grew with tier size) -- see
-// docs/RESEARCH.md#onfly_correctiongap_k-shared-table-replacing-a-per-prime-delta-kept.
-inline std::array<std::array<uint32_t, WHEEL_SIZE>, WHEEL_SIZE> make_onfly_correction() {
-    std::array<std::array<uint32_t, WHEEL_SIZE>, WHEEL_SIZE> tbl{};
-    for (int pr = 0; pr < WHEEL_SIZE; ++pr) {
-        uint64_t p_mod = WHEEL_R[pr];
-        for (int j = 0; j < WHEEL_SIZE; ++j) {
-            uint64_t rp = (p_mod * WHEEL_R[j]) % WHEEL_MOD;
-            uint64_t d_mod = p_mod * WHEEL_GAP[j];
-            uint64_t c1 = (rp + d_mod) / WHEEL_MOD;
-            uint64_t rem = (rp + d_mod) % WHEEL_MOD;
-            int pos_before = WHEEL_POS[rp];
-            int pos_after = WHEEL_POS[rem];
-            // Same non-negativity argument as wheel_delta_at's
-            // signed_delta: c1*WHEEL_SIZE always dominates pos_after -
-            // pos_before (range -(WHEEL_SIZE-1)..(WHEEL_SIZE-1)).
-            int64_t corr = static_cast<int64_t>(c1) * WHEEL_SIZE + (pos_after - pos_before);
-            tbl[pr][j] = static_cast<uint32_t>(corr);
-        }
-    }
-    return tbl;
-}
-inline const std::array<std::array<uint32_t, WHEEL_SIZE>, WHEEL_SIZE> ONFLY_CORRECTION = make_onfly_correction();
-
-inline std::array<uint32_t, WHEEL_SIZE> make_gap_k() {
-    std::array<uint32_t, WHEEL_SIZE> g{};
-    for (int j = 0; j < WHEEL_SIZE; ++j) g[j] = static_cast<uint32_t>(WHEEL_GAP[j]) * WHEEL_SIZE;
-    return g;
-}
-inline const std::array<uint32_t, WHEEL_SIZE> GAP_K = make_gap_k();
 
 // Per-phase wheel-index advances for p (presieve table construction only).
 inline std::array<uint32_t, WHEEL_SIZE> compute_wheel_deltas(uint64_t p) {

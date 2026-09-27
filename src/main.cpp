@@ -468,6 +468,20 @@ int main(int argc, char** argv) {
         }
     }
 
+    // Once some base prime would be sparse (isqrt(N) >= seg_k_width), use
+    // the whole per-thread L2 share instead of half: every medium/med64
+    // prime pays a fixed cost per segment (state load/store, loop exit
+    // mispredict), and from here on halving the number of segments is
+    // worth more than the extra cache pressure. Below that N it isn't
+    // (1e12, no sparse: +6.5% with the wider segment). Measured on the dev
+    // PC: 1e13 -2.5%, 1e14 -10..-16% by slice. Auto width only -- an
+    // explicit -s is left alone. See
+    // docs/RESEARCH.md#segment-width-doubled-once-the-sparse-tier-exists-kept-2026-09-27.
+    if (!opt.segment_width_set && base_limit >= seg_k_width) {
+        seg_k_width *= 2;
+        opt.segment_width = seg_k_width * WHEEL_MOD / WHEEL_SIZE; // keep the startup log's "segmento=" accurate
+    }
+
     // The sparse tier's EratBig-style rewrite (segment_sieve.hpp) needs
     // the segment width in BYTES to be a power of 2 for its bucket-slot
     // math to be a shift/mask instead of a division. base_limit >=

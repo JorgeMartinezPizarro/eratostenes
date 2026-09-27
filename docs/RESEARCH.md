@@ -64,6 +64,7 @@ throughout below).
   - [`--zstd-level` default: 1 measured faster than 3, not yet made the default (open)](#--zstd-level-default-1-measured-faster-than-3-not-yet-made-the-default-open)
   - [Sub-block size: half the L1d, not all of it (kept, 2026-09-27)](#sub-block-size-half-the-l1d-not-all-of-it-kept-2026-09-27)
   - [Auto segment width: dropping the `isqrt(limit)` cap (kept)](#auto-segment-width-dropping-the-isqrtlimit-cap-kept)
+  - [Segment width doubled once the sparse tier exists (kept, 2026-09-27)](#segment-width-doubled-once-the-sparse-tier-exists-kept-2026-09-27)
   - [`seg_k_width_from_l2_bytes`'s extra /2 margin, applied on top of an already-per-thread L2 share (kept, counterintuitive)](#seg_k_width_from_l2_bytess-extra-2-margin-applied-on-top-of-an-already-per-thread-l2-share-kept-counterintuitive)
 - [presieve.hpp](#presievehpp)
   - [`fill()`: skip the `self_k` correction loop when it can't possibly match (kept, 2026-09-26)](#fill-skip-the-self_k-correction-loop-when-it-cant-possibly-match-kept-2026-09-26)
@@ -594,6 +595,11 @@ EratMedium/WheelFactorization uses the same trick (a small shared wheel table
 plus one multiply by the prime itself, its `WheelElement`/`nextMultipleFactor`)
 -- this project's version was re-derived from its own `wheel_delta_at`, not
 ported from there.
+
+**Removed (2026-09-27).** No tier uses these mod-30 tables any more: medium and
+sparse step with `wheel210_big.hpp`'s mod-210 tables, small and med64 with
+`erat_small.hpp`'s constant offsets. `ONFLY_CORRECTION`/`GAP_K` were deleted from
+`wheel.hpp`; `wheel_delta_at` stays (presieve table construction).
 
 ## wheel210_big.hpp
 
@@ -1642,6 +1648,36 @@ That's a DIFFERENT question from how big the budget itself should be in that
 regime -- this project already measured removing the /2 halving (using the full L2
 instead of L2/2) as a regression at N=1e13 (see this file's git history) -- so the
 /2 stays.
+
+### Segment width doubled once the sparse tier exists (kept, 2026-09-27)
+
+At 1e14 the medium tier was the costliest one (39% of cycles) and bound by a fixed
+cost per prime per segment (state load/store, ~0.5 loop-exit mispredicts), not by
+its hits. A segment twice as wide pays that half as often. Measured with `-s
+15728640` (512KiB) against the auto 256KiB, 2 interleaved reps per point, counts
+identical everywhere (`ERATOSTENES_START` slices, see `main.cpp`):
+
+| point | 256KiB | 512KiB | delta (wall) |
+|---|---:|---:|---:|
+| last 1% of 1e14 | 82.93 / 82.36s | 68.42 / 69.95s | -16% |
+| middle of 1e14 ([4.95e13, 5e13]) | 36.09 / 36.22s | 33.55 / 31.80s | -10% |
+| last 5% of 1e13 | 22.70 / 23.00s | 21.38 / 21.11s | -7% |
+| full 1e12 | 26.73 / 26.62s | 28.39 / 28.40s | **+6.5%** |
+| full 1e13 (ABBA) | 376.08 / 378.05s | 365.44 / 369.74s | -2.5% (cycles:u -0.7%) |
+
+It wins where sparse primes are active and loses where they aren't (1e12: sqrt(N) <
+seg_k_width, the wider segment only adds cache pressure with two hyperthreads per
+L2). Rule, `main.cpp`: when `isqrt(N) >= seg_k_width` (some base prime would be
+sparse) and the width is automatic, double it -- i.e. the whole per-thread L2
+share instead of half. 1e11/1e12 keep 256KiB; 5e12 and up get 512KiB. Clean 1e13
+run afterwards: 348.67s (README best was 361.19s; primesieve 354.854s -> 0.98x).
+`make test` green. Also tried in the same session: `-t 6` (no hyperthreading) on
+the 1e14 tail, 104.4s vs 82.6s, +26% -- HT still pays at that scale.
+
+Not yet validated on the i5-13500, where the per-thread share is the E-core one
+(512KiB) and there are 20 threads. A finer version (wide segment only for chunks
+past seg_k_width^2, where sparse primes actually start) could also recover the
+loss in the first ~44% of a 1e13 run; not attempted.
 
 ### `seg_k_width_from_l2_bytes`'s extra /2 margin, applied on top of an already-per-thread L2 share (kept, counterintuitive)
 
