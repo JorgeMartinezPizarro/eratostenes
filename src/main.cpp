@@ -434,9 +434,11 @@ int main(int argc, char** argv) {
 
     // Hybrid P-core/E-core correction: detect_l2_cache_bytes()/
     // detect_l1d_cache_bytes() above always read cpu0, so a P-core cpu0
-    // would otherwise size E-core threads for cache they don't have. Use
-    // the smallest per-CPU share detected (CpuCacheTopology), uniformly for
-    // every thread, not per-thread -- see
+    // would otherwise size E-core threads for cache they don't have. The
+    // segment uses the smallest per-CPU L2 share detected
+    // (CpuCacheTopology), the sub-block the LARGEST per-CPU L1d -- both
+    // uniformly for every thread, not per-thread (threads migrate between
+    // core types at runtime) -- see
     // docs/RESEARCH.md#cache-topology-sizing-per-cpu-minimum-step-kept.
     // Skipped when the user already forced a value (-s, --l2-bytes,
     // --l1-bytes) or detection found nothing (non-Linux, sysfs unavailable).
@@ -452,11 +454,14 @@ int main(int argc, char** argv) {
                 opt.segment_width = seg_k_width * WHEEL_MOD / WHEEL_SIZE; // keep the startup log's "segmento=" accurate
             }
         }
+        // L1d: largest, not smallest -- sizing the P-cores' sub-block for
+        // the E-cores' L1d measured slower on the i5-13500, see the same
+        // RESEARCH.md entry.
         if (!opt.l1_bytes_override && !topo.l1_raw.empty() && topo.l1_raw[0]) {
-            uint64_t min_l1_raw = topo.l1_raw[0];
-            for (uint64_t s : topo.l1_raw) if (s && s < min_l1_raw) min_l1_raw = s;
-            if (min_l1_raw < topo.l1_raw[0]) {
-                SUB_BLOCK_BYTES = sub_block_from_l1_bytes(min_l1_raw);
+            uint64_t max_l1_raw = topo.l1_raw[0];
+            for (uint64_t s : topo.l1_raw) if (s > max_l1_raw) max_l1_raw = s;
+            if (max_l1_raw > topo.l1_raw[0]) {
+                SUB_BLOCK_BYTES = sub_block_from_l1_bytes(max_l1_raw);
                 small_limit = SUB_BLOCK_BYTES * small_num / small_den;
             }
         }

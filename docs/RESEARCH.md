@@ -1381,6 +1381,25 @@ re-validated to help (this project's own i5-11400F data on this margin question
 is mixed -- see git history). Only touch anything when the machine actually has
 more than one cache domain.
 
+**L1d switched from minimum to maximum (kept, 2026-09-27).** The minimum rule was
+tuned for the segment (L2) and had been applied to the small tier's L1 sub-block
+too. On the i5-13500 that sized every thread's sub-block for the E-cores' 32KiB
+L1d (16KiB sub-block, small_limit 4096) instead of the P-cores' 48KiB. Server A/B
+at N=1e12, Docker, 20 threads, 3 interleaved reps with 30s gaps:
+
+| rep | default (L1 min, 16KiB) | `--l1-bytes 49152` (24KiB) | + `--l2-bytes 1310720` |
+|---|---:|---:|---:|
+| 1 | 24.10s | 23.59s | 24.58s |
+| 2 | 24.02s | 23.65s | 24.45s |
+| 3 | 24.45s | 23.90s | 24.64s |
+| mean | 24.19s | **23.71s (-2.0%)** | 24.56s (+1.5%) |
+
+The P-core L1d wins every rep; also forcing the P-core L2 (segment 7.86M -> 19.7M)
+loses every rep, so the minimum stays right for the segment. Now: segment from the
+smallest L2 share, sub-block from the LARGEST L1d, both still uniform for every
+thread (threads migrate between core types at runtime, so per-thread sizing by the
+core a thread starts on isn't reliable). No-op on uniform machines (dev PC).
+
 ### EratBig-style sparse tier: forcing a power-of-2 segment width, and `sparse_limit = seg_k_width/4` (all attempts reverted)
 
 The sparse tier's EratBig-style rewrite (see `segment_sieve.hpp` above) needs the
