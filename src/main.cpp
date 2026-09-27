@@ -114,8 +114,8 @@ const std::string SMALL_PRIMES_TEXT = build_small_primes_text();
 const uint64_t SMALL_PRIMES_BYTES = SMALL_PRIMES_TEXT.size();
 const uint64_t SMALL_PRIMES_COUNT = WHEEL_PRIMES.size();
 
-// L1-sized slice the small dense tier is crossed off in (SegmentSieve); set
-// once in main() from the detected L1d size, machine-wide not per-thread.
+// Slice the small dense tier is crossed off in (SegmentSieve); set once in
+// main() as half the detected L1d size, machine-wide not per-thread.
 // See docs/RESEARCH.md#cache-topology-sizing-per-cpu-minimum-step-kept.
 static uint64_t SUB_BLOCK_BYTES = 32 * 1024;
 
@@ -424,13 +424,12 @@ int main(int argc, char** argv) {
     if (const char* s = std::getenv("ERATOSTENES_SMALL_DEN")) small_den = std::strtoull(s, nullptr, 10);
     if (small_den == 0) small_den = 4;
 
-    // The small tier is crossed off one L1-sized sub-block at a time (see
-    // SegmentSieve::sieve_and_emit); sub-block = the machine's detected L1d
-    // size. See docs/RESEARCH.md#small_limit-cutoff-tuning for the /2-vs-
-    // alternatives derivation this divisor is based on.
+    // The small tier is crossed off one sub-block at a time (see
+    // SegmentSieve::sieve_and_emit); sub-block = half the machine's
+    // detected L1d (sub_block_from_l1_bytes). See
+    // docs/RESEARCH.md#small_limit-cutoff-tuning for the divisor.
     uint64_t l1_bytes = opt.l1_bytes_override ? opt.l1_bytes_override : detect_l1d_cache_bytes();
-    if (l1_bytes == 0) l1_bytes = 32 * 1024;
-    SUB_BLOCK_BYTES = std::max<uint64_t>(8, l1_bytes / 8 * 8);
+    SUB_BLOCK_BYTES = sub_block_from_l1_bytes(l1_bytes);
     uint64_t small_limit = SUB_BLOCK_BYTES * small_num / small_den;
 
     // Hybrid P-core/E-core correction: detect_l2_cache_bytes()/
@@ -543,8 +542,21 @@ int main(int argc, char** argv) {
     // run_parallel_chunks for why: work per chunk isn't uniform across the
     // range) and hand them out from a shared queue instead of one static
     // chunk per thread.
+    // Floored so each chunk spans at least MIN_SEGS_PER_CHUNK segments: at
+    // small N, threads*150 chunks would be narrower than one segment, and
+    // per-chunk setup (SegmentSieve, re-activating every base prime) would
+    // dominate. No effect at large N, where chunks span thousands of
+    // segments. See
+    // docs/RESEARCH.md#chunk-width-floor-at-least-4-segments-per-chunk-kept-2026-09-27.
     constexpr unsigned CHUNKS_PER_THREAD = 150;
-    auto ranges = split_ranges(opt.limit, opt.threads * CHUNKS_PER_THREAD);
+    uint64_t min_segs_per_chunk = 4;
+    if (const char* s = std::getenv("ERATOSTENES_MIN_SEGS_PER_CHUNK")) min_segs_per_chunk = std::strtoull(s, nullptr, 10);
+    // ERATOSTENES_MIN_SEGS_PER_CHUNK=0 disables the floor (exact old behavior).
+    uint64_t width_cap = min_segs_per_chunk == 0 ? UINT64_MAX
+        : wheel_count_upto(opt.limit) / (min_segs_per_chunk * seg_k_width);
+    unsigned target_chunks = static_cast<unsigned>(std::max<uint64_t>(opt.threads,
+        std::min<uint64_t>(uint64_t{opt.threads} * CHUNKS_PER_THREAD, width_cap)));
+    auto ranges = split_ranges(opt.limit, target_chunks);
     unsigned num_chunks = static_cast<unsigned>(ranges.size());
     unsigned actual_threads = std::min<unsigned>(opt.threads, num_chunks);
 

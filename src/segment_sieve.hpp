@@ -464,6 +464,15 @@ private:
             tail_[slot] = nullptr;
             while (blk) {
                 Blk* next_blk = blk->next;
+                // Chain blocks are scattered in memory (LIFO free list), so
+                // the hardware streamer restarts at every block boundary;
+                // fetch the whole next block into L2 now, one block's worth
+                // of work ahead. See
+                // docs/RESEARCH.md#sparse-tier-prefetch-the-next-block-of-the-chain-once-per-block-kept-2026-09-27.
+                if (next_blk) {
+                    const char* nb = reinterpret_cast<const char*>(next_blk);
+                    for (size_t off = 0; off < BLK_BYTES; off += 64) __builtin_prefetch(nb + off, 0, 2);
+                }
                 erat::DenseState* it = blk->entries();
                 erat::DenseState* end = next_blk ? blk->block_end() : last_end;
                 for (; it != end; ++it) {

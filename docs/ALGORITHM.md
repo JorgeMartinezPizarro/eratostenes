@@ -116,7 +116,7 @@ tiers by expected hit count (mirroring primesieve's own EratSmall/EratMedium/
 EratBig split, with one extra tier -- med64 -- of this project's own):
 
 - **Small** (`p < small_limit` bytes, roughly the smallest 80%+ of all marks):
-  crossed off one L1-sized sub-block of the segment at a time, so the marks land in
+  crossed off one sub-block (half the L1d) of the segment at a time, so the marks land in
   L1 instead of sweeping the whole (L2-sized) segment. This tier uses an
   **unrolled**, byte-addressed loop (`erat_small.hpp`) whose per-hit bit masks and
   byte offsets are *compile-time constants* -- a direct consequence of the mod-30
@@ -180,15 +180,14 @@ Two sizes are auto-tuned from the machine's real, detected L1d/L2 cache size
 overrides for when detection can't be trusted, e.g. in a container) rather than a
 fixed guess:
 
-- **Segment width**: capped at half the detected L2, so the segment's own bit array
-  stays cache-resident even while sharing L2 with a hyperthread sibling. Smaller
-  than that cap is better (removing the cap and using the full L2 was measured
-  *slower*, not faster -- see `arg_parser.hpp`'s comment), so the auto default is
-  the smallest width that still keeps every base prime out of the costlier sparse
-  tier, unless that would exceed the cap, in which case some primes fall into the
-  sparse tier on purpose.
-- **Small-tier sub-block**: the detected L1d size, since that tier's whole point
-  (§6) is keeping its marks inside L1 rather than sweeping the L2-sized segment.
+- **Segment width**: half the detected L2, so the segment's own bit array stays
+  cache-resident even while sharing L2 with a hyperthread sibling. Past that
+  width, some base primes fall into the sparse tier on purpose.
+- **Small-tier sub-block**: half the detected L1d -- that tier's whole point (§6)
+  is keeping its marks inside L1, and the other half leaves room for the tier's
+  own per-prime state and the presieve window alongside the sub-block.
+
+See [RESEARCH.md](RESEARCH.md) for why each is half, not all, of its cache level.
 
 ## 8. Output: text vs `.db`
 

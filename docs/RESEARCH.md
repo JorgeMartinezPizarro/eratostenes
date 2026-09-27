@@ -40,6 +40,7 @@ throughout below).
   - [Sparse tier: `process_big`/`process_sparse_bucket` split into its own noinline function](#sparse-tier-process_bigprocess_sparse_bucket-split-into-its-own-noinline-function)
   - [Sparse tier design, current: fixed-size pooled blocks (attempt 6)](#sparse-tier-design-current-fixed-size-pooled-blocks-attempt-6)
   - [`SPARSE_BLOCK_ENTRIES` tuning: 1024 vs. 128](#sparse_block_entries-tuning-1024-vs-128)
+  - [Sparse tier: prefetch the next block of the chain, once per block (kept, 2026-09-27)](#sparse-tier-prefetch-the-next-block-of-the-chain-once-per-block-kept-2026-09-27)
   - [Sparse tier attempts 7-10 (all tried, reverted)](#sparse-tier-attempts-7-10-all-tried-reverted)
   - [Attempt 11: shrinking the live entry from 8 to 7 bytes (tried, reverted, 2026-09-27)](#attempt-11-shrinking-the-live-entry-from-8-to-7-bytes-tried-reverted-2026-09-27)
 - [sqlite_prime_store.hpp](#sqlite_prime_storehpp)
@@ -51,11 +52,13 @@ throughout below).
   - [`SUB_BLOCK_BYTES`: per-thread vs. machine-wide sizing (kept, uniform-with-margin wins)](#sub_block_bytes-per-thread-vs-machine-wide-sizing-kept-uniform-with-margin-wins)
   - [`sieve_chunk`: one `SegmentSieve` per worker instead of per chunk (tried, reverted -- neutral on cycles:u, 2026-09-26)](#sieve_chunk-one-segmentsieve-per-worker-instead-of-per-chunk-tried-reverted----neutral-on-cyclesu-2026-09-26)
   - [`run_parallel_chunks`: chunk-granularity idle-time investigation (2026-09-25, external review, Opus 5.5)](#run_parallel_chunks-chunk-granularity-idle-time-investigation-2026-09-25-external-review-opus-55)
+  - [Chunk-width floor: at least 4 segments per chunk (kept, 2026-09-27)](#chunk-width-floor-at-least-4-segments-per-chunk-kept-2026-09-27)
   - [`small_limit` cutoff tuning](#small_limit-cutoff-tuning)
   - [Cache-topology sizing: per-CPU-minimum step (kept)](#cache-topology-sizing-per-cpu-minimum-step-kept)
   - [EratBig-style sparse tier: forcing a power-of-2 segment width, and `sparse_limit = seg_k_width/4` (all attempts reverted)](#eratbig-style-sparse-tier-forcing-a-power-of-2-segment-width-and-sparse_limit--seg_k_width4-all-attempts-reverted)
 - [arg_parser.hpp](#arg_parserhpp)
   - [`--zstd-level` default: 1 measured faster than 3, not yet made the default (open)](#--zstd-level-default-1-measured-faster-than-3-not-yet-made-the-default-open)
+  - [Sub-block size: half the L1d, not all of it (kept, 2026-09-27)](#sub-block-size-half-the-l1d-not-all-of-it-kept-2026-09-27)
   - [Auto segment width: dropping the `isqrt(limit)` cap (kept)](#auto-segment-width-dropping-the-isqrtlimit-cap-kept)
   - [`seg_k_width_from_l2_bytes`'s extra /2 margin, applied on top of an already-per-thread L2 share (kept, counterintuitive)](#seg_k_width_from_l2_bytess-extra-2-margin-applied-on-top-of-an-already-per-thread-l2-share-kept-counterintuitive)
 - [presieve.hpp](#presievehpp)
@@ -859,6 +862,34 @@ win -- both now agree: proxy cycles:u 3.484T->3.190T (-8.4%), cache-refs
 ratio changes a lot on a future machine or N, re-check both regimes again rather
 than assuming either one predicts the other for a block-size change specifically.
 
+### Sparse tier: prefetch the next block of the chain, once per block (kept, 2026-09-27)
+
+At E14+ the sparse tier's live state no longer fits any cache (~1.95M sparse
+primes x 8 bytes = ~15.6MB per thread at E15), so draining a ring slot is a cold
+streaming read from DRAM. Within a block the read is sequential and the hardware
+streamer follows it -- but a slot's chain of blocks is scattered in memory (LIFO
+free list), so the streamer restarts at every 1KiB block boundary and pays full
+DRAM latency on the first lines of each block. `process_big()` already loads
+`next_blk` at the start of each block, ~128 entries of work ahead, so it now
+issues L2 prefetches (`prefetcht1`) for the whole next block right there. Unlike
+attempt 8 and the medium-tier prefetch attempts (per-hit, where the per-hit cost
+ate the gain), this is once per block: ~0.1 instructions per entry.
+
+Measured (dev PC, `perf stat cycles:u`, OLD/NEW/NEW/OLD interleaved, cooldown
+between runs):
+
+| regime | OLD cycles:u | NEW cycles:u | delta |
+|---|---:|---:|---:|
+| N=1e13 `-s 1000000` (204,647 sparse, ~20MB total > 12MB L3: DRAM-bound) | 30.051T / 30.401T | 27.936T / 27.918T | **-7.6%** |
+| N=1e13 natural (72,036 sparse, fits L3) | 18.438T / 18.588T | 18.363T / 18.372T | **-0.8%** |
+
+instructions:u +0.14% / +0.015% (the prefetches themselves), IPC 1.10 -> 1.19 in
+the DRAM-bound regime -- the signature of hidden memory latency, not removed
+work. pi(N) exact in every run. Proxy chosen so blocks are full (~47 per slot),
+like natural E14+, unlike the `-s 500000` N=1e12 proxy's mostly-empty slots.
+Expected to matter most at natural E14/E15 on the server, where the sparse state
+exceeds L3 without forcing -- not yet measured there.
+
 ### Sparse tier attempts 7-10 (all tried, reverted)
 
 - **Attempt 7**: `schedule_sparse`'s ring-slot placement divides by `seg_k_width_`,
@@ -1239,6 +1270,21 @@ this again, measure cold (`make run`, isolated, no prior load that session) -- t
 benchmark script's own `REPS` loop is NOT safe for this machine as currently
 written, since later reps run hot.
 
+### Chunk-width floor: at least 4 segments per chunk (kept, 2026-09-27)
+
+`CHUNKS_PER_THREAD=150` (tuned at 1e12/1e13) makes chunks narrower than one
+segment at small N: at 1e10 with 12 threads, 1800 chunks of ~1.48M wheel
+indices each vs a ~2.1M-index segment (worse on the 20-thread server: 3000
+chunks). Every chunk then pays full per-chunk setup (`SegmentSieve`, fresh
+ring, re-activating every base prime with a runtime division) for one partial
+segment. Chunk count now floored at `total_k / (4 * seg_k_width)` (still at
+least one per thread); `ERATOSTENES_MIN_SEGS_PER_CHUNK` overrides the 4, 0
+restores the old behavior exactly. Measured with that env var on one binary
+(dev PC, 3 interleaved reps, still with the old 48KiB sub-block): 1e10
+9.674G -> 9.538G cycles:u (-1.4%, all 3 reps separated), 1e11 neutral. No
+effect at large N, where chunks span thousands of segments. Should matter
+more on the server; not yet measured there.
+
 ### `small_limit` cutoff tuning
 
 Measured on an i5-11400F (48KiB L1d), cycles:u at N=1e12 vs the old table/onfly
@@ -1364,6 +1410,46 @@ default 3, interleaved x3 on the dev PC, measured ~5-8% faster (16.7-19.6s vs.
 17.8-20.9s) with essentially identical output size (0.629 vs. 0.630
 bytes/prime). A small, consistent, low-risk win -- **not yet made the default**,
 just measured; worth doing since there's no real tradeoff at this ratio.
+
+### Sub-block size: half the L1d, not all of it (kept, 2026-09-27)
+
+The small tier's sub-block was the full detected L1d (48KiB on the dev PC),
+chosen before med64 existed (see the `small_limit` cutoff-tuning entry below:
+32/48/64KiB measured, 48KiB won then). Re-checked after spotting that
+`--l1-bytes 32768` ran faster than the native 48KiB. Decomposed at N=1e12 (dev
+PC, cycles:u, 2 interleaved reps each), since `--l1-bytes` moves both the
+sub-block and `small_limit` (= sub-block/4):
+
+| sub-block | `small_limit` | cycles:u | vs 48KiB native |
+|---:|---:|---:|---:|
+| 48KiB | 12KiB | 1.3680T | -- |
+| 24KiB | 12KiB | 1.3148T | -3.9% |
+| 48KiB | 6KiB | 1.3861T | +1.3% |
+| 24KiB | 6KiB | 1.2859T | **-6.0%** |
+| 16KiB | 4KiB | 1.2988T | -5.1% |
+
+The sub-block size is the driver; `small_limit` shrinking with it adds ~2% more,
+but shrinking `small_limit` alone at the old sub-block hurts -- the same kind of
+coupling the small/med64 joint sweep found. Likely mechanism: a sub-block that
+fills all of L1d leaves no room for the small tier's own per-prime state and the
+presieve window, which then evict the sub-block every pass. Checked across N
+(3 reps at 1e10/1e11, 2 at 1e13, interleaved):
+
+| N | 48KiB | 24KiB | delta |
+|---|---:|---:|---:|
+| 1e10 | 9.651G | 8.210G | **-14.9%** |
+| 1e11 | 116.00G | 102.40G | **-11.7%** |
+| 1e12 | 1.3680T | 1.2859T | **-6.0%** |
+| 1e13 | 18.120T | 17.583T | **-3.0%** |
+
+No sign flip; the gain is largest where the small tier is the biggest share of
+the work, which is small N -- this was most of the small-N overhead against
+primesieve. Now `sub_block_from_l1_bytes()` = L1d/2, used by both the global
+and the hybrid-topology path; `--l1-bytes` still means "the L1d size". Not
+re-swept: `small_limit`'s own divisor and med64's fraction were tuned at the old
+48KiB sub-block -- a joint re-sweep at 24KiB may find a slightly different
+optimum. Not yet measured on the server (L1d 48KiB P / 32KiB E -> 16KiB
+sub-block, which measured -5.1% here).
 
 ### Auto segment width: dropping the `isqrt(limit)` cap (kept)
 

@@ -219,9 +219,12 @@ inline uint64_t seg_k_width_from_l2_bytes(uint64_t l2_bytes) {
 // derivation as main.cpp's SUB_BLOCK_BYTES, callable per-CPU with a RAW
 // (undivided -- see CpuCacheTopology's comment on l1_raw) L1d size. 0
 // falls back to the same conservative 32KiB the global path uses.
+// Half the L1d, not all of it: leaves room in L1 for the small tier's own
+// state and the presieve window alongside the sub-block. See
+// docs/RESEARCH.md#sub-block-size-half-the-l1d-not-all-of-it-kept-2026-09-27.
 inline uint64_t sub_block_from_l1_bytes(uint64_t l1_bytes) {
     if (l1_bytes == 0) l1_bytes = 32 * 1024;
-    return std::max<uint64_t>(8, l1_bytes / 8 * 8);
+    return std::max<uint64_t>(8, l1_bytes / 2 / 8 * 8);
 }
 
 struct Options {
