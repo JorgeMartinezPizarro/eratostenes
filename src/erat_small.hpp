@@ -43,9 +43,9 @@ constexpr uint8_t M(int pr, int j) { return static_cast<uint8_t>(1u << pos30(R[p
 
 // Per-prime state, 8 bytes: qw = (qp << 6) | (pr << 3) | j, with qp = p / 30,
 // pr = WHEEL_POS[p % 30] and j the pending hit's multiplier phase; pos is
-// that hit's position relative to the current segment's start -- a byte
-// index for the small tier (cross_off_all), a bit (wheel) index for the
-// medium tier (cross_off_medium). qp < 2^26 (p < ~2e9) is checked by
+// that hit's byte position relative to the current segment's start (the
+// medium tier packs qw as (qp << 6) | w instead, see cross_off_medium).
+// qp < 2^26 (p < ~2e9) is checked by
 // SegmentSieve's constructor.
 struct DenseState {
     uint32_t qw;
@@ -143,12 +143,12 @@ inline void cross_off_class(uint8_t* s, uint64_t end, DenseState* first, DenseSt
 // unrolled loop above can't amortize its per-prime entry/exit cost -- see
 // docs/RESEARCH.md#small-tiers-unrolled-loop-applied-to-medium-hit-count-primes-measured-not-adopted.
 // Generic one-hit-per-iteration stepping instead, division-free via the
-// shared mod-210 table (wheel210_big.hpp), on bit positions.
+// shared mod-210 tables (wheel210_big.hpp), on byte positions.
 //
 // Every medium-tier prime is always > 163 (presieve's {7,23,37} group
 // always covers 7 first), so multiplier phases that are multiples of 7 are
 // redundant -- stepping through only the 48/210 phases coprime to 210
-// (GAP_K210/ONFLY_CORRECTION210, wheel210_big.hpp) instead of the 8/30
+// (DM210/CORR210B/MASK210, wheel210_big.hpp) instead of the 8/30
 // coprime to 30 skips ~14% of candidate hits here, same trick as the
 // sparse tier's own big-wheel table. See
 // docs/RESEARCH.md#cross_off_medium-mod-210-multiplier-stepping-2026-09-24
@@ -165,21 +165,33 @@ inline void cross_off_class(uint8_t* s, uint64_t end, DenseState* first, DenseSt
 // A chained-table variant, a mod-2310 extension, a 4-way interleaved
 // stepping variant, and a 64-list restructuring were all tried and
 // reverted -- see docs/RESEARCH.md's other `cross_off_medium` entries.
+//
+// Byte positions and a per-(class, phase) mask, like the sparse tier, not
+// bit positions: marking a bit index costs a shift, a word index and a
+// variable shift per hit, a byte index just `s[pos] |= MASK210[PR][w]`
+// (-12% instructions:u and -3.4% cycles:u at 1e13 together with the
+// doubled tables below, see docs/RESEARCH.md).
+// The tables hold two 48-phase cycles, so w only needs wrapping when it
+// reaches 96 -- at most once per call, and never when med64 is on (a
+// medium prime then has under 48 hits per segment) -- instead of a
+// compare-and-select on every hit.
 template <int PR>
-inline void cross_off_medium(uint64_t* words, uint64_t end_bit, DenseState* first, DenseState* last, uint64_t rebase_bits) {
-    const uint32_t* gap_k = big::GAP_K210.data();
-    const uint32_t* corr = big::ONFLY_CORRECTION210[PR].data();
+inline void cross_off_medium(uint8_t* s, uint64_t end, DenseState* first, DenseState* last, uint64_t rebase) {
+    const uint32_t* dm = big::DM210.data();
+    const uint32_t* corr = big::CORR210B[PR].data();
+    const uint8_t* mask = big::MASK210[PR].data();
     for (DenseState* st = first; st != last; ++st) {
-        uint64_t k = st->pos;
+        uint64_t pos = st->pos;
         uint64_t qp = st->qw >> 6;
-        uint32_t w = st->qw & 63;
-        while (k < end_bit) {
-            words[k >> 6] |= uint64_t{1} << (k & 63);
-            k += qp * gap_k[w] + corr[w];
-            w = (w + 1 == 48) ? 0 : w + 1;
+        uint64_t w = st->qw & 63;
+        while (pos < end) {
+            s[pos] |= mask[w];
+            pos += qp * dm[w] + corr[w];
+            if (++w == 96) [[unlikely]] w = 48;
         }
+        if (w >= 48) w -= 48;
         st->qw = static_cast<uint32_t>((qp << 6) | w);
-        st->pos = static_cast<uint32_t>(k - rebase_bits);
+        st->pos = static_cast<uint32_t>(pos - rebase);
     }
 }
 

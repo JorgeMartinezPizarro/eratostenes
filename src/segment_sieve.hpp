@@ -228,14 +228,14 @@ public:
         // residue class (medium_[pr]) so PR is a compile-time template
         // parameter in cross_off_medium<PR>, same reasoning as the small
         // tier's cross_off_class<PR> calls just above.
-        erat::cross_off_medium<0>(words_.data(), count, medium_[0].data(), medium_[0].data() + medium_[0].size(), count);
-        erat::cross_off_medium<1>(words_.data(), count, medium_[1].data(), medium_[1].data() + medium_[1].size(), count);
-        erat::cross_off_medium<2>(words_.data(), count, medium_[2].data(), medium_[2].data() + medium_[2].size(), count);
-        erat::cross_off_medium<3>(words_.data(), count, medium_[3].data(), medium_[3].data() + medium_[3].size(), count);
-        erat::cross_off_medium<4>(words_.data(), count, medium_[4].data(), medium_[4].data() + medium_[4].size(), count);
-        erat::cross_off_medium<5>(words_.data(), count, medium_[5].data(), medium_[5].data() + medium_[5].size(), count);
-        erat::cross_off_medium<6>(words_.data(), count, medium_[6].data(), medium_[6].data() + medium_[6].size(), count);
-        erat::cross_off_medium<7>(words_.data(), count, medium_[7].data(), medium_[7].data() + medium_[7].size(), count);
+        erat::cross_off_medium<0>(bytes, bytes_needed, medium_[0].data(), medium_[0].data() + medium_[0].size(), bytes_needed);
+        erat::cross_off_medium<1>(bytes, bytes_needed, medium_[1].data(), medium_[1].data() + medium_[1].size(), bytes_needed);
+        erat::cross_off_medium<2>(bytes, bytes_needed, medium_[2].data(), medium_[2].data() + medium_[2].size(), bytes_needed);
+        erat::cross_off_medium<3>(bytes, bytes_needed, medium_[3].data(), medium_[3].data() + medium_[3].size(), bytes_needed);
+        erat::cross_off_medium<4>(bytes, bytes_needed, medium_[4].data(), medium_[4].data() + medium_[4].size(), bytes_needed);
+        erat::cross_off_medium<5>(bytes, bytes_needed, medium_[5].data(), medium_[5].data() + medium_[5].size(), bytes_needed);
+        erat::cross_off_medium<6>(bytes, bytes_needed, medium_[6].data(), medium_[6].data() + medium_[6].size(), bytes_needed);
+        erat::cross_off_medium<7>(bytes, bytes_needed, medium_[7].data(), medium_[7].data() + medium_[7].size(), bytes_needed);
 
         // Sparse tier: see process_sparse_bucket below (pulled out of this
         // function on purpose -- see its own comment). sparse_primes is
@@ -305,7 +305,7 @@ private:
     // on whose square falls below this segment's end; `primes` is sorted,
     // so this touches each prime exactly once per chunk. by_class: the
     // small tier -- byte positions, and one output list per residue class
-    // (state[pr]); otherwise bit positions, all into state[0].
+    // (state[pr]).
     static void activate_dense(const std::vector<uint64_t>& primes, size_t& next,
                                std::vector<erat::DenseState>* state, bool by_class,
                                uint64_t high_n, uint64_t low_n, uint64_t k_low) {
@@ -364,7 +364,7 @@ private:
     // Medium tier: smallest m coprime with 210 (not just 30) with
     // p*m >= start_val -- every medium prime is > 163, so multiples of 7
     // are always redundant here (see erat_small.hpp::cross_off_medium).
-    // Bit position, (qp<<6)|w packing, one list per residue class
+    // Byte position, (qp<<6)|w packing, one list per residue class
     // (medium_[pr]) so cross_off_medium<PR> gets PR as a compile-time
     // template parameter -- same shape as activate_dense's small-tier
     // branch above, just mod-210 stepping instead of mod-30. Same t/w
@@ -382,7 +382,7 @@ private:
             uint32_t w = big::NEXT_W[sres];
             if (w == 48) { ++t; w = 0; }
             uint64_t m = t * 210 + big::M210[w];
-            uint64_t pos = wheel_index(p * m) - k_low;
+            uint64_t pos = (p * m) / WHEEL_MOD - k_low / 8; // byte position, like the small tier's
             medium[pr].push_back({static_cast<uint32_t>(((p / WHEEL_MOD) << 6) | w),
                                    static_cast<uint32_t>(pos)});
             ++next;

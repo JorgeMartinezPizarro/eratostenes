@@ -27,6 +27,7 @@ throughout below).
   - [med64: mod-210 stepping, two variants (tried, both reverted, 2026-09-26, external review, Opus 5.5)](#med64-mod-210-stepping-two-variants-tried-both-reverted-2026-09-26-external-review-opus-55)
   - [Small tier: mod-210 stepping as 7 unrolled mod-30 copies (tried, reverted, 2026-09-27)](#small-tier-mod-210-stepping-as-7-unrolled-mod-30-copies-tried-reverted-2026-09-27)
   - [`cross_off`: branchless tail for the small and med64 tiers (tried, reverted, 2026-09-27)](#cross_off-branchless-tail-for-the-small-and-med64-tiers-tried-reverted-2026-09-27)
+  - [`cross_off_medium`: byte positions + doubled tables (kept, 2026-09-27)](#cross_off_medium-byte-positions--doubled-tables-kept-2026-09-27)
 - [wheel.hpp](#wheelhpp)
   - [Wheel size: mod 6 vs. mod 30 vs. mod 210 (historical, pre-tiered-marking architecture)](#wheel-size-mod-6-vs-mod-30-vs-mod-210-historical-pre-tiered-marking-architecture)
   - [`ONFLY_CORRECTION`/`GAP_K`: shared table replacing a per-prime `delta[]` (kept)](#onfly_correctiongap_k-shared-table-replacing-a-per-prime-delta-kept)
@@ -496,6 +497,42 @@ Where med64's cost actually sits, for whoever looks next: 77% of all L1 load
 misses at 1e11 (~7.4G, ~85% of its hits), 95.5% of which hit L2 (L3 traffic
 negligible) -- every med64 prime sweeps the whole 256KiB segment. ~5.4
 cycles:u/hit vs ~2.8 for the small tier.
+
+### `cross_off_medium`: byte positions + doubled tables (kept, 2026-09-27)
+
+Per-tier IPC at 1e12 (cycles:u and instructions:u sampled separately on a `-g`
+twin of the release binary, attributed by source line): medium ran 38% of all
+instructions at IPC 1.41, against 0.80 for med64 and 0.91 for small -- the one
+marking tier that looked instruction-bound rather than memory-bound. Its loop was
+~17 instructions per hit, one of them the actual store:
+
+- **v1, byte positions.** Marking bit index k cost `k >> 6`, a variable
+  `1 << (k & 63)` and a 64-bit RMW; a byte position with a per-(class, phase)
+  mask (like the sparse tier) is `s[pos] |= MASK210[PR][w]`. Step = `qp *
+  DM210[w] + CORR210B[PR][w]` bytes, i.e. `big::TABLE`'s own dm/corr/mask split
+  into flat arrays indexed by the register `w` (not the chained `next` field,
+  and not fused into one struct -- both measured slower before, see
+  `wheel210_big.hpp` below). ~14 instructions/hit.
+- **v2, no per-hit wrap.** `w = (w + 1 == 48) ? 0 : w + 1` was 4 instructions
+  per hit (lea, cmp, mov, cmov). The tables now hold two 48-phase cycles and the
+  loop does `if (++w == 96) w = 48` (never taken with med64 on: a medium prime
+  then has p >= seg_k_width/12, i.e. under ~40 hits per segment) and folds w
+  back once per call. `w` is also `uint64_t` now, dropping a zero-extend.
+  ~11 instructions/hit.
+
+`make test` green, pi(N) exact to 1e11, also with `ERATOSTENES_MED64_NUM=0`
+(the case where the wrap path runs). cycles:u, dev PC:
+
+| N | base | v1 | v2 |
+|---|---:|---:|---:|
+| 1e11 | 102.5G | 102.2G (-0.3%) | -- |
+| 1e12 | 1.286T | 1.264T (-1.7%) | 1.243T (-3.3%) |
+| 1e13 (ABBA) | 17.47T | 17.02T (-2.8%) | **16.87T (-3.4%)** |
+
+instructions:u at 1e13: 19.17T -> 16.91T (-11.8%). The gain grows with N, as it
+should: the medium tier's share of the run grows with N (6% of cycles at 1e11,
+28% at 1e12, 45% at 1e13 before this change). `GAP_K210`/`ONFLY_CORRECTION210`
+(bit-granularity tables) were removed; nothing else used them.
 
 ## wheel.hpp
 

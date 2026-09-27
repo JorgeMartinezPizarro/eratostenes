@@ -50,70 +50,35 @@ constexpr std::array<uint8_t, 211> make_next() {
 }
 inline constexpr std::array<uint8_t, 211> NEXT_W = make_next();
 
-// Wheel-index (k-space, bit granularity) stepping tables for the medium
-// tier's mod-210 multiplier stepping (erat_small.hpp::cross_off_medium).
-// Every medium-tier prime is > 163 (presieve's own {7,23,37} group always
-// covers 7 first, see presieve.hpp), so any hit whose multiplier is a
-// multiple of 7 lands on a composite 7 already marked -- pure redundant
-// work for this tier specifically, same reasoning as the sparse tier's own
-// TABLE above (that one is byte-granularity for the bucket sieve; this one
-// is bit-granularity for the medium tier's flat one-hit-per-iteration
-// loop, but it's the same 48/210-vs-8/30 saving, ~14% fewer candidate
-// hits).
+// Medium-tier stepping tables (erat_small.hpp::cross_off_medium): the same
+// mod-210 multiplier wheel and byte layout as TABLE above, so a medium hit
+// is `s[pos] |= MASK210[ri][w]` and the step to the next one is
+// `qp * DM210[w] + CORR210B[ri][w]` bytes. Every medium prime is > 163 and
+// 7 is always presieved, so skipping multipliers that are multiples of 7
+// saves ~14% of this tier's hits.
 //
-// Same delta split as wheel.hpp's ONFLY_CORRECTION/GAP_K (delta = qp *
-// gap_k + corr), re-derived with M210 (48 mod-210-coprime multiplier
-// phases) standing in for WHEEL_R (8 mod-30-coprime phases): writing
-// p = qp*30 + R30[ri] and letting a hit's multiplier step from M210[w] to
-// M210[w+1] (mod 210, +210 on wraparound), the wheel-index advance is
-//   delta = qp*30 * gap210(w) + R30[ri]*gap210(w)   [n advances by p*gap210(w)]
-// and the first term is an exact multiple of 30, so (exactly like
-// wheel_delta_at's own derivation) it becomes qp*(gap210(w)*8) plus a
-// (ri, w)-only correction -- independent of qp, i.e. independent of the
-// prime's actual magnitude. Both terms are tiny, shared, read-only tables
-// (48 + 8*48 entries) -- unlike the reverted 64-list attempt
-// (erat_small.hpp), this doesn't touch DenseState's layout or split the
-// medium tier's own flat list at all, so there's no per-prime memory or
-// locality cost to trade against the instruction savings.
-//
-// Deliberately kept as two flat arrays indexed by (ri fixed per prime,
-// outside the loop) and w (a plain incrementing loop variable), NOT as one
-// struct-with-a-"next"-field table indexed by a `w`/`idx` that's itself
-// loaded from the previous lookup, and NOT fused into one {gap,corr}
-// struct per (PR, w) either -- both alternatives were tried and measured
-// slower (a chained index serializes table loads behind each other; the
-// fused-struct form regressed on wall-clock too, for reasons never fully
-// isolated). See docs/RESEARCH.md for the numbers behind both.
-constexpr std::array<uint32_t, 48> make_gap_k210() {
-    std::array<uint32_t, 48> g{};
-    for (int w = 0; w < 48; ++w) {
-        uint32_t m1 = M210[w];
-        uint32_t m2 = (w == 47) ? M210[0] + 210 : M210[w + 1];
-        g[w] = (m2 - m1) * 8;
-    }
-    return g;
+// Deliberately flat arrays indexed by (ri, fixed per prime) and w (a plain
+// register loop variable), NOT TABLE's struct-with-"next" (a chained index
+// serializes one table load behind the previous one every hit) and NOT
+// fused into one struct per (ri, w) either -- both were measured slower,
+// see docs/RESEARCH.md. Each array holds two full 48-phase cycles, so the
+// loop can run w past 47 without wrapping it on every hit.
+constexpr std::array<uint32_t, 96> make_dm210() {
+    std::array<uint32_t, 96> a{};
+    for (int w = 0; w < 96; ++w) a[w] = TABLE[w % 48].dm;
+    return a;
 }
-inline constexpr std::array<uint32_t, 48> GAP_K210 = make_gap_k210();
-
-constexpr std::array<std::array<uint32_t, 48>, 8> make_onfly_correction210() {
-    std::array<std::array<uint32_t, 48>, 8> tbl{};
-    for (int ri = 0; ri < 8; ++ri) {
-        uint32_t p_mod30 = R30[ri];
-        for (int w = 0; w < 48; ++w) {
-            uint32_t m1 = M210[w];
-            uint32_t m2 = (w == 47) ? M210[0] + 210 : M210[w + 1];
-            uint32_t gap210 = m2 - m1;
-            uint32_t rp = (p_mod30 * (m1 % 30)) % 30;
-            uint64_t d = static_cast<uint64_t>(p_mod30) * gap210;
-            uint64_t c1 = (rp + d) / 30;
-            uint32_t rem = static_cast<uint32_t>((rp + d) % 30);
-            int pos_before = pos30(rp);
-            int pos_after = pos30(rem);
-            int64_t corr = static_cast<int64_t>(c1) * 8 + (pos_after - pos_before);
-            tbl[ri][w] = static_cast<uint32_t>(corr);
-        }
-    }
-    return tbl;
+inline constexpr std::array<uint32_t, 96> DM210 = make_dm210();
+constexpr std::array<std::array<uint32_t, 96>, 8> make_corr210b() {
+    std::array<std::array<uint32_t, 96>, 8> a{};
+    for (int ri = 0; ri < 8; ++ri) for (int w = 0; w < 96; ++w) a[ri][w] = TABLE[ri * 48 + w % 48].corr;
+    return a;
 }
-inline constexpr std::array<std::array<uint32_t, 48>, 8> ONFLY_CORRECTION210 = make_onfly_correction210();
+inline constexpr std::array<std::array<uint32_t, 96>, 8> CORR210B = make_corr210b();
+constexpr std::array<std::array<uint8_t, 96>, 8> make_mask210() {
+    std::array<std::array<uint8_t, 96>, 8> a{};
+    for (int ri = 0; ri < 8; ++ri) for (int w = 0; w < 96; ++w) a[ri][w] = TABLE[ri * 48 + w % 48].mask;
+    return a;
+}
+inline constexpr std::array<std::array<uint8_t, 96>, 8> MASK210 = make_mask210();
 }
