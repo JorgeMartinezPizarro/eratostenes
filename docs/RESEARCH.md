@@ -25,6 +25,7 @@ throughout below).
   - [`cross_off_medium`: 2-ahead software prefetch (tried, reverted, 2026-09-25, follow-up session)](#cross_off_medium-2-ahead-software-prefetch-tried-reverted-2026-09-25-follow-up-session)
   - [`cross_off_medium`: EratMedium-style 64-list restructuring](#cross_off_medium-eratmedium-style-64-list-restructuring)
   - [med64: mod-210 stepping, two variants (tried, both reverted, 2026-09-26, external review, Opus 5.5)](#med64-mod-210-stepping-two-variants-tried-both-reverted-2026-09-26-external-review-opus-55)
+  - [Small tier: mod-210 stepping as 7 unrolled mod-30 copies (tried, reverted, 2026-09-27)](#small-tier-mod-210-stepping-as-7-unrolled-mod-30-copies-tried-reverted-2026-09-27)
 - [wheel.hpp](#wheelhpp)
   - [Wheel size: mod 6 vs. mod 30 vs. mod 210 (historical, pre-tiered-marking architecture)](#wheel-size-mod-6-vs-mod-30-vs-mod-210-historical-pre-tiered-marking-architecture)
   - [`ONFLY_CORRECTION`/`GAP_K`: shared table replacing a per-prime `delta[]` (kept)](#onfly_correctiongap_k-shared-table-replacing-a-per-prime-delta-kept)
@@ -430,6 +431,48 @@ proposed target, not yet attempted) has the opposite population shape (many
 hits per prime per sub-block), so this negative result does NOT by itself
 rule out mod-210 stepping there -- that would need its own measurement, not
 an extrapolation from med64's failure.
+
+### Small tier: mod-210 stepping as 7 unrolled mod-30 copies (tried, reverted, 2026-09-27)
+
+The small-tier half of the med64 mod-210 idea above, with a setup that costs
+nothing extra: one 210-multiplier cycle is exactly 7 consecutive mod-30 cycles
+(copy c = 0..6, each p bytes further on) with the one hit per copy whose
+m = 30c + R[j] is a multiple of 7 left out (copy 3 skips two, one copy skips
+none). So `cross_off210<PR>` kept `cross_off`'s same 8 register offsets and
+just emitted 7 copies of its 8-store body with 8 of the 56 stores removed at
+compile time (`if constexpr`), pending phase u = c*8 + j in the same 6 bits.
+pi(N) exact at 1e6-1e11. Split the small tier into a mod-210 list (p below a
+threshold, swept via env var) and the unchanged mod-30 list above it.
+
+Codegen took three rounds, each measured:
+1. GCC hoisted all 48 `s + c*p + o_j` sums out of the loop as invariants,
+   spilled them and reloaded one per store: +9% cycles:u at 1e11. Fixed with
+   an empty `asm("" : "+r"(b))` barrier after each `b += p`.
+2. Loop checked `end` once per 7 copies, so entry/exit chains averaged ~48
+   checked hits instead of ~8 (+2.5%). Rewritten as 7 copy bodies chained with
+   gotos, one end check per copy, and the exit reusing the entry chain (halves
+   code size).
+3. Stores through an opaque `q = s + b` so each is one `or`, not lea + or.
+
+Final state: at 1e11 (12 threads), all small primes on mod-210: stores
+-7%, instructions -4.5%, **cycles:u flat** (101.0G vs 100.9G). Single thread at
+1e10: stores -11.5%, instructions -6.3%, cycles:u flat. An isolated
+microbenchmark (all 763 small primes over a 24KiB buffer) pinned down why:
+for p in [167,1000) mod-30 retires **1.04 stores/cycle** (the L1 store-commit
+ceiling) and mod-210 only **0.84**, with 16% fewer stores and ~4% *more*
+cycles. The mod-30 loop (~30 uops) is served by the Loop Stream Detector (only
+3.8G of its 9.5G uops come from the DSB); the 7-copy loop (~217 uops) doesn't
+fit the LSD, runs from DSB + MITE (MITE uops 0.10G -> 0.73G, undelivered
+slots +45%), and nearly all its stores are indexed RMWs (`orb $m,(%q,%o_j)`,
+more fused uops than GCC's base+disp mix in the mod-30 loop). The frontend
+loss is about exactly the store saving. Also swept alongside: small_limit and
+med64_limit at the 24KiB sub-block (1/4 + 1/12 is still the optimum), and
+smaller sub-blocks at fixed small_limit (worse -- ~68 cycles:u fixed cost per
+prime per sub-block).
+
+Might behave differently on a core with a bigger LSD/DSB (Golden Cove P-cores
+on the i5-13500), but not tested there. Anyone retrying this needs the loop
+body under the LSD size, not just fewer stores.
 
 ## wheel.hpp
 
