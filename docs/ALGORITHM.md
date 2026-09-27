@@ -45,9 +45,9 @@ covers 7, so a multiple `p*m` with `7 | m` is already marked. The medium and spa
 tiers therefore step `m` only through the 48 residues coprime to 210 instead of the
 8 coprime to 30, skipping ~14% of hits. `wheel210_big.hpp` holds the tables for
 that: `big::TABLE` (sparse tier: mask, byte step and next phase per (class,
-phase)) and the same data as flat arrays for the medium tier (`MASK210`, `DM210`,
-`CORR210B`: hit = `s[pos] |= MASK210[pr][w]`, next hit `pos += qp*DM210[w] +
-CORR210B[pr][w]`, no division).
+phase)) and the same data packed one word per (class, phase) for the medium tier
+(`PACK210[pr][w] = mask | dm << 8 | corr << 16`: hit = `s[pos] |= mask`, next hit
+`pos += qp*dm + corr`, no division).
 The small and med64 tiers stay on mod-30 multipliers: their unrolled loops depend
 on the 8-hits-per-p-bytes cycle, and both mod-210 versions tried so far lost (see
 [RESEARCH.md](RESEARCH.md#erat_smallhpp)).
@@ -161,7 +161,7 @@ sparse, then extraction.
   See [RESEARCH.md](RESEARCH.md#segment_sievehpp).
 - **Medium** (`med64_limit <= p < seg_k_width`, a few hits per segment): a plain
   one-hit-per-iteration loop (`cross_off_medium<PR>`) on byte positions, stepping
-  with the mod-210 tables (§2), ~11 instructions per hit. The tables hold two
+  with the mod-210 table (§2), one table load per hit. The table holds two
   48-phase cycles so the phase `w` doesn't need wrapping on every hit (a medium
   prime has fewer than 48 hits per segment; `w` is folded back once per call).
   One list per residue class (`medium_[8]`) makes the class a template

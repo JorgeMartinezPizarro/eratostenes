@@ -534,6 +534,22 @@ should: the medium tier's share of the run grows with N (6% of cycles at 1e11,
 28% at 1e12, 45% at 1e13 before this change). `GAP_K210`/`ONFLY_CORRECTION210`
 (bit-granularity tables) were removed; nothing else used them.
 
+**v3, one packed table (kept, same day).** After v2, per-tier IPC at 1e12 was
+still 1.27 for medium, ~2.2 core cycles per hit with 4 loads per hit (mask, dm,
+corr, and the store's own read) on a 2-load-port core. Packing `mask | dm << 8 |
+corr << 16` into one `PACK210[PR][w]` word makes it 2 loads per hit, paying for
+it with a couple of ALU ops (GCC uses `movzbl %ah` for dm). loads:u -11%,
+instructions:u +1.9%; cycles:u **-0.37% at 1e12** (3/3 reps) and **-0.5 to -1.1%
+at 1e13** (ABBA, both B runs below both A runs; the two A runs differed by 1.4%
+from each other). Kept: small but same direction everywhere, and one table
+instead of three. This contradicts the earlier fused-`{gap,corr}` regression
+under `wheel210_big.hpp` below -- that one was bit-granularity, wall-clock only,
+and never had its cause isolated.
+
+**`med64_limit` re-swept after v3** (cycles:u, 1e12, 2 reps each): 1/12 1242G,
+1/16 1242G, 1/8 1254G, 1/24 1248G, 1/48 1273G, med64 off 1343G. The cheaper
+medium tier doesn't move the optimum; 1/12 stays.
+
 ## wheel.hpp
 
 ### Wheel size: mod 6 vs. mod 30 vs. mod 210 (historical, pre-tiered-marking architecture)

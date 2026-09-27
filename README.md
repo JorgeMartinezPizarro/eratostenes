@@ -106,7 +106,7 @@ What this project is built from, one term each — follow the link for the conce
 | 1e11 | 1.67s | 1.657s | 1.01x |
 | 1e12 | 23.85s | 24.376s | 0.98x |
 | 1e13 | 312.60s | 292.615s | 1.07x |
-| 1e14 | 3927.24s | 3349.907 | 1.17x |
+| 1e14 | 3849.84s | 3349.907 | 1.14x |
 
 The same results on an Intel Core i5-11400F:
 
