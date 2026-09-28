@@ -56,6 +56,7 @@ throughout below).
   - [`sieve_chunk`: one `SegmentSieve` per worker instead of per chunk (tried, reverted -- neutral on cycles:u, 2026-09-26)](#sieve_chunk-one-segmentsieve-per-worker-instead-of-per-chunk-tried-reverted----neutral-on-cyclesu-2026-09-26)
   - [`run_parallel_chunks`: chunk-granularity idle-time investigation (2026-09-25, external review, Opus 5.5)](#run_parallel_chunks-chunk-granularity-idle-time-investigation-2026-09-25-external-review-opus-55)
   - [Chunk-width floor: at least 4 segments per chunk (kept, 2026-09-27)](#chunk-width-floor-at-least-4-segments-per-chunk-kept-2026-09-27)
+  - [i5-13500 server gap vs primesieve: hybrid cores ruled out, L2 misses on P-cores (open, 2026-09-28)](#i5-13500-server-gap-vs-primesieve-hybrid-cores-ruled-out-l2-misses-on-p-cores-open-2026-09-28)
   - [`small_limit` cutoff tuning](#small_limit-cutoff-tuning)
   - [Cache-topology sizing: per-CPU-minimum step (kept)](#cache-topology-sizing-per-cpu-minimum-step-kept)
   - [Medium/sparse cutoff raised above `seg_k_width` (tried, reverted, 2026-09-27)](#mediumsparse-cutoff-raised-above-seg_k_width-tried-reverted-2026-09-27)
@@ -1411,6 +1412,171 @@ restores the old behavior exactly. Measured with that env var on one binary
 effect at large N, where chunks span thousands of segments. Should matter
 more on the server; not yet measured there.
 
+### i5-13500 server gap vs primesieve: hybrid cores ruled out, L2 misses on P-cores (open, 2026-09-28)
+
+Context: dev PC (i5-11400F, symmetric) is now below primesieve at every N in
+README.md#benchmarks (0.92-0.98x); the server (i5-13500, 6P+HT + 8E, 20
+threads) is not, and the gap grows with N: 0.98x (1e12), 1.05x (1e13), 1.14x
+(1e14). All measurements below ran on the server through Docker (the only way
+to run there), one at a time, with `ERATOSTENES_START` tails of 1e14.
+
+**Method caveat -- 1% tails are wall-clock-unreliable.** `ERATOSTENES_START`
+keeps the full-run chunk width, so a 1% tail gets `threads*150*0.01` = ~1.5
+chunks per thread: the second, half-empty round leaves cores idle. Measured:
+99e12..1e14 on P-cores, eratostenes 459s user / 47.5s wall = 9.7 of 12 cores
+busy vs primesieve 11.95 (dev PC: `ERATOSTENES_DEBUG_IDLE` idle=16-17%, 18
+chunks). Every wall-clock tail ratio taken that way (1.29x P-only, 1.19x
+E-only, 1.20x all) was mostly this artifact. Use 10% tails (`START=90e12`:
+~15 chunks/thread, idle 1.6% measured, ratio 1.18x vs the full run's 1.14x)
+or compare `cycles:u`/user time. Tried forcing >= 32 chunks/thread in tail
+mode (dev PC, ABBA on the 1e14 1% tail): idle 17% -> 0.7%, but user time
++16-23% and wall unchanged (72.3/73.3s -> 70.3/76.2s) -- per-chunk setup is
+~0.4s of CPU per chunk, far more than estimated. Reverted. Side lead, not
+followed up: that setup is ~1.5% of a full 1e14 server run (3000 chunks).
+
+**Ruled out (server):**
+- Work distribution: already ruled out earlier (idle 2.1%, see above); 1.6%
+  on the 10% tail.
+- Hybrid cores: 10% tail, 20 threads, `perf stat` split by PMU (counts
+  un-scaled by perf's hybrid enable%): cycles 1.14x on `cpu_core` AND 1.14x
+  on `cpu_atom`; branch misses 1.96x / 2.08x. Same gap on both core types.
+- Shared-resource contention from E-cores (ring/L3 clock): P-cores alone
+  (`--cpuset-cpus=0-11 -t 12`, 10% tail) are already +18% cycles:u
+  (19.37e12 vs 16.45e12), no better than with the E-cores running. (An
+  earlier +4% from the 1% tail pointed the other way; not reproduced,
+  unexplained.)
+- Segment size (1% tail, wall, single reps, so only relative): P-cores
+  256KiB 49.38s / 512KiB 51.14s / 1MiB 70.78s; 20 threads 256KiB 45.01s /
+  512KiB 43.35s. Neither closes the gap; the auto 512KiB stays (this closes
+  the "not yet validated on the i5-13500" note of the segment-doubling entry
+  in arg_parser.hpp below, at least for 1e14).
+
+**Main signal -- L2 misses on P-cores.** P-cores only, 10% tail:
+
+| | eratostenes | primesieve | ratio |
+|---|---:|---:|---:|
+| cycles:u | 19.37e12 | 16.45e12 | 1.18x |
+| L1-dcache-load-misses | 1547e9 | 1648e9 | 0.94x |
+| LLC-loads (= L2 misses) | 76.9e9 | 5.5e9 | **14x** |
+| LLC-load-misses | 0.56e9 | 0.72e9 | 0.78x |
+
+L1 is as good or better, L3 misses fewer -- but 1 in 20 L1 misses gets past
+L2 (95.0% L2 hit) vs 1 in 300 for primesieve (99.7%). ~71e9 extra L3 round
+trips at ~60-70 cycles is enough to be most of the 2.9e12 extra cycles even
+with overlap. Full machine: LLC-loads 11x on P-cores, only 1.9x on E-cores.
+Also ~2x branch misses throughout (medium tier's loop exits, known), worth
+about half the extra cycles on P-cores in the 20-thread run.
+
+Suspects for what overflows L2 (1.25MB per P-core, shared by 2 HT threads,
+each with a 512KiB segment = 1MB in segments alone; primesieve 2x256KiB):
+the segment itself, the medium tier's per-prime state (266k primes walked
+every segment), the sparse buckets.
+
+**Result: it's the segment, but the L2 misses are NOT the cost.** Same four
+counters, P-cores, 10% tail, `-s 7864320` (256KiB) vs the 512KiB auto run
+above:
+
+| | 512KiB | 256KiB | change |
+|---|---:|---:|---:|
+| cycles:u | 19.37e12 | 20.39e12 | **+5.2%** |
+| L1-dcache-load-misses | 1547e9 | 1479e9 | -4.4% |
+| LLC-loads | 76.9e9 | 12.5e9 | **-84%** (2.3x primesieve, was 14x) |
+| LLC-load-misses | 0.56e9 | 0.44e9 | -22% |
+
+L2 hit rate 95.0% -> 99.2%, i.e. the segment (2 HT x 512KiB in a 1.25MB L2)
+is what overflowed L2. `perf record -e LLC-loads:u` on the 512KiB 1% tail
+agrees: the samples are spread over every tier that writes the whole segment
+-- sparse `process_big` 30.6%, medium `cross_off_medium<*>` 39.4%,
+`process_med64<*>` 25.4%, `Presieve::fill` 4.5% -- and ~0 in the small tier
+(`cross_off<*>`, 0.1%), which works inside an L1 sub-block. No single tier's
+own state stands out.
+
+But removing ~64e9 L3 round trips made cycles go *up* 1.0e12. Halving the
+segment also reshuffles tiers (med64 29138 -> 15096, medium 266008 -> 139714,
+sparse 368632 -> 508968 primes), so that shift costs something, but for the
+L2 misses to have been "most of the gap" they'd have had to cost ~45 exposed
+cycles each and be outweighed by the tier shift -- implausible. They are
+overwhelmingly hidden: segment traffic is scattered stores/RMWs with no
+dependency chain, so the OoO core overlaps them (memory-level parallelism).
+The earlier "71e9 x 60-70 cycles = most of the 2.9e12" estimate was wrong:
+it assumed exposed latency. 14x LLC-loads is a symptom, not the bottleneck;
+the auto 512KiB stays (consistent with the wall-clock segment sweep above).
+
+**TopDown level 1 -- the gap is mostly bad speculation.** P-cores, 10% tail,
+512KiB auto, slots in e12 (wall 461.3s vs 381.8s = 1.21x):
+
+| | eratostenes | primesieve | excess |
+|---|---:|---:|---:|
+| slots | 58.33 | 49.51 | +8.82 (1.18x) |
+| Retiring | 26.54 (45.4%) | 28.35 (57.3%) | -1.81 |
+| Bad Speculation | 11.61 (19.9%) | 5.45 (11.0%) | **+6.16 (2.13x)** |
+| Frontend Bound | 7.57 (12.9%) | 6.38 (12.9%) | +1.19 |
+| Backend Bound | 12.73 (21.8%) | 9.32 (18.8%) | +3.41 |
+
+We retire *less* work (consistent with -6% instructions), and lose it on
+wasted speculation: bad-spec alone is ~70% of the net gap, matching the 2x
+branch misses. Backend is +3.4e12 (~39%) -- not nothing, but the 256KiB run
+showed the L2 misses aren't it, so if it matters it's core-bound or other
+memory. Part of the frontend excess is likely resteers after mispredicts, so
+fixing the mispredicts should also claw some of that back.
+
+Recipe (perf 6.1 hybrid): `-M TopdownL1` is broken here (mixes `cpu_atom`
+events, EINVAL on `topdown-retiring`); per-thread mode refuses topdown
+events. Works: `perf stat -a -C 0-11 -e '{cpu_core/slots/,cpu_core/topdown-retiring/,cpu_core/topdown-bad-spec/,cpu_core/topdown-fe-bound/,cpu_core/topdown-be-bound/}' -- <cmd>`.
+
+**Level 2 (eratostenes, same conditions, 472.9s):** Bad Speculation 19.3% is
+19.2% branch mispredict / 0.1% machine clears -- all of it branches. Backend
+23.4% = 10.4% memory + 13.0% core. Heavy ops 10.1% of slots. (primesieve's
+level 2 not measured yet.)
+
+**Mispredicts per tier** (`perf record -e branch-misses:u`, P-cores, 1% tail,
+15.26e9 total -- the same total as the earlier 15.3e9 vs primesieve's 7.6e9).
+Per-call rates use 63,578 segments (1e12 / 15,728,640):
+
+| tier | share | misses | per call |
+|---|---:|---:|---:|
+| medium `cross_off_medium<*>` | 59.7% | 9.11e9 | 0.54 per prime per segment |
+| med64 `process_med64<*>` | 20.0% | 3.05e9 | 1.65 per prime per segment |
+| small `cross_off<*>` | 16.7% | 2.55e9 | |
+| `sieve_chunk` (counting) | 2.3% | 0.35e9 | |
+| sparse `process_big` | 1.3% | 0.19e9 | |
+
+The medium tier alone mispredicts more than all of primesieve (9.1e9 vs 7.6e9).
+0.54 per call is the known loop exit (see the sparse-cutoff and
+segment-doubling entries); med64's 1.65 matches the branchless-tail entry
+above, which already showed that fixing med64/small that way costs more in
+stores than it saves.
+
+**primesieve, same conditions** (7.61e9 total): `EratSmall` 30.1% (2.29e9),
+`EratMedium` 68.0% (5.17e9), `EratBig` 1.1%. Its tiers (`config.hpp`):
+small p <= L1d * 0.2 (~9.8k), medium p <= sieve bytes * 3.0 (786k on 256KiB,
+i.e. >= ~2.7 hits per segment), everything above goes to EratBig. That's
+~62k medium primes x 127k segments = ~7.9e9 calls -> **~0.66 mispredicts per
+call, worse than our 0.54.** Our loop isn't the problem; the call count is:
+medium + med64 = 295k primes x 63.6k segments = 18.8e9 calls, 2.4x theirs,
+because our medium tier runs down to ~1 hit per segment (`p < seg_k_width`,
+4.19M on 512KiB) where primesieve stops at ~2.7 (the equivalent cutoff here
+is ~0.375 x seg_k_width = 1.57M).
+
+This is the `sparse_limit` question again (three reverts above, all on the
+dev PC at 1e12/1e13, where the sparse population grew 2.6x from a small
+base). At 1e14 the regime differs: sparse is already 369k primes, and the
+raised-cutoff sweep above was still falling at 1x (1.5x was only +1.3%), so
+the minimum may sit below 1x there. `ERATOSTENES_SPARSE_NUM/_DEN` (lowering
+only, default 1/1) added to re-sweep it; pi(1e11) exact at /16 and /64,
+pi(1e12) exact at 3/8, `make test` green.
+
+**Next (pending):** server sweep, P-cores, 1% tail (cycles:u is immune to
+the tail idle artifact), NUM/DEN = 1/1, 3/4, 1/2, 3/8, 1/4; confirm any
+winner on the 10% tail and on the dev PC at 1e13 (the N that killed it
+before).
+
+Server perf recipe: `eratostenes:dev` image ships `linux-perf`; run with
+`docker run --cap-add SYS_ADMIN` (host `perf_event_paranoid=3`, a
+Debian/Ubuntu-only level that `PERFMON` does not pass). perf 6.1 syntax:
+unprefixed events (`cycles:u,...`), it splits them into `cpu_core`/`cpu_atom`
+itself; `cpu_core/x:u/` is a syntax error.
+
 ### `small_limit` cutoff tuning
 
 Measured on an i5-11400F (48KiB L1d), cycles:u at N=1e12 vs the old table/onfly
@@ -1675,7 +1841,9 @@ run afterwards: 348.67s (README best was 361.19s; primesieve 354.854s -> 0.98x).
 the 1e14 tail, 104.4s vs 82.6s, +26% -- HT still pays at that scale.
 
 Not yet validated on the i5-13500, where the per-thread share is the E-core one
-(512KiB) and there are 20 threads. A finer version (wide segment only for chunks
+(512KiB) and there are 20 threads. (2026-09-28: 1e14 tail on the server, 20
+threads, 512KiB beat 256KiB, 43.35s vs 45.01s -- see main.cpp's "i5-13500
+server gap" entry.) A finer version (wide segment only for chunks
 past seg_k_width^2, where sparse primes actually start) could also recover the
 loss in the first ~44% of a 1e13 run; not attempted.
 

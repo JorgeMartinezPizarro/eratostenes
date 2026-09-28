@@ -498,11 +498,24 @@ int main(int argc, char** argv) {
     // classified sparse below and the width is left exactly as
     // auto-tuned. small_limit/the small-vs-medium cutoff are untouched.
     //
-    // The medium/sparse cutoff itself stays plain `p >= seg_k_width` --
+    // The medium/sparse cutoff defaults to plain `p >= seg_k_width` --
     // decoupling it (sparse_limit = seg_k_width/4) was tried three times
-    // and reverted every time. See
+    // on the dev PC at 1e12/1e13 and reverted every time. See
     // docs/RESEARCH.md#eratbig-style-sparse-tier-forcing-a-power-of-2-segment-width-and-sparse_limit--seg_k_width4-all-attempts-reverted.
-    if (base_limit >= seg_k_width) {
+    // Overridable via ERATOSTENES_SPARSE_NUM/_DEN (sparse_limit =
+    // seg_k_width * NUM / DEN) to re-sweep it at 1e14 without recompiling:
+    // primesieve's EratMedium stops at ~2.7 hits/segment, ours at ~1.
+    // Evaluated after the power-of-2 fixup below, like med64_limit.
+    uint64_t sparse_num = 1, sparse_den = 1;
+    if (const char* s = std::getenv("ERATOSTENES_SPARSE_NUM")) sparse_num = std::strtoull(s, nullptr, 10);
+    if (const char* s = std::getenv("ERATOSTENES_SPARSE_DEN")) sparse_den = std::strtoull(s, nullptr, 10);
+    // Lowering only: dense-tier state is sized for p < seg_k_width (see
+    // SegmentSieve's constructor checks).
+    if (sparse_num == 0 || sparse_den == 0 || sparse_num > sparse_den) sparse_num = sparse_den = 1;
+    // Power-of-2 fixup whenever some prime may end up sparse. With the
+    // default cutoff this is base_limit >= seg_k_width; a lowered cutoff
+    // (NUM < DEN) can make primes sparse below that, so take the smaller.
+    if (base_limit >= seg_k_width || base_limit >= seg_k_width * sparse_num / sparse_den) {
         uint64_t sb = seg_k_width / 8, p2 = 1;
         while (p2 * 2 <= sb) p2 *= 2;
         if (p2 != sb) {
@@ -526,6 +539,7 @@ int main(int argc, char** argv) {
     if (const char* s = std::getenv("ERATOSTENES_MED64_DEN")) med64_den = std::strtoull(s, nullptr, 10);
     if (med64_den == 0) med64_den = 12;
     uint64_t med64_limit = seg_k_width * med64_num / med64_den;
+    uint64_t sparse_limit = seg_k_width * sparse_num / sparse_den;
 
     // Primes also covered by the pre-sieve pattern (see presieve.hpp) are
     // skipped here: they're never scheduled as active markers, their
@@ -556,7 +570,7 @@ int main(int argc, char** argv) {
     for (uint64_t p : base_primes) {
         if (p < FIRST_WHEEL_PRIME) continue;
         if (std::find(presieve_primes_flat.begin(), presieve_primes_flat.end(), p) != presieve_primes_flat.end()) continue;
-        if (p < seg_k_width) {
+        if (p < sparse_limit) {
             if (p < small_limit) small_primes.push_back(p);
             else if (p < med64_limit) med64_primes.push_back(p);
             else medium_primes.push_back(p);
