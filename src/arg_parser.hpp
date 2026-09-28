@@ -250,9 +250,9 @@ struct Options {
     // text output.
     uint64_t db_block_size = 65536;      // primes per compressed block; see
                                           // docs/RESEARCH.md#write-pipeline-knobs-batch---db-block-size-wal_autocheckpoint-all-measured-kept-at-their-defaults
-    int zstd_level = 3;                  // low: entropy coding barely depends
-                                          // on level here. See
-                                          // docs/RESEARCH.md#--zstd-level-default-1-measured-faster-than-3-not-yet-made-the-default-open
+    int zstd_level = 1;                  // 1 beats 3 on both size and time
+                                          // with wheel-index gaps. See
+                                          // docs/RESEARCH.md#--zstd-level-default-1-kept-2026-09-28
 
     // Manual overrides for detect_l2_cache_bytes()/detect_l1d_cache_bytes()
     // (this file, below): 0 means "keep auto-detecting". Auto-detection
@@ -335,7 +335,7 @@ inline void print_usage(const char* prog) {
         "      --db-block-size N  Primos por bloque comprimido en modo .db\n"
         "                         (default: 65536)\n"
         "      --zstd-level N     Nivel de compresion zstd en modo .db\n"
-        "                         (default: 3)\n"
+        "                         (default: 1)\n"
         "      --l2-bytes N       Fuerza el tamano de L2 usado para el ancho\n"
         "                         de segmento automatico (default: auto-\n"
         "                         detectado via /sys; usar si la deteccion\n"

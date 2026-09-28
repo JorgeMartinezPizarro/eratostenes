@@ -56,7 +56,7 @@ outside the container.
   -s, --segment-width N   Numeric width per segment
                           (default: auto, sized from N)
       --db-block-size N   Primes per compressed block in .db mode (default: 65536)
-      --zstd-level N      zstd compression level in .db mode (default: 3)
+      --zstd-level N      zstd compression level in .db mode (default: 1)
   -h, --help              Help
 ```
 
