@@ -102,7 +102,7 @@ static uint64_t lookup(sqlite3* db, uint64_t target_index) {
     size_t pos = 0;
     uint64_t steps = target_index - start_index;
     for (uint64_t i = 0; i < steps; ++i) {
-        value += decode_gap(raw.data(), pos);
+        value = decode_gap(raw.data(), pos, value);
     }
     return value;
 }
@@ -128,6 +128,13 @@ int main(int argc, char** argv) {
     }
 
     try {
+        // Version 1 stored delta/2 gaps; decoding one as version 2 would
+        // silently return wrong primes (see gap_encoding.hpp).
+        std::string version = read_meta(db, "format_version");
+        if (version != "2") {
+            throw std::runtime_error("formato .db version " + version +
+                                     " no soportado (se espera 2): regeneralo con este eratostenes");
+        }
         if (std::strcmp(arg2, "--count") == 0) {
             std::string total = read_meta(db, "total_primes");
             std::printf("%s\n", total.c_str());

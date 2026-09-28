@@ -139,7 +139,7 @@ public:
 
         exec("CREATE INDEX idx_blocks_start ON blocks(start_index);");
 
-        write_meta("format_version", "1");
+        write_meta("format_version", "2"); // 2: wheel-index gaps, see gap_encoding.hpp
         write_meta("limit", std::to_string(limit));
         write_meta("wheel_mod", std::to_string(wheel_mod));
         write_meta("block_size", std::to_string(block_size));

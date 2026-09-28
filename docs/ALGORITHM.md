@@ -252,9 +252,14 @@ entries on each half-size margin.
 
 Text output is one prime per line, written directly. `.db` output is a SQLite file
 where primes are grouped into fixed-size blocks, each block **delta-encoded**
-(storing gaps between consecutive primes instead of the primes themselves -- gaps
-are small and fit in 1 byte almost always, with a rare 5-byte escape for larger
-ones) and then zstd-compressed. Each block is a row carrying its own starting
+(storing gaps between consecutive primes instead of the primes themselves) and then
+zstd-compressed. The gap is counted in **wheel indices** (§2), not integers: one byte
+= how many mod-30 candidates the next prime is ahead, with a rare 5-byte escape for
+the primes off the wheel (2, 3, 5) and gaps over 255 candidates. Counted that way
+the gaps are close to independent and geometric, which zstd's Huffman stage codes
+within ~1% of their entropy; counted in integers (the previous format) they carry
+the residue-class structure zstd can't see, ~16-18% more bits per prime (see
+`gap_encoding.hpp`). Each block is a row carrying its own starting
 position and prime count, indexed by position (`idx_blocks_start`) so `nth_prime`
 can find and decompress just the one block a query needs, rather than scanning the
 file -- lookups stay fast (milliseconds) regardless of how large the file gets.

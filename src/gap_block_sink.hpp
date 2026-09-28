@@ -50,7 +50,7 @@ public:
     GapBlockSink(uint64_t chunk_id, uint64_t block_size, int zstd_level, PushFn push)
         : chunk_id_(chunk_id), block_size_(block_size), zstd_level_(zstd_level),
           push_(std::move(push)) {
-        raw_.reserve(block_size_ * 2); // gap bytes average well under 1/prime; generous headroom
+        raw_.reserve(block_size_ * 2); // ~1 byte per gap, rare 5-byte escapes; generous headroom
         cbuf_.resize(ZSTD_compressBound(block_size_ * 5 + 16)); // worst case: every gap escapes (5 bytes)
     }
 
@@ -63,7 +63,7 @@ public:
         if (count_in_block_ == 0) {
             block_start_prime_ = p;
         } else {
-            encode_gap(p - last_, raw_);
+            encode_gap(last_, p, raw_);
         }
         last_ = p;
         if (++count_in_block_ == block_size_) flush_block();

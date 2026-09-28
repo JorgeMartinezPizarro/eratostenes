@@ -124,6 +124,13 @@ struct ChunkRange {
     uint64_t high;  // upper bound in wheel index (exclusive)
 };
 
+// Segment width plus the base primes split into tiers for it (see main()).
+// A run has one, or two when its early chunks use a narrower segment.
+struct TierSet {
+    uint64_t width;
+    std::vector<uint64_t> small, med64, medium, sparse;
+};
+
 // Splits the wheel indices into 'threads' chunks as evenly as possible.
 // k=0 is the number 1 (not prime; SegmentSieve clears it itself);
 // k_end_exclusive is wheel_count_upto(limit), the first index whose number
@@ -580,21 +587,47 @@ int main(int argc, char** argv) {
     for (const auto& group : PRESIEVE_GROUPS)
         presieve_primes_flat.insert(presieve_primes_flat.end(), group.begin(), group.end());
 
-    std::vector<uint64_t> small_primes;
-    std::vector<uint64_t> med64_primes;
-    std::vector<uint64_t> medium_primes;
-    std::vector<uint64_t> sparse_primes;
-    for (uint64_t p : base_primes) {
-        if (p < FIRST_WHEEL_PRIME) continue;
-        if (std::find(presieve_primes_flat.begin(), presieve_primes_flat.end(), p) != presieve_primes_flat.end()) continue;
-        if (p < sparse_limit) {
-            if (p < small_limit) small_primes.push_back(p);
-            else if (p < med64_limit) med64_primes.push_back(p);
-            else medium_primes.push_back(p);
-        } else {
-            sparse_primes.push_back(p);
+    auto classify = [&](TierSet& t, uint64_t m64_limit, uint64_t sp_limit) {
+        for (uint64_t p : base_primes) {
+            if (p < FIRST_WHEEL_PRIME) continue;
+            if (std::find(presieve_primes_flat.begin(), presieve_primes_flat.end(), p) != presieve_primes_flat.end()) continue;
+            if (p < sp_limit) {
+                if (p < small_limit) t.small.push_back(p);
+                else if (p < m64_limit) t.med64.push_back(p);
+                else t.medium.push_back(p);
+            } else {
+                t.sparse.push_back(p);
+            }
         }
+    };
+    TierSet wide{seg_k_width, {}, {}, {}, {}};
+    classify(wide, med64_limit, sparse_limit);
+    const std::vector<uint64_t>& small_primes = wide.small;
+    const std::vector<uint64_t>& med64_primes = wide.med64;
+    const std::vector<uint64_t>& medium_primes = wide.medium;
+    const std::vector<uint64_t>& sparse_primes = wide.sparse;
+
+    // Narrow segment for the chunks below narrow^2. The doubled segment
+    // (see sparse_regime above) only pays off where sparse primes are
+    // active; a chunk whose every number is < narrow^2 has no active prime
+    // >= narrow (activation is by p^2), so it runs exactly the non-sparse
+    // configuration that measured +6.5% faster at 1e12 on the narrow
+    // width: narrow segment, 1/1 cutoff, med64_limit on the narrow width.
+    // Its sparse list only holds primes that never activate there. narrow
+    // is a power of 2 in bytes (half of the fixed-up wide width), as the
+    // sparse ring requires. ~44% of a 1e13 run on a 256KiB/512KiB machine.
+    // ERATOSTENES_NARROW_EARLY=0 disables it (A/B).
+    TierSet narrow{seg_k_width / 2, {}, {}, {}, {}};
+    uint64_t narrow_k_end = 0; // chunks with high <= this use `narrow`
+    bool narrow_early = !opt.segment_width_set && sparse_regime && narrow.width >= 64 && narrow.width % 64 == 0;
+    if (const char* s = std::getenv("ERATOSTENES_NARROW_EARLY")) narrow_early = narrow_early && std::strtoull(s, nullptr, 10) != 0;
+    if (narrow_early) {
+        classify(narrow, narrow.width * med64_num / med64_den, narrow.width);
+        narrow_k_end = wheel_count_upto(std::min(opt.limit, narrow.width * narrow.width));
     }
+    auto tiers_for = [&](const ChunkRange& r) -> const TierSet& {
+        return r.high <= narrow_k_end ? narrow : wide;
+    };
 
     // Split into many more, narrower chunks than threads (see
     // run_parallel_chunks for why: work per chunk isn't uniform across the
@@ -649,6 +682,14 @@ int main(int argc, char** argv) {
                  WHEEL_PRIMES.size(),
                  small_primes.size(), static_cast<unsigned long long>(SUB_BLOCK_BYTES / 1024),
                  med64_primes.size(), medium_primes.size(), sparse_primes.size());
+    if (narrow_early) {
+        unsigned narrow_chunks = 0;
+        for (const auto& r : ranges) narrow_chunks += r.high <= narrow_k_end;
+        std::fprintf(stderr, "  segmento estrecho (%llu) hasta %llu: %u de %u chunks\n",
+                     static_cast<unsigned long long>(narrow.width * WHEEL_MOD / WHEEL_SIZE),
+                     static_cast<unsigned long long>(std::min(opt.limit, narrow.width * narrow.width)),
+                     narrow_chunks, num_chunks);
+    }
 
     // Every pass below runs worker threads that can throw (pwrite() on a
     // full disk, or the bucket-sieve sizing check) -- see run_parallel_chunks
@@ -667,8 +708,9 @@ int main(int argc, char** argv) {
                 ProgressGuard guard{done, prog};
 
                 run_parallel_chunks(actual_threads, num_chunks, [&](unsigned i) {
-                    count_only_worker(ranges[i], seg_k_width, base_limit, small_primes, med64_primes,
-                                       medium_primes, sparse_primes, presieve, prime_counts[i], progress);
+                    const TierSet& t = tiers_for(ranges[i]);
+                    count_only_worker(ranges[i], t.width, base_limit, t.small, t.med64,
+                                       t.medium, t.sparse, presieve, prime_counts[i], progress);
                 });
             } // guard destructs here: progress thread joined before the summary prints below
 
@@ -720,8 +762,9 @@ int main(int argc, char** argv) {
                 ProgressGuard guard{done, prog};
 
                 run_parallel_chunks(actual_threads, num_chunks, [&](unsigned i) {
-                    emit_db_worker(static_cast<int>(i), ranges[i], seg_k_width, base_limit,
-                                    small_primes, med64_primes, medium_primes, sparse_primes, presieve,
+                    const TierSet& t = tiers_for(ranges[i]);
+                    emit_db_worker(static_cast<int>(i), ranges[i], t.width, base_limit,
+                                    t.small, t.med64, t.medium, t.sparse, presieve,
                                     store, opt.db_block_size, opt.zstd_level, prime_counts[i], progress);
                 });
             }
@@ -762,8 +805,9 @@ int main(int argc, char** argv) {
             ProgressGuard guard{done, prog};
 
             run_parallel_chunks(actual_threads, num_chunks, [&](unsigned i) {
-                count_worker(ranges[i], seg_k_width, base_limit, small_primes, med64_primes,
-                             medium_primes, sparse_primes, presieve, byte_counts[i], prime_counts[i], progress);
+                const TierSet& t = tiers_for(ranges[i]);
+                count_worker(ranges[i], t.width, base_limit, t.small, t.med64,
+                             t.medium, t.sparse, presieve, byte_counts[i], prime_counts[i], progress);
             });
         }
 
@@ -799,8 +843,9 @@ int main(int argc, char** argv) {
 
             try {
                 run_parallel_chunks(actual_threads, num_chunks, [&](unsigned i) {
-                    emit_worker(static_cast<int>(i), ranges[i], seg_k_width, base_limit,
-                                small_primes, med64_primes, medium_primes, sparse_primes, presieve, fd, offsets[i], progress);
+                    const TierSet& t = tiers_for(ranges[i]);
+                    emit_worker(static_cast<int>(i), ranges[i], t.width, base_limit,
+                                t.small, t.med64, t.medium, t.sparse, presieve, fd, offsets[i], progress);
                 });
             } catch (...) {
                 ::close(fd);
