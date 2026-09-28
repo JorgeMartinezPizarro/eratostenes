@@ -1,0 +1,7 @@
+# Always check out text files with LF, regardless of the client's
+# core.autocrlf: the build context is COPYed into Linux containers as-is,
+# and a CRLF shebang (#!/bin/bash\r) makes scripts/*.sh "not found".
+* text=auto eol=lf
+
+*.jpg binary
+*.png binary
