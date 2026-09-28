@@ -38,9 +38,13 @@ RUN make pgo
 # primesieve is added on top for benchmark.sh's comparison column;
 # primecount-bin is what scripts/test.sh checks pi(N)/nth-prime against
 # instead of hardcoded constants -- required for `make test` to even start.
+# linux-perf: per-tier cycle profiling on machines where perf only exists
+# inside Docker (the production server); needs `--cap-add PERFMON` at
+# `docker run` time, since the container's own perf_event_paranoid check
+# applies otherwise.
 FROM builder AS dev
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        primesieve primecount-bin \
+        primesieve primecount-bin linux-perf \
     && rm -rf /var/lib/apt/lists/*
 COPY scripts ./scripts
 CMD ["make", "test"]

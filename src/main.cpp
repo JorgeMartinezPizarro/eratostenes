@@ -365,6 +365,13 @@ int main(int argc, char** argv) {
         print_usage(argv[0]);
         return 0;
     }
+    // ERATOSTENES_START (see below) is a count-only benchmarking aid: a
+    // partial .txt/.db would still get the wheel primes and, for .db,
+    // chunk-relative positions that aren't global prime indices.
+    if (std::getenv("ERATOSTENES_START") && !opt.output.empty()) {
+        std::fprintf(stderr, "Error: ERATOSTENES_START solo vale en modo conteo (sin -o).\n");
+        return 1;
+    }
 
     const Colors C(stderr_supports_color());
 
@@ -580,8 +587,8 @@ int main(int argc, char** argv) {
     // of [0, N]. Every base prime is still activated for that range, so a
     // tail of a large N costs exactly what the same segments cost in a full
     // run -- e.g. the last 1% of 1e14 in about a minute instead of the
-    // whole run. The printed count is then only for that tail (plus the
-    // wheel primes), not pi(N).
+    // whole run. The printed count (no -o) is then only for that tail, not
+    // pi(N).
     uint64_t range_start = 0;
     if (const char* s = std::getenv("ERATOSTENES_START")) range_start = static_cast<uint64_t>(std::strtod(s, nullptr));
     if (range_start >= opt.limit) range_start = 0;
@@ -634,19 +641,26 @@ int main(int argc, char** argv) {
                 });
             } // guard destructs here: progress thread joined before the summary prints below
 
-            uint64_t total_primes = SMALL_PRIMES_COUNT;
+            // With ERATOSTENES_START, only the wheel primes inside [range_start, N]
+            // count (none, for any realistic start), so the tail total matches
+            // e.g. `primesieve START N -c` exactly.
+            uint64_t total_primes = 0;
+            for (uint64_t p : WHEEL_PRIMES) if (p >= range_start) ++total_primes;
             for (auto c : prime_counts) total_primes += c;
 
             auto t_end = std::chrono::steady_clock::now();
             double total_s = std::chrono::duration<double>(t_end - t_start).count();
             double total_mprimes = total_s > 0 ? (total_primes / 1e6 / total_s) : 0.0;
 
+            std::string range_desc = range_start
+                ? "en [" + format_thousands(range_start) + ", " + format_thousands(opt.limit) + "]"
+                : "hasta " + format_thousands(opt.limit);
             std::fprintf(stderr,
-                "%sListo.%s %s%s%s primos encontrados hasta %s.\n"
+                "%sListo.%s %s%s%s primos encontrados %s.\n"
                 "  %stotal:%s      %s%.2fs%s (%s%.1f M primos/s%s)\n",
                 C.headline, C.reset,
                 C.bold, format_thousands(total_primes).c_str(), C.reset,
-                format_thousands(opt.limit).c_str(),
+                range_desc.c_str(),
                 C.headline, C.reset, C.time, total_s, C.reset, C.headline, total_mprimes, C.reset);
 
             return 0;
