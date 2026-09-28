@@ -60,14 +60,8 @@ constexpr uint64_t QP_LIMIT = uint64_t{1} << 26;
 // Every local here (qp, p, the o[j]s, b, end) provably fits a uint32_t, but
 // narrowing them from uint64_t was measured slower, not faster -- see
 // docs/RESEARCH.md.
-//
-// Inlining is pinned, not left to GCC's heuristics: always inlined into
-// process_med64 (one copy per class, its inner loop), called out of line
-// from the small tier (cross_off_call below). A restructured sieve_and_emit
-// once tipped GCC into the opposite for 6 of 8 classes -- med64 calling it,
-// the small tier inlining it -- +2.5% cycles at 1e14 on the i5-13500.
 template <int PR>
-__attribute__((always_inline)) inline void cross_off(uint8_t* s, uint64_t end, uint64_t qp, uint64_t& i_io, uint32_t& j_io) {
+inline void cross_off(uint8_t* s, uint64_t end, uint64_t qp, uint64_t& i_io, uint32_t& j_io) {
     const uint64_t p = 30 * qp + R[PR];
     const uint64_t o0 = C(PR, 0);
     const uint64_t o1 = qp * (R[1] - 1) + C(PR, 1);
@@ -128,11 +122,6 @@ done:
     j_io = j;
 }
 
-template <int PR>
-__attribute__((noinline)) void cross_off_call(uint8_t* s, uint64_t end, uint64_t qp, uint64_t& i_io, uint32_t& j_io) {
-    cross_off<PR>(s, end, qp, i_io, j_io);
-}
-
 // Runs every state in [first, last) -- all of residue class PR -- over
 // s[0, end), then rebases each pending hit by `rebase` bytes (the
 // segment's byte width on its last pass over a segment, 0 otherwise). One
@@ -144,7 +133,7 @@ inline void cross_off_class(uint8_t* s, uint64_t end, DenseState* first, DenseSt
         uint64_t i = st->pos;
         uint64_t qp = st->qw >> 6;
         uint32_t j = st->qw & 7;
-        cross_off_call<PR>(s, end, qp, i, j);
+        cross_off<PR>(s, end, qp, i, j);
         st->qw = static_cast<uint32_t>((qp << 6) | (PR << 3) | j);
         st->pos = static_cast<uint32_t>(i - rebase);
     }
@@ -186,11 +175,8 @@ inline void cross_off_class(uint8_t* s, uint64_t end, DenseState* first, DenseSt
 // reaches 96 -- at most once per call, and never when med64 is on (a
 // medium prime then has under 48 hits per segment) -- instead of a
 // compare-and-select on every hit.
-//
-// Out of line on purpose, like every class until GCC started inlining
-// some of them into sieve_chunk (see cross_off's own note on pinning).
 template <int PR>
-__attribute__((noinline)) void cross_off_medium(uint8_t* s, uint64_t end, DenseState* first, DenseState* last, uint64_t rebase) {
+inline void cross_off_medium(uint8_t* s, uint64_t end, DenseState* first, DenseState* last, uint64_t rebase) {
     const uint32_t* pack = big::PACK210[PR].data();
     for (DenseState* st = first; st != last; ++st) {
         uint64_t pos = st->pos;

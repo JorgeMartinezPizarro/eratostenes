@@ -46,6 +46,7 @@ throughout below).
   - [Sparse tier: prefetch the next block of the chain, once per block (kept, 2026-09-27)](#sparse-tier-prefetch-the-next-block-of-the-chain-once-per-block-kept-2026-09-27)
   - [Sparse tier attempts 7-10 (all tried, reverted)](#sparse-tier-attempts-7-10-all-tried-reverted)
   - [Attempt 11: shrinking the live entry from 8 to 7 bytes (tried, reverted, 2026-09-27)](#attempt-11-shrinking-the-live-entry-from-8-to-7-bytes-tried-reverted-2026-09-27)
+  - [Segment processed in parts for the sparse tier (tried, reverted, 2026-09-29)](#segment-processed-in-parts-for-the-sparse-tier-tried-reverted-2026-09-29)
 - [gap_encoding.hpp](#gap_encodinghpp)
   - [Gap encoding: wheel-index deltas](#gap-encoding-wheel-index-deltas)
 - [sqlite_prime_store.hpp](#sqlite_prime_storehpp)
@@ -1170,6 +1171,74 @@ struct-of-arrays layout instead of packing one entry tighter) -- naive
 byte-level packing of a single entry measured as a net loss on every metric
 that wasn't too noisy to read. The E14 ratio gap itself remains open; the next
 angle isn't a smaller entry, it's a different one entirely.
+
+### Segment processed in parts for the sparse tier (tried, reverted, 2026-09-29)
+
+**Where the 1e14 server gap sits.** i5-13500, P-cores (`--cpuset-cpus=0-11 -t
+12`), 1% tail, `perf record cycles:u` per function for both programs, eratostenes'
+shares scaled by the full-run ratio (3767.6s / 3349.9s = 1.125x; the 1% tail's own
+1.25x wall is the idle artifact, CPU time was identical, 458.68s each), primesieve =
+100:
+
+| tier | eratostenes | primesieve |
+|---|---:|---:|
+| small (< 6.1k / < 9.8k) | 20.2 | EratSmall 22.9 |
+| med64 (6.1k-349k) | 33.0 | EratMedium (9.8k-786k) 31.9 |
+| medium (349k-2.1M) | 24.4 | (EratMedium + EratBig) |
+| sparse (>= 2.1M) | 30.3 | EratBig (>= 786k) 42.0 |
+| presieve | 2.5 | 1.8 |
+
+Split by prime band with a hits model (hits in [a, b] ~ ln ln b - ln ln a): small
+is at parity; the whole gap is in primes >= 6k -- med64 ~+8, sparse ~+5 (~20%
+dearer per hit than EratBig), medium ~0. TopDown (same run): of the excess slots,
+57% backend, 37% bad speculation, 11% frontend; we retire slightly *less* than
+primesieve. Since the sparse cutoff 1/2, mispredicts explain under a third of the
+gap.
+
+**Each tier's response to the segment width**, same primes per tier (29138 /
+125672 / 508968; 256KiB run with `ERATOSTENES_MED64_DEN=6` and sparse 1/1 to
+match), 3% tail, 2 reps each, reps within ~1%:
+
+| tier | 512KiB | 256KiB | change |
+|---|---:|---:|---:|
+| sparse | 1517G | 1375G | -9.4% |
+| small | 1038G | 961G | -7.4% |
+| presieve | 124G | 105G | -16% |
+| med64 | 1549G | 1695G | +9.4% |
+| medium | 1202G | 1732G | +44% |
+| total | 5541G | 5980G | +7.9% |
+
+(Dev PC, same test: med64 +3%, medium +22%, sparse within its own ±10% noise; no
+tier clearly better at 256KiB there.)
+
+**Tried:** keep the 512KiB segment for med64/medium (per-call costs) but process it
+in `ERATOSTENES_SPARSE_PARTS` parts for the rest -- per part: presieve + small
+sub-blocks, then that part's sparse bucket (ring at part granularity), med64 and
+medium over the whole segment afterwards. Correct (make test; forced sparse regime
+at 3e9..1e11 for 1/2/4/8 parts vs primecount; 1e14 0.1% tail; a 2-part `.db`).
+Server, same session, 3% tail, 2 reps each:
+
+| | cycles:u | wall |
+|---|---:|---:|
+| old (`fe6260a`) | 5473 / 5570G | 135.09 / 139.47s |
+| parts=1 | 5687 / 5694G (+3.1%) | 141.95 / 141.73s |
+| parts=2 | 5478 / 5499G (-0.6%) | 136.88 / 137.82s |
+
+parts=2 only won back what the restructuring itself cost at parts=1, most likely
+the tier order (sparse moved from last, right before extraction, to right after
+small). The 256KiB tiers' gain comes from the smaller total footprint, not from the
+processing order, so splitting doesn't capture it. Dev PC: parts=2 +4%. Reverted.
+
+**Method note: check the binary layout before trusting an A/B.** The first server
+run compared parts=1/2 within the new binary only and showed -3.3%; against the old
+one it was ~0. The restructured `sieve_and_emit` had also changed GCC's inlining:
+`cross_off<PR>` no longer inlined into 6 of 8 `process_med64<PR>`,
+`cross_off_medium<0..3>` and `Presieve::fill` inlined into `sieve_chunk`. Pinning
+it back (`always_inline`/`noinline`) restored the hot layout but not the +3.1% (so
+it wasn't the cause), and shifted other, colder inlining in turn, so it was dropped
+with the rest. Before an A/B of a structural change: `nm -C -S` both binaries and
+diff the hot functions, and always keep the previous commit's binary as a control
+in the same session.
 
 ## gap_encoding.hpp
 
