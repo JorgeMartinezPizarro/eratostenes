@@ -39,9 +39,10 @@ RUN make pgo
 # primecount-bin is what scripts/test.sh checks pi(N)/nth-prime against
 # instead of hardcoded constants -- required for `make test` to even start.
 # linux-perf: per-tier cycle profiling on machines where perf only exists
-# inside Docker (the production server); needs `--cap-add PERFMON` at
-# `docker run` time, since the container's own perf_event_paranoid check
-# applies otherwise.
+# inside Docker (the production server); needs `--cap-add SYS_ADMIN` at
+# `docker run` time, not just PERFMON: Debian/Ubuntu kernels' extra
+# perf_event_paranoid=3 level only lets CAP_SYS_ADMIN through (checked on
+# the i5-13500 server, 2026-09-28).
 FROM builder AS dev
 RUN apt-get update && apt-get install -y --no-install-recommends \
         primesieve primecount-bin linux-perf \
