@@ -56,7 +56,7 @@ throughout below).
   - [`sieve_chunk`: one `SegmentSieve` per worker instead of per chunk (tried, reverted -- neutral on cycles:u, 2026-09-26)](#sieve_chunk-one-segmentsieve-per-worker-instead-of-per-chunk-tried-reverted----neutral-on-cyclesu-2026-09-26)
   - [`run_parallel_chunks`: chunk-granularity idle-time investigation (2026-09-25, external review, Opus 5.5)](#run_parallel_chunks-chunk-granularity-idle-time-investigation-2026-09-25-external-review-opus-55)
   - [Chunk-width floor: at least 4 segments per chunk (kept, 2026-09-27)](#chunk-width-floor-at-least-4-segments-per-chunk-kept-2026-09-27)
-  - [i5-13500 server gap vs primesieve: medium-tier call count, sparse cutoff lowered to 1/2 (kept, 2026-09-28)](#i5-13500-server-gap-vs-primesieve-medium-tier-call-count-sparse-cutoff-lowered-to-12-kept-2026-09-28)
+  - [i5-13500 server gap vs primesieve: medium-tier call count, sparse cutoff 1/2 gated on per-thread L2 (2026-09-28)](#i5-13500-server-gap-vs-primesieve-medium-tier-call-count-sparse-cutoff-12-gated-on-per-thread-l2-2026-09-28)
   - [`small_limit` cutoff tuning](#small_limit-cutoff-tuning)
   - [Cache-topology sizing: per-CPU-minimum step (kept)](#cache-topology-sizing-per-cpu-minimum-step-kept)
   - [Medium/sparse cutoff raised above `seg_k_width` (tried, reverted, 2026-09-27)](#mediumsparse-cutoff-raised-above-seg_k_width-tried-reverted-2026-09-27)
@@ -1412,7 +1412,7 @@ restores the old behavior exactly. Measured with that env var on one binary
 effect at large N, where chunks span thousands of segments. Should matter
 more on the server; not yet measured there.
 
-### i5-13500 server gap vs primesieve: medium-tier call count, sparse cutoff lowered to 1/2 (kept, 2026-09-28)
+### i5-13500 server gap vs primesieve: medium-tier call count, sparse cutoff 1/2 gated on per-thread L2 (2026-09-28)
 
 Context: dev PC (i5-11400F, symmetric) is now below primesieve at every N in
 README.md#benchmarks (0.92-0.98x); the server (i5-13500, 6P+HT + 8E, 20
@@ -1433,6 +1433,24 @@ mode (dev PC, ABBA on the 1e14 1% tail): idle 17% -> 0.7%, but user time
 +16-23% and wall unchanged (72.3/73.3s -> 70.3/76.2s) -- per-chunk setup is
 ~0.4s of CPU per chunk, far more than estimated. Reverted. Side lead, not
 followed up: that setup is ~1.5% of a full 1e14 server run (3000 chunks).
+**Refuted (2026-09-28):** measured directly on the dev PC (temporary
+`ERATOSTENES_CHUNKS_PER_THREAD` knob, removed again), same range, `-t 6`
+pinned one thread per core, user time, A/B/C/C/B/A:
+
+| range | chunks | user time (2 reps) |
+|---|---:|---:|
+| last 1% of 1e14 | 9 | 404.2 / 398.3s |
+| | 72 | 427.1 / 424.0s |
+| | 288 | 428.7 / 424.4s |
+| last 0.1% of 1e15 | 6 | 582.8 / 578.1s |
+| | 29 | 573.1 / 573.1s |
+
+72 -> 288 chunks costs +0.9s over 216 chunks, ~4ms each (within noise); at
+1e15, more chunks is even slightly cheaper. The jump from 9 to 72 chunks is
+not setup: with 9 chunks on 6 threads, cores go idle and the remaining ones
+turbo higher, so the same work costs fewer CPU-seconds. That is also what
+the "+16-23% user time" above really measured. Per-chunk setup (activating
+every base prime: a few divisions each) is ~0.01% of a full run. Closed.
 
 **Ruled out (server):**
 - Work distribution: already ruled out earlier (idle 2.1%, see above); 1.6%
@@ -1598,7 +1616,7 @@ figure (-6%) -- trust this one. Gap to primesieve (16.45T): 1.173x -> 1.146x.
 where `/4` regressed 3 times; with the doubled segment and today's sparse tier
 it wins.
 
-**Kept:** default cutoff 1/2 whenever the sparse tier already exists
+**Briefly kept, then reverted (same day, see the dev PC follow-up below):** default cutoff 1/2 whenever the sparse tier already exists
 (`sparse_regime` = isqrt(N) >= the pre-doubling `seg_k_width`, the condition
 that doubles the segment); 1/1 below that (N < ~4.4e12 on 256KiB), where 1/2
 would create sparse primes in an unmeasured regime. `ERATOSTENES_SPARSE_NUM/
@@ -1658,6 +1676,103 @@ table. No change. Note on method: on this HT machine the 1% tail's ~20% idle
 also changes how often a thread shares its core with a busy sibling, which
 moves cycles:u itself -- cycles:u is NOT immune to the tail artifact on the
 server; decide on 10% tails with ABBA (the sparse 1/2 decision was).
+
+**Dev PC follow-up (ABBA, wall, all counts exact):**
+
+| run | 1/1 | 1/2 | 1/2 | 1/1 | delta (means) |
+|---|---:|---:|---:|---:|---:|
+| full 3e12 (below `sparse_regime`; 1/2 adds 48321 sparse) | 87.42s | 86.37s | 86.63s | 87.62s | -1.2% |
+| 1e14, 10% tail | 591.14s | 637.45s | 660.19s | 603.05s | **+8.7%** |
+
+The 1e14 result contradicts the server's -2.3% on the same slice: both 1/2
+runs are slower than both controls, so not drift. The dev PC (i5-11400F,
+512KiB L2/core, 12MB L3) loses where the server (1.25MB L2 per P-core, 24MB
+L3) wins -- the three earlier reverts were also all on this machine. **Reverted**
+to 1/1 by default (knob kept): +8.7% would turn the 11400F's 0.98x at 1e14
+vs primesieve into ~1.07x. Next: full-machine (20 threads) server ABBA, then
+a causal gate (per-thread L2?) validated on more machines.
+
+**Causal check, same machine:** dev PC, 1e14 10% tail, `-t 6` pinned one
+thread per physical core (`taskset -c 0,2,4,6,8,10`, same segment), ABBA:
+1/1 711.01s, 1/2 710.34s, 1/2 709.48s, 1/1 707.17s -> **+0.1%, a tie** (vs
++8.7% with 12 threads). So the loss comes from two HT threads sharing a core's
+caches. Per-thread cache vs result so far:
+
+| config | L2 per thread | L3 per thread | 1/2 vs 1/1 |
+|---|---:|---:|---:|
+| dev PC, 12 threads | 256KiB | 1MiB | +8.7% |
+| dev PC, 6 threads pinned | 512KiB | 2MiB | +0.1% |
+| server P-cores, 12 threads | 640KiB | 2MiB | -2.3% |
+
+Monotonic in L2 per thread; L3 per thread can't tell the last two apart. Not
+separated from memory bandwidth per thread either (6 threads also halves the
+demand). The server's full machine (20 threads: P 640KiB, E 512KiB L2 per
+thread, 1.2MiB L3 per thread) is the next discriminating test.
+
+**1e15, 5% tail ABBA (server, P-cores, `START=950e12`, ~47 min per run):**
+
+| | 1/1 | 1/2 | 1/2 | 1/1 | delta (means) |
+|---|---:|---:|---:|---:|---:|
+| cycles:u | 114.91T | 114.59T | 115.99T | 115.29T | +0.2% |
+| cycles:k | 0.194T | 0.208T | 0.206T | 0.193T | (0.2% of user) |
+| branch-misses:u | 765.6e9 | 562.7e9 | 563.6e9 | 765.9e9 | -26.4% |
+| page-faults | 217579 | 139006 | 139535 | 217360 | -36% |
+| user | 32491s | 32216s | 32565s | 32418s | -0.2% |
+| wall | 2812.43s | 2784.71s | 2813.46s | 2806.55s | -0.4% |
+
+A tie (the two 1/2 reps differ by 1.2%, more than the delta). The 0.1%-tail
+"+5.6% wall" was the tail artifact, not kernel time: sys is <0.5s and 1/2
+even page-faults less. At 1e15 the ~200e9 saved mispredicts are paid back in
+full by the extra sparse-tier work. So on the server 1/2 is -2.3% at 1e14
+and neutral at 1e15.
+
+**Server full machine (20 threads, no cpuset), 1e14 10% tail, ABBA:**
+
+| | 1/1 | 1/2 | 1/2 | 1/1 | delta (means) |
+|---|---:|---:|---:|---:|---:|
+| wall | 416.33s | 409.09s | 409.22s | 416.71s | **-1.8%** |
+| user | 7734.7s | 7684.8s | 7677.5s | 7871.9s | -1.6% |
+| cpu_core cycles:u | 24.25T | 23.98T | 24.13T | 24.72T | -1.7% |
+| cpu_atom cycles:u | 19.90T | 19.92T | 19.35T | 19.88T | -1.3% |
+| branch-misses:u (core + atom) | 271.7e9 | 198.5e9 | 197.5e9 | 272.0e9 | -27% |
+
+(cycles are multiplexed, ~62%/38% enabled -- scaled estimates.) Reps within
+0.1% on wall. At 1.2MiB L3 per thread (close to the dev PC's 1MiB at 12
+threads, which lost 8.7%) this still wins, so L3 per thread is not the
+driver. L2 per thread fits all four points: 256KiB loses, 512KiB (dev PC 6
+threads; server E-cores) ties, 640KiB (server P-cores) wins. Candidate gate:
+smallest detected L2 share per CPU >= 512KiB (server yes, 11400F no).
+
+**Where the time goes at 1e15** (server, P-cores, 0.1% tail, cycles:u, current
+`main` image with 1/2): `process_big` 39.1%, med64 22.9%, medium 18.7%, small
+and the rest ~19%. The sparse tier becomes the main cost past 1e14. `perf
+annotate` of `process_big` (skid puts each cost on the instruction after the
+one that stalls):
+
+| where | share of `process_big` |
+|---|---:|
+| `or %dil,(%r11,%rax,1)` -- the `s[pos] \|= mask` RMW into the segment | ~49% |
+| load of `tail_[slot]` (+ its test) | ~9% |
+| store of the entry into the target block (`vmovq`) | ~8% |
+| next-block prefetch | ~7% |
+| entry load, table lookup, step math | the rest (~27%) |
+
+Half of the sparse tier is waiting on the scattered byte write into the
+512KiB segment -- two HT threads' segments (1MiB) plus the bucket streams
+share a 1.25MB L2. At 1e14 a 256KiB segment cost +5% cycles (medium's per-segment
+fixed cost doubles); at 1e15 the balance may flip. Next: 256KiB vs 512KiB at
+1e15.
+
+**Server, full 1e13, full machine, ABBA (wall):** 1/1 307.20s, 1/2 306.33s,
+1/2 306.24s, 1/1 305.64s -> -0.04%, a tie (controls differ by 0.5%). The
+~5% gap to primesieve at 1e13 is not in the medium/sparse boundary.
+
+**Adopted, gated:** 1/2 when `sparse_regime` AND the smallest detected
+per-CPU L2 share is >= 512KiB (i5-13500: E-core 512KiB, P-core 640KiB ->
+on; i5-11400F: 256KiB -> off, unchanged). Every measured server point is
+neutral or better (-1.8% at 1e14 full machine); nothing changes on the dev
+PC. The 512KiB threshold sits on the measured tie point, not between two
+measured wins -- a 384KiB-per-thread machine is unmeasured and gets 1/1.
 
 (Original note, superseded:) the dev PC at 1e13 -- with the doubled segment, 1e13 has no
 sparse primes by default (sqrt = 3.16M < 4.19M) and 1/2 would create ~71k,

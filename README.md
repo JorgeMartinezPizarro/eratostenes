@@ -12,9 +12,9 @@ Requires a C++20 compiler, POSIX `pwrite`/`ftruncate` (Linux or WSL; does not bu
 sudo apt-get install libsqlite3-dev libzstd-dev   # Debian/Ubuntu/WSL
 ```
 
-`make test` additionally needs [primecount](https://github.com/kimwalisch/primecount) on `PATH` -- it's the source of truth for every expected pi(N)/nth-prime value the test checks against (no hardcoded constants):
+`make test` additionally needs [primecount](https://github.com/kimwalisch/primecount) on `PATH` -- it's the source of truth:
 
-`make benchmark` requires [primesieve](https://github.com/kimwalisch/primesieve) on `PATH`.
+`make benchmark` requires [primesieve](https://github.com/kimwalisch/primesieve) on `PATH` to compare times.
 
 ```sh
 sudo apt-get install primecount-bin primesieve  # Debian/Ubuntu/WSL
@@ -112,7 +112,7 @@ What this project is built from, one term each — follow the link for the conce
 |---|---:|---:|---:|
 | 1e10 | 0.14s | 0.137s | 1.02x |
 | 1e11 | 1.67s | 1.657s | 1.01x |
-| 1e12 | 23.85s | 24.376s | 0.98x |
+| 1e12 | 23.27s | 24.376s | 0.98x |
 | 1e13 | 308.57s | 292.615s | 1.05x |
 | 1e14 | 3822.13s | 3349.907s | 1.14x |
 
@@ -120,10 +120,10 @@ The same results on an Intel Core i5-11400F:
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
-| 1e10 | 0.18s | 0.187s | 0.96x |
-| 1e11 | 2.11s | 2.295s | 0.92x |
-| 1e12 | 25.71s | 27.004s | 0.95x |
-| 1e13 | 342.09s | 354.854s | 0.96x |
+| 1e10 | 0.18s | 0.186s | 0.97x |
+| 1e11 | 2.09s | 2.296s | 0.91x |
+| 1e12 | 25.46s | 27.114s | 0.94x |
+| 1e13 | 343.79s | 357.856s | 0.96x |
 | 1e14 | 6425.05s | 6536.310s | 0.98x |
 
 ## Tests

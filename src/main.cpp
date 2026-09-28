@@ -484,7 +484,7 @@ int main(int argc, char** argv) {
     // PC: 1e13 -2.5%, 1e14 -10..-16% by slice. Auto width only -- an
     // explicit -s is left alone. See
     // docs/RESEARCH.md#segment-width-doubled-once-the-sparse-tier-exists-kept-2026-09-27.
-    // Same condition (on the pre-doubling width) also selects the lowered
+    // Same condition (on the pre-doubling width) also gates the lowered
     // medium/sparse cutoff below.
     const bool sparse_regime = base_limit >= seg_k_width;
     if (!opt.segment_width_set && sparse_regime) {
@@ -501,20 +501,29 @@ int main(int argc, char** argv) {
     // classified sparse below and the width is left exactly as
     // auto-tuned. small_limit/the small-vs-medium cutoff are untouched.
     //
-    // Medium/sparse cutoff: sparse_limit = seg_k_width * NUM / DEN. Once
-    // the sparse tier exists anyway (sparse_regime, the same condition that
-    // doubles the segment above), 1/2: primes with ~1-2 hits per segment go
-    // to the bucket ring instead of paying the medium tier's per-segment
-    // loop-exit mispredict (primesieve's EratMedium likewise stops at ~2.7
-    // hits/segment). Measured 1e14 (server, 10% tail) cycles:u -2.3%,
-    // branch-misses -27%; 1e13 (dev PC, ABBA) wall -2.4%. Below that
-    // regime 1/1 (plain `p >= seg_k_width`), unmeasured otherwise. See
-    // docs/RESEARCH.md#i5-13500-server-gap-vs-primesieve-medium-tier-call-count-sparse-cutoff-lowered-to-12-kept-2026-09-28 -- and
-    // the three earlier `seg_k_width/4` reverts it supersedes, at
+    // Medium/sparse cutoff: sparse_limit = seg_k_width * NUM / DEN. 1/2
+    // (primes with ~1-2 hits per segment go to the bucket ring instead of
+    // paying the medium tier's per-segment loop-exit mispredict) only when
+    // the sparse tier exists anyway (sparse_regime) AND every CPU has at
+    // least 512KiB of L2 to itself; 1/1 (plain `p >= seg_k_width`)
+    // otherwise. The gain depends on per-thread L2: measured at 1e14 (10%
+    // tail, ABBA) +8.7% wall with 256KiB (i5-11400F, 12 threads), +0.1%
+    // with 512KiB (same machine, 6 threads pinned one per core), -2.3% with
+    // 640KiB (i5-13500 P-cores); i5-13500 full machine (P 640KiB, E
+    // 512KiB) -1.8%, and neutral there at 1e13 and 1e15. See
+    // docs/RESEARCH.md#i5-13500-server-gap-vs-primesieve-medium-tier-call-count-sparse-cutoff-12-gated-on-per-thread-l2-2026-09-28 --
+    // and the three earlier `seg_k_width/4` reverts at
     // docs/RESEARCH.md#eratbig-style-sparse-tier-forcing-a-power-of-2-segment-width-and-sparse_limit--seg_k_width4-all-attempts-reverted.
-    // Overridable via ERATOSTENES_SPARSE_NUM/_DEN for further sweeps.
+    // Detected from sysfs regardless of --l2-bytes (it's a property of the
+    // hardware, not of the segment sizing); undetected -> 1/1.
+    // Overridable via ERATOSTENES_SPARSE_NUM/_DEN (lowering only).
     // Evaluated after the power-of-2 fixup below, like med64_limit.
-    uint64_t sparse_num = 1, sparse_den = sparse_regime ? 2 : 1;
+    uint64_t min_l2_share = 0;
+    for (uint64_t s : detect_cpu_cache_topology().l2_share)
+        if (s && (min_l2_share == 0 || s < min_l2_share)) min_l2_share = s;
+    constexpr uint64_t SPARSE_HALF_MIN_L2_SHARE = 512 * 1024;
+    uint64_t sparse_num = 1;
+    uint64_t sparse_den = (sparse_regime && min_l2_share >= SPARSE_HALF_MIN_L2_SHARE) ? 2 : 1;
     if (const char* s = std::getenv("ERATOSTENES_SPARSE_NUM")) sparse_num = std::strtoull(s, nullptr, 10);
     if (const char* s = std::getenv("ERATOSTENES_SPARSE_DEN")) sparse_den = std::strtoull(s, nullptr, 10);
     // Lowering only: dense-tier state is sized for p < seg_k_width (see
