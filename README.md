@@ -1,4 +1,6 @@
-# Eratostenes
+# eratostenes
+
+<img src="assets/eratostenes.jpg" alt="Eratosthenes" width="80" align="right">
 
 A segmented, parallel, wheel-based Sieve of Eratosthenes writen in C++. It is designed to count and generate primes up to very large N (10^15+), with a compact, randomly-indexable `.db` output format for storing dense prime tables at scale.
 
@@ -12,8 +14,10 @@ sudo apt-get install libsqlite3-dev libzstd-dev   # Debian/Ubuntu/WSL
 
 `make test` additionally needs [primecount](https://github.com/kimwalisch/primecount) on `PATH` -- it's the source of truth for every expected pi(N)/nth-prime value the test checks against (no hardcoded constants):
 
+`make benchmark` requires [primesieve](https://github.com/kimwalisch/primesieve) on `PATH`.
+
 ```sh
-sudo apt-get install primecount-bin   # Debian/Ubuntu/WSL
+sudo apt-get install primecount-bin primesieve  # Debian/Ubuntu/WSL
 ```
 
 ```sh
@@ -23,6 +27,7 @@ make pgo		# Build with a performance optimizations training.
 make debug      # ASan/UBSan, for debugging
 make test       # checks output against primecount across N and across
                 # several parameter combinations, plus .db vs text output
+make benchmark  # Performance table comparing primesieve against eratostenes
 ```
 
 ## Docker

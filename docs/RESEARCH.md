@@ -1605,6 +1605,60 @@ would create sparse primes in an unmeasured regime. `ERATOSTENES_SPARSE_NUM/
 _DEN` still override. Open: re-sweep at 1e15, where sparse dominates and
 the optimum may move.
 
+**Mispredicts per tier after the change** (server, P-cores, 1% tail, 11.10e9
+total vs 15.26e9 before; primesieve 7.61e9):
+
+| tier | before | after | primesieve |
+|---|---:|---:|---:|
+| medium | 9.11e9 (0.54/call) | 4.76e9 (0.60/call) | EratMedium 5.17e9 |
+| med64 | 3.05e9 (1.65/call) | 3.06e9 | |
+| small | 2.55e9 | 2.54e9 | EratSmall 2.29e9 |
+| sparse | 0.19e9 | 0.37e9 | EratBig 0.08e9 |
+| counting | 0.35e9 | 0.36e9 | ~0 |
+
+Medium now mispredicts less than EratMedium. The remaining ~3.5e9 excess
+sits in small + med64 (5.60e9 vs 2.29e9 EratSmall plus whatever share of
+EratMedium covers primes below our med64_limit, 349k -- not separable from
+the profile). med64 at 1.65 per call is the worst per-call rate left; its
+limit (seg_k_width/12) and small_limit were jointly tuned before the segment
+doubling and the new cutoff, so a re-sweep via ERATOSTENES_MED64_*/SMALL_* at
+1e14 is the cheap next step.
+
+**1e15 sweep** (server, P-cores, last 0.1% of 1e15, single runs, 1.66M sparse
+primes at 1/1):
+
+| NUM/DEN | medium / sparse | cycles:u | branch-misses:u | wall |
+|---|---|---:|---:|---:|
+| 1/1 | 266008 / 1656010 | 2366.5G | 15.31e9 | 54.46s |
+| 3/4 | 196610 / 1725408 | 2366.4G (0.0%) | 13.58e9 | 57.62s |
+| 1/2 | 125672 / 1796346 | 2372.1G (+0.2%) | 11.29e9 | 57.49s |
+| 3/8 | 89329 / 1832689 | 2439.2G (+3.1%) | 10.20e9 | 58.52s |
+| 1/4 | 52086 / 1869932 | 2514.4G (+6.2%) | 8.86e9 | 59.90s |
+
+The optimum moved up as expected: at 1e15 lowering buys nothing in cycles:u.
+Wall is +5.6% at 1/2 with flat user cycles -- either the tiny tail's chunk
+imbalance or kernel time cycles:u can't see (more sparse entries -> more
+bucket blocks -> page faults). Pending: 1/1 vs 1/2 ABBA on the 1% tail of
+1e15 with user/sys time and page-faults before deciding whether 1/2 needs an
+upper N bound.
+
+**med64_limit re-sweep at 1e14** (sparse 1/2 default, 1% tail, single runs):
+
+| MED64 NUM/DEN | med64 / medium | cycles:u | branch-misses:u | wall |
+|---|---|---:|---:|---:|
+| 1/12 (default) | 29138 / 125672 | 1717.3G | 11.13e9 | 46.55s |
+| 1/8 | 42589 / 112221 | 1700.4G (-1.0%) | 11.77e9 | 48.11s |
+| 1/16 | 22199 / 132611 | 1690.4G (-1.6%) | 10.66e9 | 47.68s |
+| 1/24 | 15096 / 139714 | 1704.7G (-0.7%) | 10.22e9 | 47.60s |
+| 0 (off) | 0 / 154810 | 1692.4G (-1.5%) | 10.17e9 | 48.08s |
+
+Flat: the same default config measured 1646.0G in the sparse sweep above, so
+run-to-run noise on the 1% tail is ~4% here, larger than every delta in the
+table. No change. Note on method: on this HT machine the 1% tail's ~20% idle
+also changes how often a thread shares its core with a busy sibling, which
+moves cycles:u itself -- cycles:u is NOT immune to the tail artifact on the
+server; decide on 10% tails with ABBA (the sparse 1/2 decision was).
+
 (Original note, superseded:) the dev PC at 1e13 -- with the doubled segment, 1e13 has no
 sparse primes by default (sqrt = 3.16M < 4.19M) and 1/2 would create ~71k,
 exactly the regime where the /4 attempts regressed.
