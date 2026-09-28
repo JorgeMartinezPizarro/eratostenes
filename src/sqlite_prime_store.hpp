@@ -16,6 +16,7 @@
 
 #include <condition_variable>
 #include <cstdint>
+#include <cstdlib>
 #include <cstdio>
 #include <exception>
 #include <mutex>
@@ -37,8 +38,19 @@ public:
 
         check(sqlite3_open(path.c_str(), &db_), "open");
         exec("PRAGMA page_size=4096;");
-        exec("PRAGMA journal_mode=WAL;");
-        exec("PRAGMA synchronous=NORMAL;");
+        // ERATOSTENES_DB_JOURNAL=off (experimental, A/B only): no journal
+        // at all, so every page hits the disk once instead of twice (WAL,
+        // then copied into the .db at each checkpoint). A crash mid-run
+        // leaves a corrupt file, but a half-written .db is useless anyway.
+        const char* journal = std::getenv("ERATOSTENES_DB_JOURNAL");
+        journal_off_ = journal && std::string(journal) == "off";
+        if (journal_off_) {
+            exec("PRAGMA journal_mode=OFF;");
+            exec("PRAGMA synchronous=OFF;");
+        } else {
+            exec("PRAGMA journal_mode=WAL;");
+            exec("PRAGMA synchronous=NORMAL;");
+        }
         // A bigger PRAGMA cache_size (512MB, up from SQLite's own default
         // 2MB) was tried and measured worse on the server at both N=1e12
         // and N=1e13 -- see docs/RESEARCH.md.
@@ -146,7 +158,7 @@ public:
         write_meta("zstd_level", std::to_string(zstd_level));
         write_meta("total_primes", std::to_string(total_primes));
 
-        exec("PRAGMA wal_checkpoint(TRUNCATE);");
+        if (!journal_off_) exec("PRAGMA wal_checkpoint(TRUNCATE);");
         exec("PRAGMA journal_mode=DELETE;");
     }
 
@@ -263,6 +275,7 @@ private:
     }
 
     sqlite3* db_ = nullptr;
+    bool journal_off_ = false; // ERATOSTENES_DB_JOURNAL=off, see the constructor
     sqlite3_stmt* insert_stmt_ = nullptr;
     sqlite3_stmt* insert_data_stmt_ = nullptr;
 
