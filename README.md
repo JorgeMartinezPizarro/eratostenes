@@ -110,10 +110,10 @@ What this project is built from, one term each — follow the link for the conce
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
-| 1e10 | 0.14s | 0.137s | 1.02x |
-| 1e11 | 1.67s | 1.657s | 1.01x |
-| 1e12 | 23.27s | 24.376s | 0.98x |
-| 1e13 | 308.57s | 292.615s | 1.05x |
+| 1e10 | 0.15s | 0.138s | 1.09x |
+| 1e11 | 1.64s | 1.646s | 1.00x |
+| 1e12 | 23.97s | 24.256s | 0.99x |
+| 1e13 | 305.51s | 292.791s | 1.04x |
 | 1e14 | 3822.13s | 3349.907s | 1.14x |
 
 The same results on an Intel Core i5-11400F:

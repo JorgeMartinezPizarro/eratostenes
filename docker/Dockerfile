@@ -47,7 +47,7 @@ FROM builder AS dev
 RUN apt-get update && apt-get install -y --no-install-recommends \
         primesieve primecount-bin linux-perf \
     && rm -rf /var/lib/apt/lists/*
-COPY scripts ./scripts
+COPY ./scripts ./scripts
 CMD ["make", "test"]
 
 # Named explicitly (and pinned via `target:` in docker-compose.yml) rather
