@@ -49,6 +49,7 @@ throughout below).
 - [gap_encoding.hpp](#gap_encodinghpp)
   - [Gap encoding: wheel-index deltas](#gap-encoding-wheel-index-deltas)
 - [sqlite_prime_store.hpp](#sqlite_prime_storehpp)
+  - [`journal_mode=OFF` for the bulk load (open, 2026-09-28)](#journal_modeoff-for-the-bulk-load-open-2026-09-28)
   - [Write-pipeline knobs: `BATCH`, `--db-block-size`, `wal_autocheckpoint` (all measured, kept at their defaults)](#write-pipeline-knobs-batch---db-block-size-wal_autocheckpoint-all-measured-kept-at-their-defaults)
   - [`PRAGMA cache_size` increase (tried, reverted, 2026-09-25)](#pragma-cache_size-increase-tried-reverted-2026-09-25)
   - [`blocks`/`block_data` table split (kept)](#blocksblock_data-table-split-kept)
@@ -68,6 +69,7 @@ throughout below).
   - [Sub-block size: half the L1d, not all of it (kept, 2026-09-27)](#sub-block-size-half-the-l1d-not-all-of-it-kept-2026-09-27)
   - [Auto segment width: dropping the `isqrt(limit)` cap (kept)](#auto-segment-width-dropping-the-isqrtlimit-cap-kept)
   - [Segment width doubled once the sparse tier exists (kept, 2026-09-27)](#segment-width-doubled-once-the-sparse-tier-exists-kept-2026-09-27)
+  - [Narrow segment for the chunks below narrow² (kept, 2026-09-28)](#narrow-segment-for-the-chunks-below-narrow-kept-2026-09-28)
   - [`seg_k_width_from_l2_bytes`'s extra /2 margin, applied on top of an already-per-thread L2 share (kept, counterintuitive)](#seg_k_width_from_l2_bytess-extra-2-margin-applied-on-top-of-an-already-per-thread-l2-share-kept-counterintuitive)
 - [presieve.hpp](#presievehpp)
   - [`fill()`: skip the `self_k` correction loop when it can't possibly match (kept, 2026-09-26)](#fill-skip-the-self_k-correction-loop-when-it-cant-possibly-match-kept-2026-09-26)
@@ -1219,6 +1221,22 @@ primes.
 
 ## sqlite_prime_store.hpp
 
+### `journal_mode=OFF` for the bulk load (open, 2026-09-28)
+
+With `journal_mode=WAL` every page is written twice: into the `-wal` file, then read
+back and copied into the `.db` at each checkpoint. After the wheel-index gaps cut
+the server's 1e13 `.db` from 216 to 190 GB with no clear change in time (~930-950s,
+~200-250 MB/s), that double write became the main suspect. `ERATOSTENES_DB_JOURNAL=off`
+(experimental knob, default unchanged) sets `journal_mode=OFF` + `synchronous=OFF`
+and skips the final checkpoint; a crash mid-run corrupts the file, but a partial
+`.db` is useless anyway. The knobs measured earlier in this section tuned the WAL;
+none removed it.
+
+Only data point so far, dev PC 1e11 (interleaved, files valid: count and positions
+checked against primecount, no sidecars left): WAL 11.49 / 21.22s, off 6.74 /
+6.03s. The 1e12 A/B was stopped (the dev PC disk is not the target); decide on a
+server A/B at 1e12 (A, B, B, A).
+
 ### Write-pipeline knobs: `BATCH`, `--db-block-size`, `wal_autocheckpoint` (all measured, kept at their defaults)
 
 Profiled after the single-pass elimination (see the `.db` single-pass entry in
@@ -2108,7 +2126,34 @@ Not yet validated on the i5-13500, where the per-thread share is the E-core one
 threads, 512KiB beat 256KiB, 43.35s vs 45.01s -- see main.cpp's "i5-13500
 server gap" entry.) A finer version (wide segment only for chunks
 past seg_k_width^2, where sparse primes actually start) could also recover the
-loss in the first ~44% of a 1e13 run; not attempted.
+loss in the first ~44% of a 1e13 run -- done, see the next entry.
+
+### Narrow segment for the chunks below narrow² (kept, 2026-09-28)
+
+The finer version of the entry above. When the width has been doubled, a chunk
+whose every number is below narrow² (narrow = the pre-doubling width, i.e. half the
+final power-of-2 one) has no active prime >= narrow, since activation is by p². It
+runs exactly the non-sparse configuration instead: narrow segment, 1/1 cutoff,
+med64_limit on the narrow width, via a second `TierSet` picked per chunk in
+`main.cpp` (its sparse list only holds primes that never activate there). Chunks
+straddling narrow² stay wide. `ERATOSTENES_NARROW_EARLY=0` disables it.
+
+Correctness beyond `make test` (which never reaches the sparse regime): forced
+with a small `--l2-bytes` so it kicks in at small N -- 1e11 (1236/1800 chunks
+narrow), 1e10 (773/1800), 3e9 `-t 3` (161/450) exact against primecount, and a
+1e10 `.db` built that way matched `primecount --nth-prime` at 52 positions.
+
+Dev PC, full 1e13, same binary, ABBA (791 of 1800 chunks narrow, counts exact):
+
+| | off | on | on | off | delta (means) |
+|---|---:|---:|---:|---:|---:|
+| wall | 372.20s | 368.17s | 371.33s | 380.55s | **-1.8%** |
+| user | 4450s | 4401s | 4441s | 4551s | -1.8% |
+
+Both "on" runs beat both controls, wall and user agree; the ceiling was ~2.9%
+(1e12's 6.5% over 44% of the range). The share of narrow chunks is
+narrow²/N: ~44% at 1e13, 4.4% at 1e14, so it matters for 5e12..~3e13 and
+fades above. Not yet measured on the server.
 
 ### `seg_k_width_from_l2_bytes`'s extra /2 margin, applied on top of an already-per-thread L2 share (kept, counterintuitive)
 
