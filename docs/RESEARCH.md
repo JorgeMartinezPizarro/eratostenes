@@ -56,7 +56,7 @@ throughout below).
   - [`sieve_chunk`: one `SegmentSieve` per worker instead of per chunk (tried, reverted -- neutral on cycles:u, 2026-09-26)](#sieve_chunk-one-segmentsieve-per-worker-instead-of-per-chunk-tried-reverted----neutral-on-cyclesu-2026-09-26)
   - [`run_parallel_chunks`: chunk-granularity idle-time investigation (2026-09-25, external review, Opus 5.5)](#run_parallel_chunks-chunk-granularity-idle-time-investigation-2026-09-25-external-review-opus-55)
   - [Chunk-width floor: at least 4 segments per chunk (kept, 2026-09-27)](#chunk-width-floor-at-least-4-segments-per-chunk-kept-2026-09-27)
-  - [i5-13500 server gap vs primesieve: hybrid cores ruled out, L2 misses on P-cores (open, 2026-09-28)](#i5-13500-server-gap-vs-primesieve-hybrid-cores-ruled-out-l2-misses-on-p-cores-open-2026-09-28)
+  - [i5-13500 server gap vs primesieve: medium-tier call count, sparse cutoff lowered to 1/2 (kept, 2026-09-28)](#i5-13500-server-gap-vs-primesieve-medium-tier-call-count-sparse-cutoff-lowered-to-12-kept-2026-09-28)
   - [`small_limit` cutoff tuning](#small_limit-cutoff-tuning)
   - [Cache-topology sizing: per-CPU-minimum step (kept)](#cache-topology-sizing-per-cpu-minimum-step-kept)
   - [Medium/sparse cutoff raised above `seg_k_width` (tried, reverted, 2026-09-27)](#mediumsparse-cutoff-raised-above-seg_k_width-tried-reverted-2026-09-27)
@@ -1412,7 +1412,7 @@ restores the old behavior exactly. Measured with that env var on one binary
 effect at large N, where chunks span thousands of segments. Should matter
 more on the server; not yet measured there.
 
-### i5-13500 server gap vs primesieve: hybrid cores ruled out, L2 misses on P-cores (open, 2026-09-28)
+### i5-13500 server gap vs primesieve: medium-tier call count, sparse cutoff lowered to 1/2 (kept, 2026-09-28)
 
 Context: dev PC (i5-11400F, symmetric) is now below primesieve at every N in
 README.md#benchmarks (0.92-0.98x); the server (i5-13500, 6P+HT + 8E, 20
@@ -1581,8 +1581,31 @@ that the sparse tier's per-hit bucket cost (copy + re-file per hit) overtakes
 the medium tier's per-call mispredict. At 1e14 the cutoff is worth ~6% of
 cycles -- about a third of the gap to primesieve.
 
-**Next (pending):** confirm 1/2 on the 10% tail (server, cycles:u, fresh
-control) and on the dev PC at 1e13 -- with the doubled segment, 1e13 has no
+**10% tail confirmation (server, P-cores, ABBA):**
+
+| | 1/1 | 1/2 | 1/2 | 1/1 | delta (means) |
+|---|---:|---:|---:|---:|---:|
+| cycles:u | 19.291T | 18.846T | 18.853T | 19.310T | **-2.3%** |
+| branch-misses:u | 150.5e9 | 110.0e9 | 110.0e9 | 150.6e9 | -27.0% |
+| wall | 453.66s | 445.42s | 446.28s | 460.75s | -2.5% |
+
+Reps agree to ~0.1%, so the win is real, but a third of the single-run 1%-tail
+figure (-6%) -- trust this one. Gap to primesieve (16.45T): 1.173x -> 1.146x.
+
+**Dev PC, full 1e13, ABBA (wall):** 1/1 364.79s, 1/2 355.55s, 1/2 356.51s,
+1/1 365.11s -> **-2.4%**, pi(1e13) exact, controls within 0.1%. 1/2 creates
+72036 sparse primes here -- the same count as the old 256KiB-segment regime
+where `/4` regressed 3 times; with the doubled segment and today's sparse tier
+it wins.
+
+**Kept:** default cutoff 1/2 whenever the sparse tier already exists
+(`sparse_regime` = isqrt(N) >= the pre-doubling `seg_k_width`, the condition
+that doubles the segment); 1/1 below that (N < ~4.4e12 on 256KiB), where 1/2
+would create sparse primes in an unmeasured regime. `ERATOSTENES_SPARSE_NUM/
+_DEN` still override. Open: re-sweep at 1e15, where sparse dominates and
+the optimum may move.
+
+(Original note, superseded:) the dev PC at 1e13 -- with the doubled segment, 1e13 has no
 sparse primes by default (sqrt = 3.16M < 4.19M) and 1/2 would create ~71k,
 exactly the regime where the /4 attempts regressed.
 
