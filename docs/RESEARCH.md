@@ -46,6 +46,8 @@ throughout below).
   - [Sparse tier: prefetch the next block of the chain, once per block (kept, 2026-09-27)](#sparse-tier-prefetch-the-next-block-of-the-chain-once-per-block-kept-2026-09-27)
   - [Sparse tier attempts 7-10 (all tried, reverted)](#sparse-tier-attempts-7-10-all-tried-reverted)
   - [Attempt 11: shrinking the live entry from 8 to 7 bytes (tried, reverted, 2026-09-27)](#attempt-11-shrinking-the-live-entry-from-8-to-7-bytes-tried-reverted-2026-09-27)
+- [gap_encoding.hpp](#gap_encodinghpp)
+  - [Gap encoding: wheel-index deltas](#gap-encoding-wheel-index-deltas)
 - [sqlite_prime_store.hpp](#sqlite_prime_storehpp)
   - [Write-pipeline knobs: `BATCH`, `--db-block-size`, `wal_autocheckpoint` (all measured, kept at their defaults)](#write-pipeline-knobs-batch---db-block-size-wal_autocheckpoint-all-measured-kept-at-their-defaults)
   - [`PRAGMA cache_size` increase (tried, reverted, 2026-09-25)](#pragma-cache_size-increase-tried-reverted-2026-09-25)
@@ -62,7 +64,7 @@ throughout below).
   - [Medium/sparse cutoff raised above `seg_k_width` (tried, reverted, 2026-09-27)](#mediumsparse-cutoff-raised-above-seg_k_width-tried-reverted-2026-09-27)
   - [EratBig-style sparse tier: forcing a power-of-2 segment width, and `sparse_limit = seg_k_width/4` (all attempts reverted)](#eratbig-style-sparse-tier-forcing-a-power-of-2-segment-width-and-sparse_limit--seg_k_width4-all-attempts-reverted)
 - [arg_parser.hpp](#arg_parserhpp)
-  - [`--zstd-level` default: 1 measured faster than 3, not yet made the default (open)](#--zstd-level-default-1-measured-faster-than-3-not-yet-made-the-default-open)
+  - [`--zstd-level` default: 1 (kept, 2026-09-28)](#--zstd-level-default-1-kept-2026-09-28)
   - [Sub-block size: half the L1d, not all of it (kept, 2026-09-27)](#sub-block-size-half-the-l1d-not-all-of-it-kept-2026-09-27)
   - [Auto segment width: dropping the `isqrt(limit)` cap (kept)](#auto-segment-width-dropping-the-isqrtlimit-cap-kept)
   - [Segment width doubled once the sparse tier exists (kept, 2026-09-27)](#segment-width-doubled-once-the-sparse-tier-exists-kept-2026-09-27)
@@ -1167,6 +1169,54 @@ byte-level packing of a single entry measured as a net loss on every metric
 that wasn't too noisy to read. The E14 ratio gap itself remains open; the next
 angle isn't a smaller entry, it's a different one entirely.
 
+## gap_encoding.hpp
+
+### Gap encoding: wheel-index deltas
+
+**Kept, 2026-09-28 (`.db` format_version 2).** Version 1 stored each gap as one
+byte `delta/2`. Its distribution carries the residue-class structure of the mod-30
+wheel (from a given residue only some gaps are possible, and multiples of 6 are
+favored), which zstd can't exploit without knowing each prime's residue, so it
+pays for it as entropy. Counting the gap in wheel indices instead (how many
+candidates coprime to 30 the next prime is ahead) gives a near-geometric,
+near-independent stream: its order-0 entropy equals H(p)/p with p = primes per
+wheel candidate, the bound for an iid bitmap, and zstd's Huffman stage codes it
+within ~1%.
+
+Measured first with a standalone program on real 3e7-wide windows of primes
+(zstd blocks of 65536 bytes, bits/prime):
+
+| N | gap/2, zstd 1 | wheel gap, zstd 1 | wheel gap, H0 | raw mod-30 bitmap, zstd 1 |
+|---|---:|---:|---:|---:|
+| 1e10 | 4.877 | 3.971 | 3.934 | 4.007 |
+| 1e12 | 5.156 | 4.263 | 4.220 | 4.323 |
+| 1e13 | 5.273 | 4.391 | 4.341 | 4.488 |
+| 1e15 | 5.484 | 4.619 | 4.563 | 4.841 |
+
+Compressing the sieve's own bitmap (no extraction at all) is worse than the wheel
+gap under zstd, and a custom arithmetic coder could win at most the ~1% gap to
+H0, so neither was pursued.
+
+End to end (dev PC, `.db` written to the WSL ext4 home, interleaved
+base / new(3) / new(1) / new(1) / new(3) / base, counts exact in all runs):
+
+| N | v1 gap/2, zstd 3 | wheel gap, zstd 3 | wheel gap, zstd 1 |
+|---|---:|---:|---:|
+| 1e11 size | 2.596 GB | 2.182 GB (-15.9%) | 2.108 GB (-18.8%) |
+| 1e11 time | 20.24 / 27.06s | 25.46 / 22.66s | 13.60 / 13.00s |
+| 1e12 size | 24.13 GB (5.13 bits/prime) | 20.94 GB (-13.2%) | 20.23 GB (-16.2%, 4.30 bits/prime) |
+| 1e12 time | 290.41 / 340.24s | 270.07 / 277.50s | 235.67 / 200.54s |
+
+1e12, means: -13% time at level 3, -31% at level 1, which became the default (see
+[arg_parser.hpp](#--zstd-level-default-1-kept-2026-09-28)). At 1e15 the gap is the
+same ~16%: ~3 TB less on the planned 22 TB disk.
+
+Format: byte b in 1..255 is the wheel gap; 0 escapes to a raw 4-byte integer
+delta, used when prev is off the wheel (2, 3, 5) and for wheel gaps over 255
+(integer gaps over ~960, none below 1e15). `nth_prime` refuses any other
+`format_version`, since decoding a v1 block as v2 would silently return wrong
+primes.
+
 ## sqlite_prime_store.hpp
 
 ### Write-pipeline knobs: `BATCH`, `--db-block-size`, `wal_autocheckpoint` (all measured, kept at their defaults)
@@ -1943,7 +1993,7 @@ footprint itself, not just how it's grouped into blocks.
 
 ## arg_parser.hpp
 
-### `--zstd-level` default: 1 measured faster than 3, not yet made the default (open)
+### `--zstd-level` default: 1 (kept, 2026-09-28)
 
 The default (3) was picked on general zstd knowledge -- entropy coding, which is
 most of the achievable ratio on this near-random gap-byte stream, barely depends
@@ -1951,8 +2001,14 @@ on compression level, so higher levels mostly buy slower builds, not smaller
 files. That reasoning was later checked directly: `--zstd-level 1` vs. the
 default 3, interleaved x3 on the dev PC, measured ~5-8% faster (16.7-19.6s vs.
 17.8-20.9s) with essentially identical output size (0.629 vs. 0.630
-bytes/prime). A small, consistent, low-risk win -- **not yet made the default**,
-just measured; worth doing since there's no real tradeoff at this ratio.
+bytes/prime), but wasn't made the default at the time.
+
+With wheel-index gaps (see
+[gap_encoding.hpp](#gap-encoding-wheel-index-deltas)) level 1 is both faster
+and *smaller* than 3: 1e11 2.108 vs 2.182 GB, 13.3s vs 24.1s; 1e12 20.23 vs
+20.94 GB, 218.1s vs 273.8s (dev PC, 2 reps each, table in that entry). Level 3's
+LZ match search finds nothing to match in a near-iid byte stream and its
+block-splitting costs a little ratio. Made the default.
 
 ### Sub-block size: half the L1d, not all of it (kept, 2026-09-27)
 

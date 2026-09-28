@@ -44,7 +44,8 @@
 # sweep -- there's real run-to-run noise on this kind of box, see BENCHMARK
 # section of the README/commit history; primesieve itself always runs once
 # per N regardless of REPS -- it's the fixed reference, not what's being
-# tuned, and at N=1e13 a single run already costs several minutes), COOLDOWN
+# tuned, and at N=1e13 a single run already costs several minutes; REPS=0
+# skips the CPU sweep, primesieve included, and runs only the .db one), COOLDOWN
 # (default: 5, seconds slept between eratostenes reps, not after the last
 # one -- see below). CAUTION on the production server specifically
 # (2026-09-25, see main.cpp's run_parallel_chunks comment on
@@ -68,12 +69,6 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-if ! command -v primesieve >/dev/null 2>&1; then
-    echo "primesieve no esta en el PATH -- instalalo (apt-get install primesieve)" >&2
-    echo "para poder generar la columna de comparacion." >&2
-    exit 1
-fi
-
 BIN=./eratostenes
 THREADS="${THREADS:-$(nproc)}"
 SEGMENT="${SEGMENT:-}"
@@ -81,6 +76,12 @@ REPS="${REPS:-1}"
 COOLDOWN="${COOLDOWN:-5}"
 WRITE_PATH="${WRITE_PATH:-$HOME/eratostenes-io-bench}"
 KEEP_DB="${KEEP_DB:-0}"
+
+if [ "$REPS" -gt 0 ] && ! command -v primesieve >/dev/null 2>&1; then
+    echo "primesieve no esta en el PATH -- instalalo (apt-get install primesieve)" >&2
+    echo "para poder generar la columna de comparacion (o REPS=0 para saltar el barrido de CPU)." >&2
+    exit 1
+fi
 
 # Cleans up the .db currently being written if this script exits early
 # (error, Ctrl-C) instead of leaving a partial file behind -- set right
@@ -99,6 +100,8 @@ make re >/tmp/benchmark_build.log 2>&1 || { cat /tmp/benchmark_build.log >&2; ex
 
 # ============================ 1: CPU sweep =================================
 
+# REPS=0: skip this whole sweep (primesieve included), straight to the .db one.
+if [ "$REPS" -gt 0 ]; then
 NS=(1e10 1e11 1e12 1e13)
 # pi(N) for each N above, in the same order -- known values, used to catch
 # a silently-wrong build/primesieve mismatch instead of just reporting a
@@ -172,6 +175,8 @@ for n in "${NS[@]}"; do
     ratio=$(awk -v a="$te" -v b="$tp" 'BEGIN{printf "%.2f", a/b}')
     printf "| %s | %ss | %ss | %sx |\n" "$n" "$te" "$tp" "$ratio"
 done
+
+fi # REPS > 0
 
 # ========================== 2: Disk I/O sweep ===============================
 
