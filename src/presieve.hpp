@@ -136,7 +136,8 @@ struct Presieve {
     // of once per table (16 tables -> 4 writes instead of 16); each
     // group's 4 loads plus 3 ORs per output word is still simple enough
     // for the compiler to auto-vectorize across words, same as before.
-    void fill(uint64_t* dst, uint64_t k_low, uint64_t count) const {
+    // Out of line, as measured: see erat_small.hpp cross_off on pinning.
+    __attribute__((noinline)) void fill(uint64_t* dst, uint64_t k_low, uint64_t count) const {
         uint64_t words_needed = (count + 63) / 64;
         size_t t = 0;
         bool first = true;
