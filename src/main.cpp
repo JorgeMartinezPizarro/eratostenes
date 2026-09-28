@@ -119,6 +119,10 @@ const uint64_t SMALL_PRIMES_COUNT = WHEEL_PRIMES.size();
 // See docs/RESEARCH.md#cache-topology-sizing-per-cpu-minimum-step-kept.
 static uint64_t SUB_BLOCK_BYTES = 32 * 1024;
 
+// Parts each segment is processed in when it has sparse primes (see
+// SegmentSieve's constructor); ERATOSTENES_SPARSE_PARTS, set once in main().
+static uint64_t SPARSE_PARTS = 1;
+
 struct ChunkRange {
     uint64_t low;   // first wheel index of the chunk (inclusive)
     uint64_t high;  // upper bound in wheel index (exclusive)
@@ -175,7 +179,7 @@ static void sieve_chunk(ChunkRange range, uint64_t seg_k_width, uint64_t base_pr
                          const Presieve& presieve,
                          Writer& out, uint64_t& local_count,
                          std::atomic<uint64_t>& progress) {
-    SegmentSieve sieve(seg_k_width, base_prime_max, presieve, SUB_BLOCK_BYTES, !sparse_primes.empty());
+    SegmentSieve sieve(seg_k_width, base_prime_max, presieve, SUB_BLOCK_BYTES, !sparse_primes.empty(), SPARSE_PARTS);
     sieve.begin_chunk();
     for (uint64_t k_low = range.low; k_low < range.high; k_low += seg_k_width) {
         uint64_t k_high = std::min(k_low + seg_k_width, range.high);
@@ -445,6 +449,7 @@ int main(int argc, char** argv) {
     // docs/RESEARCH.md#small_limit-cutoff-tuning for the divisor.
     uint64_t l1_bytes = opt.l1_bytes_override ? opt.l1_bytes_override : detect_l1d_cache_bytes();
     SUB_BLOCK_BYTES = sub_block_from_l1_bytes(l1_bytes);
+    if (const char* s = std::getenv("ERATOSTENES_SPARSE_PARTS")) SPARSE_PARTS = std::max<uint64_t>(1, std::strtoull(s, nullptr, 10));
     uint64_t small_limit = SUB_BLOCK_BYTES * small_num / small_den;
 
     // Hybrid P-core/E-core correction: detect_l2_cache_bytes()/

@@ -46,8 +46,13 @@ public:
     // shift/mask instead of a division -- main.cpp is responsible for
     // flooring seg_k_width to the nearest power of 2 (in bytes) whenever
     // has_sparse is true; this constructor just verifies that was done.
+    // sparse_parts: with sparse primes, the segment is processed in this
+    // many equal parts (power of 2): per part, presieve + small tier +
+    // that part's sparse bucket, while it is still L2-resident; med64 and
+    // medium then run over the whole segment. The bucket ring then has one
+    // slot per part instead of per segment. 1 = whole segment at once.
     SegmentSieve(uint64_t seg_k_width, uint64_t base_prime_max, const Presieve& presieve,
-                 uint64_t sub_block_bytes, bool has_sparse)
+                 uint64_t sub_block_bytes, bool has_sparse, uint64_t sparse_parts = 1)
         : words_((seg_k_width + 63) / 64, 0),
           seg_k_width_(seg_k_width),
           sub_block_bytes_(sub_block_bytes),
@@ -70,6 +75,11 @@ public:
         }
         log2_sb_ = 0;
         while ((uint64_t{1} << log2_sb_) < sb) ++log2_sb_;
+        // Split into parts only when there is a sparse tier to split (its
+        // ring needs the power-of-2 part width); a part stays word-aligned.
+        if (has_sparse) {
+            while (sparse_parts > 1 && log2_sb_ > 3) { --log2_sb_; sparse_parts >>= 1; }
+        }
         // Largest BYTE step between one sparse prime's consecutive hits:
         // qp * max(dm) + max(corr), with max(dm) = 10 on the mod-210
         // multiplier wheel (the largest gap between consecutive 210-
@@ -89,7 +99,7 @@ public:
     // primes have activated yet" pointers. Never reuse a SegmentSieve
     // across threads or out of order.
     void begin_chunk() {
-        cur_segment_ = 0;
+        cur_part_ = 0;
         next_small_idx_ = 0;
         next_med64_idx_ = 0;
         next_medium_idx_ = 0;
@@ -171,7 +181,8 @@ public:
                     "bucket sieve: salto de un primo disperso mayor que el margen del anillo de "
                     "cubos (bug de dimensionamiento en el constructor de SegmentSieve)");
             }
-            push_sparse_entry(static_cast<uint32_t>((cur_segment_ + ahead) & (num_buckets_ - 1)), e);
+            // cur_part_ is still this segment's first part here.
+            push_sparse_entry(static_cast<uint32_t>((cur_part_ + ahead) & (num_buckets_ - 1)), e);
             ++next_sparse_idx_;
         }
 
@@ -180,20 +191,42 @@ public:
         // it's still L1-resident, instead of each prime sweeping the whole
         // (L2-sized) segment. Pending hits stay relative to the segment's
         // first byte until the last sub-block rebases them.
+        //
+        // With sparse primes the segment goes part by part (see the
+        // constructor's sparse_parts): each part's sparse bucket runs right
+        // after its presieve + small tier, while the part is still in L2.
+        // Measured on the i5-13500 (1e14 tail, same primes per tier), a
+        // 256KiB segment made sparse -9%, small -7%, presieve -16% vs
+        // 512KiB, but med64 +9% and medium +44% (per-call costs): parts get
+        // the former, the whole segment keeps the latter. A short final
+        // segment of a chunk still drains every part's slot (marks past
+        // bytes_needed land in the unused tail of the array).
         uint8_t* bytes = reinterpret_cast<uint8_t*>(words_.data());
-        for (uint64_t sb = 0; sb < bytes_needed; sb += sub_block_bytes_) {
-            uint64_t se = std::min(sb + sub_block_bytes_, bytes_needed);
-            uint64_t sb_bit = sb * 8;
-            presieve_.fill(words_.data() + sb / 8, k_low + sb_bit, std::min<uint64_t>(count - sb_bit, (se - sb) * 8));
-            uint64_t rebase = (se == bytes_needed) ? bytes_needed : 0;
-            erat::cross_off_class<0>(bytes, se, small_[0].data(), small_[0].data() + small_[0].size(), rebase);
-            erat::cross_off_class<1>(bytes, se, small_[1].data(), small_[1].data() + small_[1].size(), rebase);
-            erat::cross_off_class<2>(bytes, se, small_[2].data(), small_[2].data() + small_[2].size(), rebase);
-            erat::cross_off_class<3>(bytes, se, small_[3].data(), small_[3].data() + small_[3].size(), rebase);
-            erat::cross_off_class<4>(bytes, se, small_[4].data(), small_[4].data() + small_[4].size(), rebase);
-            erat::cross_off_class<5>(bytes, se, small_[5].data(), small_[5].data() + small_[5].size(), rebase);
-            erat::cross_off_class<6>(bytes, se, small_[6].data(), small_[6].data() + small_[6].size(), rebase);
-            erat::cross_off_class<7>(bytes, se, small_[7].data(), small_[7].data() + small_[7].size(), rebase);
+        const uint64_t part_bytes = uint64_t{1} << log2_sb_;
+        const uint64_t seg_bytes = seg_k_width_ / 8;
+        for (uint64_t pb = 0; pb < seg_bytes; pb += part_bytes) {
+            const uint64_t pe = std::min(pb + part_bytes, bytes_needed);
+            for (uint64_t sb = pb; sb < pe; sb += sub_block_bytes_) {
+                uint64_t se = std::min(sb + sub_block_bytes_, pe);
+                uint64_t sb_bit = sb * 8;
+                presieve_.fill(words_.data() + sb / 8, k_low + sb_bit, std::min<uint64_t>(count - sb_bit, (se - sb) * 8));
+                uint64_t rebase = (se == bytes_needed) ? bytes_needed : 0;
+                erat::cross_off_class<0>(bytes, se, small_[0].data(), small_[0].data() + small_[0].size(), rebase);
+                erat::cross_off_class<1>(bytes, se, small_[1].data(), small_[1].data() + small_[1].size(), rebase);
+                erat::cross_off_class<2>(bytes, se, small_[2].data(), small_[2].data() + small_[2].size(), rebase);
+                erat::cross_off_class<3>(bytes, se, small_[3].data(), small_[3].data() + small_[3].size(), rebase);
+                erat::cross_off_class<4>(bytes, se, small_[4].data(), small_[4].data() + small_[4].size(), rebase);
+                erat::cross_off_class<5>(bytes, se, small_[5].data(), small_[5].data() + small_[5].size(), rebase);
+                erat::cross_off_class<6>(bytes, se, small_[6].data(), small_[6].data() + small_[6].size(), rebase);
+                erat::cross_off_class<7>(bytes, se, small_[7].data(), small_[7].data() + small_[7].size(), rebase);
+            }
+            // Sparse tier: see process_big below (pulled out of this function
+            // on purpose -- see its own comment). sparse_primes is either
+            // empty for the whole run or not, so skipping the call when it's
+            // empty avoids a real (non-inlined) call per part for N where this
+            // tier never has anything to do.
+            if (!sparse_primes.empty()) process_big(bytes + pb);
+            ++cur_part_;
         }
         // Wheel index 0 is the number 1: not prime, and nothing marks it.
         if (k_low == 0) words_[0] |= 1;
@@ -236,16 +269,6 @@ public:
         erat::cross_off_medium<5>(bytes, bytes_needed, medium_[5].data(), medium_[5].data() + medium_[5].size(), bytes_needed);
         erat::cross_off_medium<6>(bytes, bytes_needed, medium_[6].data(), medium_[6].data() + medium_[6].size(), bytes_needed);
         erat::cross_off_medium<7>(bytes, bytes_needed, medium_[7].data(), medium_[7].data() + medium_[7].size(), bytes_needed);
-
-        // Sparse tier: see process_sparse_bucket below (pulled out of this
-        // function on purpose -- see its own comment). sparse_primes is
-        // either empty for the whole run or not -- never changes segment
-        // to segment -- so skipping the call entirely when it's empty
-        // avoids paying a real (non-inlined) call's overhead every single
-        // segment for N where this tier never has anything to do (every N
-        // tested up to 1e12 on this machine, see README#benchmarks).
-        if (!sparse_primes.empty()) process_big();
-        ++cur_segment_;
 
         // Extraction: bit=0 => prime candidate. Accumulated locally and
         // added to prime_count once at the end, instead of read-modify-
@@ -447,16 +470,15 @@ private:
     // hit (byte marking, mod-210 table lookup for mask/step -- see
     // wheel210_big.hpp), advance to the next hit, and re-file it by byte
     // position with a shift/mask instead of a division. `pos` in a live
-    // entry is always relative to whichever segment it's due in, so no
-    // k_low/k_high parameters are needed here.
+    // entry is always relative to whichever part (see sparse_parts) it's
+    // due in, `s` is that part's first byte.
     __attribute__((noinline))
-    void process_big() {
-        const uint32_t slot = static_cast<uint32_t>(cur_segment_ & (num_buckets_ - 1));
-        uint8_t* const s = reinterpret_cast<uint8_t*>(words_.data());
+    void process_big(uint8_t* const s) {
+        const uint32_t slot = static_cast<uint32_t>(cur_part_ & (num_buckets_ - 1));
         const uint32_t log2sb = log2_sb_;
         const uint64_t modsb = (uint64_t{1} << log2sb) - 1;
         const uint64_t bmask = num_buckets_ - 1;
-        const uint64_t cur = cur_segment_;
+        const uint64_t cur = cur_part_;
         while (head_[slot]) {
             Blk* blk = head_[slot];
             erat::DenseState* last_end = tail_[slot];
@@ -562,9 +584,9 @@ private:
     std::array<std::vector<erat::DenseState>, 64> m64_nxt_{};
     bool med64_reserved_ = false;
 
-    uint32_t log2_sb_ = 0; // log2(segment width in bytes) -- see constructor
+    uint32_t log2_sb_ = 0; // log2(part width in bytes; the segment when not split) -- see constructor
     uint64_t num_buckets_ = 1;
-    uint64_t cur_segment_ = 0;
+    uint64_t cur_part_ = 0; // ring position: parts processed so far in this chunk
 
     size_t next_small_idx_ = 0;
     size_t next_med64_idx_ = 0;
