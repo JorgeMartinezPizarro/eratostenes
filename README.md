@@ -68,6 +68,9 @@ The `.db` format is a indexed sqlite file (max 256TB size), so it is suitable up
 ```sh
 ./nth_prime out.db 1000000     # the 1,000,000th prime
 ./nth_prime out.db --count     # pi(limit)
+
+# with Docker only (the .db must be in ./output)
+make nth-prime ARGS="/output/out.db 1000000"
 ```
 
 `nth_prime` looks up the one block containing the requested position (indexed by `start_index`, not a table scan) and decodes just that block — lookups stay fast regardless of file size.

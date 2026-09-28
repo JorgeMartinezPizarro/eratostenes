@@ -50,7 +50,7 @@ NTH_OBJ := $(OBJ_DIR_RELEASE)/nth_prime.o
 OUT_DIR := $(CURDIR)/output
 COMPOSE := docker compose -f docker/docker-compose.yml
 
-.PHONY: all portable debug pgo clean fclean re docker run docker-pgo run-pgo \
+.PHONY: all portable debug pgo clean fclean re docker run docker-pgo run-pgo nth-prime \
         test benchmark docker-dev docker-test docker-benchmark
 
 # --- release (default) ---
@@ -194,6 +194,15 @@ docker-pgo:
 run-pgo:
 	mkdir -p $(OUT_DIR)
 	$(COMPOSE) run --rm -e ERATOSTENES_DEBUG_IDLE eratostenes-pgo $(ARGS)
+
+# Consulta un .db con nth_prime dentro de la imagen (su ENTRYPOINT es
+# eratostenes, de ahi el --entrypoint). Mismo montaje que `run`: el .db
+# tiene que estar en ./output del host y se nombra como /output/<fichero>.
+# Ejemplos: make nth-prime ARGS="/output/primos.db 1000000"
+#           make nth-prime ARGS="/output/primos.db --count"
+nth-prime:
+	mkdir -p $(OUT_DIR)
+	$(COMPOSE) run --rm --entrypoint nth_prime eratostenes $(ARGS)
 
 # Compara pi(N) contra el valor conocido para N=1e8..1e11 (sin -o, modo
 # conteo, sin E/S); un .db real en N=1e10 con primos conocidos por posicion via

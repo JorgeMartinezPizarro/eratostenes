@@ -1566,10 +1566,25 @@ the minimum may sit below 1x there. `ERATOSTENES_SPARSE_NUM/_DEN` (lowering
 only, default 1/1) added to re-sweep it; pi(1e11) exact at /16 and /64,
 pi(1e12) exact at 3/8, `make test` green.
 
-**Next (pending):** server sweep, P-cores, 1% tail (cycles:u is immune to
-the tail idle artifact), NUM/DEN = 1/1, 3/4, 1/2, 3/8, 1/4; confirm any
-winner on the 10% tail and on the dev PC at 1e13 (the N that killed it
-before).
+**Server sweep** (P-cores, 1% tail of 1e14, single runs, identical counts):
+
+| NUM/DEN | cutoff | medium / sparse | cycles:u | branch-misses:u | wall |
+|---|---:|---|---:|---:|---:|
+| 1/1 | 4.19M | 266008 / 368632 | 1751.4G | 15.19e9 | 48.81s |
+| 3/4 | 3.15M | 196610 / 438030 | 1682.4G (-3.9%) | 13.38e9 (-12%) | 47.91s |
+| **1/2** | 2.10M | 125672 / 508968 | **1646.0G (-6.0%)** | 11.10e9 (-27%) | 46.94s |
+| 3/8 | 1.57M | 89329 / 545311 | 1657.9G (-5.3%) | 9.91e9 (-35%) | 46.89s |
+| 1/4 | 1.05M | 52086 / 582554 | 1732.2G (-1.1%) | 8.63e9 (-43%) | 48.27s |
+
+U-shaped, minimum around 1/2 to 3/8 (the two are within single-run noise): below
+that the sparse tier's per-hit bucket cost (copy + re-file per hit) overtakes
+the medium tier's per-call mispredict. At 1e14 the cutoff is worth ~6% of
+cycles -- about a third of the gap to primesieve.
+
+**Next (pending):** confirm 1/2 on the 10% tail (server, cycles:u, fresh
+control) and on the dev PC at 1e13 -- with the doubled segment, 1e13 has no
+sparse primes by default (sqrt = 3.16M < 4.19M) and 1/2 would create ~71k,
+exactly the regime where the /4 attempts regressed.
 
 Server perf recipe: `eratostenes:dev` image ships `linux-perf`; run with
 `docker run --cap-add SYS_ADMIN` (host `perf_event_paranoid=3`, a
