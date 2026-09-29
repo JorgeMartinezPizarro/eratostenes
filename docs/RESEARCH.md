@@ -28,6 +28,7 @@ throughout below).
   - [Small tier: mod-210 stepping as 7 unrolled mod-30 copies (tried, reverted, 2026-09-27)](#small-tier-mod-210-stepping-as-7-unrolled-mod-30-copies-tried-reverted-2026-09-27)
   - [`cross_off`: branchless tail for the small and med64 tiers (tried, reverted, 2026-09-27)](#cross_off-branchless-tail-for-the-small-and-med64-tiers-tried-reverted-2026-09-27)
   - [`cross_off_medium`: byte positions + doubled tables (kept, 2026-09-27)](#cross_off_medium-byte-positions--doubled-tables-kept-2026-09-27)
+  - [med64: EratMedium-style checked loop, `cross_off_checked` (kept, 2026-09-29)](#med64-eratmedium-style-checked-loop-cross_off_checked-kept-2026-09-29)
 - [wheel.hpp](#wheelhpp)
   - [Wheel size: mod 6 vs. mod 30 vs. mod 210 (historical, pre-tiered-marking architecture)](#wheel-size-mod-6-vs-mod-30-vs-mod-210-historical-pre-tiered-marking-architecture)
   - [`ONFLY_CORRECTION`/`GAP_K`: shared table replacing a per-prime `delta[]` (kept)](#onfly_correctiongap_k-shared-table-replacing-a-per-prime-delta-kept)
@@ -557,6 +558,48 @@ and never had its cause isolated.
 **`med64_limit` re-swept after v3** (cycles:u, 1e12, 2 reps each): 1/12 1242G,
 1/16 1242G, 1/8 1254G, 1/24 1248G, 1/48 1273G, med64 off 1343G. The cheaper
 medium tier doesn't move the optimum; 1/12 stays.
+
+### med64: EratMedium-style checked loop, `cross_off_checked` (kept, 2026-09-29)
+
+The 1e14 server profile put ~+8 of the gap to primesieve (per 100) in med64 (see
+[segment_sieve.hpp](#segment-processed-in-parts-for-the-sparse-tier-tried-reverted-2026-09-29)):
+same cost per hit as EratMedium despite far more hits per call (12-682 vs 3-214),
+so the fixed cost per call was the suspect. Side by side with primesieve's
+`EratMedium::crossOff_*`:
+
+| | `cross_off` (was med64's) | `EratMedium::crossOff_*` |
+|---|---|---|
+| entry | 8 offsets into a stack array, `b = i - o[j]` | straight into the switch with `i` |
+| body | checked chain, unchecked 8-hit cycle loop, checked chain | one loop, one check per hit, `i += dist` |
+| mispredicts per call | loop exit + data-dependent tail exit, 1.65 measured | loop exit, ~1 |
+| exit | `i = b + o[j]`, another array load | direct |
+
+The unchecked cycle saves a compare per hit, but med64 is store-bound and on a
+wide core that compare issues beside the store for free. `cross_off_checked<PR>`
+copies EratMedium's shape (switch into a `for (;;)`, one check per hit, 8
+per-class distances); the small tier keeps `cross_off`, where the unchecked cycle
+still pays (frontend-bound, hundreds of hits per sub-block call). Inlining pinned
+so the A/B measures only med64 (see the method note in the entry linked above):
+`cross_off` and `cross_off_medium` `noinline`, as GCC had laid them out in
+`fe6260a`; `process_big` byte-identical.
+
+Dev PC, full runs, ABBA against the `fe6260a` binary, counts exact:
+
+| | old | new | change |
+|---|---:|---:|---:|
+| 1e12 cycles:u | 1221.2 / 1238.3G | 1198.5 / 1219.6G | -1.7% |
+| 1e12 branch-misses:u | 9.28G | 8.21G | -11.5% |
+| 1e12 instructions:u | 1215G | 1279G | +5.3% |
+| 1e13 cycles:u | 16639 / 16938G | 16327 / 16712G | -1.6% |
+| 1e13 branch-misses:u | 123.9G | 114.5G | -7.5% |
+
+Server (i5-13500), `make benchmark` best of 7 vs the previous README best: 1e11 1.62s
+(=), 1e12 23.82s vs 23.90s (-0.3%; median of 7, 23.92s, already matches the old
+best), 1e13 305.02s vs 308.04s (-1.0%, best of the first 2 reps; primesieve
+291.949s in the same session, 1.045x). Single server runs vary up to 5% (24.39s
+and 23.17s at 1e12 minutes apart), so only best-of-N or same-session ABBA can
+see an effect this size. Small and growing with N, as med64's share does. 1e14/1e15
+pending.
 
 ## wheel.hpp
 

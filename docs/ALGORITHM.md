@@ -148,9 +148,12 @@ sparse, then extraction.
   `end`. One list per residue class (`small_[8]`) keeps `PR` a template parameter
   instead of a per-prime branch. Pending hits are rebased once, at the segment's
   last sub-block.
-- **med64** (`small_limit <= p < med64_limit`): the same byte-marking
-  `cross_off<PR>`, but over the whole segment in one pass (these primes have
-  too few hits per sub-block to amortize a call per sub-block). Primes are kept in
+- **med64** (`small_limit <= p < med64_limit`): byte marking with the same
+  constant masks, but over the whole segment in one pass (these primes have
+  too few hits per sub-block to amortize a call per sub-block), with
+  primesieve EratMedium's loop shape (`cross_off_checked<PR>`): one running
+  index and one bounds check per hit, so each call leaves at a single loop
+  exit instead of the small tier's unrolled-cycle exit plus tail exit. Primes are kept in
   64 lists keyed by (residue class, entry phase), double-buffered (`m64_cur_`/
   `m64_nxt_`): each segment reads one set and files every prime into the other by
   its new phase, so every call in one inner loop enters the unrolled cycle at the
