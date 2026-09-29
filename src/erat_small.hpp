@@ -60,8 +60,13 @@ constexpr uint64_t QP_LIMIT = uint64_t{1} << 26;
 // Every local here (qp, p, the o[j]s, b, end) provably fits a uint32_t, but
 // narrowing them from uint64_t was measured slower, not faster -- see
 // docs/RESEARCH.md.
+//
+// Small tier only (med64 uses cross_off_checked). Out of line, one call
+// per prime from cross_off_class: the layout every small-tier measurement
+// was taken on, which GCC stops choosing on its own once med64 no longer
+// shares this function.
 template <int PR>
-inline void cross_off(uint8_t* s, uint64_t end, uint64_t qp, uint64_t& i_io, uint32_t& j_io) {
+__attribute__((noinline)) void cross_off(uint8_t* s, uint64_t end, uint64_t qp, uint64_t& i_io, uint32_t& j_io) {
     const uint64_t p = 30 * qp + R[PR];
     const uint64_t o0 = C(PR, 0);
     const uint64_t o1 = qp * (R[1] - 1) + C(PR, 1);
@@ -122,6 +127,53 @@ done:
     j_io = j;
 }
 
+// Same contract as cross_off, primesieve EratMedium's loop shape: one
+// running byte index, one bounds check per hit, the switch jumping into
+// the middle of the 8-hit cycle. For the med64 tier (tens of hits per call):
+// its per-hit compare runs beside the store the loop is bound by, and the
+// call leaves at a single loop exit (~1 mispredict) instead of cross_off's
+// unrolled-loop exit plus data-dependent tail exit (~1.65), with no
+// per-call offset array.
+template <int PR>
+inline void cross_off_checked(uint8_t* s, uint64_t end, uint64_t qp, uint64_t& i_io, uint32_t& j_io) {
+    // Byte distance from hit j to hit j+1: qp*(R[j+1]-R[j]) plus a constant
+    // carry; from hit 7 to the next cycle's hit 0, p - (o7 - o0).
+    const uint64_t d0 = qp * (R[1] - R[0]) + C(PR, 1) - C(PR, 0);
+    const uint64_t d1 = qp * (R[2] - R[1]) + C(PR, 2) - C(PR, 1);
+    const uint64_t d2 = qp * (R[3] - R[2]) + C(PR, 3) - C(PR, 2);
+    const uint64_t d3 = qp * (R[4] - R[3]) + C(PR, 4) - C(PR, 3);
+    const uint64_t d4 = qp * (R[5] - R[4]) + C(PR, 5) - C(PR, 4);
+    const uint64_t d5 = qp * (R[6] - R[5]) + C(PR, 6) - C(PR, 5);
+    const uint64_t d6 = qp * (R[7] - R[6]) + C(PR, 7) - C(PR, 6);
+    const uint64_t d7 = qp * (30 + R[0] - R[7]) + R[PR] + C(PR, 0) - C(PR, 7);
+    uint64_t i = i_io;
+    uint32_t j;
+
+#define ERAT_CHK(J) \
+    case J: \
+        if (i >= end) { j = J; goto done; } \
+        s[i] |= M(PR, J); \
+        i += d##J;
+
+    switch (j_io) {
+        for (;;) {
+            ERAT_CHK(0) [[fallthrough]];
+            ERAT_CHK(1) [[fallthrough]];
+            ERAT_CHK(2) [[fallthrough]];
+            ERAT_CHK(3) [[fallthrough]];
+            ERAT_CHK(4) [[fallthrough]];
+            ERAT_CHK(5) [[fallthrough]];
+            ERAT_CHK(6) [[fallthrough]];
+            ERAT_CHK(7)
+        }
+    }
+#undef ERAT_CHK
+
+done:
+    i_io = i;
+    j_io = j;
+}
+
 // Runs every state in [first, last) -- all of residue class PR -- over
 // s[0, end), then rebases each pending hit by `rebase` bytes (the
 // segment's byte width on its last pass over a segment, 0 otherwise). One
@@ -175,8 +227,11 @@ inline void cross_off_class(uint8_t* s, uint64_t end, DenseState* first, DenseSt
 // reaches 96 -- at most once per call, and never when med64 is on (a
 // medium prime then has under 48 hits per segment) -- instead of a
 // compare-and-select on every hit.
+//
+// Out of line (pinned, as measured): GCC inlines some classes into
+// sieve_chunk on its own when surrounding code changes.
 template <int PR>
-inline void cross_off_medium(uint8_t* s, uint64_t end, DenseState* first, DenseState* last, uint64_t rebase) {
+__attribute__((noinline)) void cross_off_medium(uint8_t* s, uint64_t end, DenseState* first, DenseState* last, uint64_t rebase) {
     const uint32_t* pack = big::PACK210[PR].data();
     for (DenseState* st = first; st != last; ++st) {
         uint64_t pos = st->pos;

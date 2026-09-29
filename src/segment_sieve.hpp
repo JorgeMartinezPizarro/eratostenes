@@ -416,7 +416,7 @@ private:
                 uint64_t i = st.pos;
                 uint64_t qp = st.qw >> 6;
                 uint32_t jj = st.qw & 7;
-                erat::cross_off<PR>(bytes, bytes_needed, qp, i, jj);
+                erat::cross_off_checked<PR>(bytes, bytes_needed, qp, i, jj);
                 m64_nxt_[PR * 8 + jj].push_back(
                     {static_cast<uint32_t>((qp << 6) | (PR << 3) | jj), static_cast<uint32_t>(i - bytes_needed)});
             }
