@@ -119,6 +119,11 @@ const uint64_t SMALL_PRIMES_COUNT = WHEEL_PRIMES.size();
 // See docs/RESEARCH.md#cache-topology-sizing-per-cpu-minimum-step-kept.
 static uint64_t SUB_BLOCK_BYTES = 32 * 1024;
 
+// Medium-tier prefetchnta (erat_small.hpp::cross_off_medium) is on for a
+// chunk's tier set when it has at least this many medium primes, i.e. when
+// their state (8 bytes each) outgrows the per-thread L3 share; set in main().
+static uint64_t MEDIUM_NTA_MIN_PRIMES = UINT64_MAX;
+
 struct ChunkRange {
     uint64_t low;   // first wheel index of the chunk (inclusive)
     uint64_t high;  // upper bound in wheel index (exclusive)
@@ -175,7 +180,8 @@ static void sieve_chunk(ChunkRange range, uint64_t seg_k_width, uint64_t base_pr
                          const Presieve& presieve,
                          Writer& out, uint64_t& local_count,
                          std::atomic<uint64_t>& progress) {
-    SegmentSieve sieve(seg_k_width, base_prime_max, presieve, SUB_BLOCK_BYTES, !sparse_primes.empty());
+    SegmentSieve sieve(seg_k_width, base_prime_max, presieve, SUB_BLOCK_BYTES, !sparse_primes.empty(),
+                       medium_primes.size() >= MEDIUM_NTA_MIN_PRIMES);
     sieve.begin_chunk();
     for (uint64_t k_low = range.low; k_low < range.high; k_low += seg_k_width) {
         uint64_t k_high = std::min(k_low + seg_k_width, range.high);
@@ -671,6 +677,21 @@ int main(int argc, char** argv) {
 
     uint64_t total_span = ranges.back().high - ranges.front().low;
 
+    // Medium-tier prefetchnta gate: on once the medium state (8 bytes per
+    // prime, SoA -- see erat_small.hpp::cross_off_medium) outgrows the
+    // per-thread L3 share, where it comes from DRAM anyway and keeping it out
+    // of L2 only protects the segment. Dev PC (1 MB L3/thread): +0.8% at 1e12
+    // (0.5 MB of state), -6.1% at 1e13 (1.6 MB), -12.1% at 1e14. See
+    // docs/RESEARCH.md. Undetected L3 -> 1 MiB. ERATOSTENES_MEDIUM_NTA=0/1
+    // forces it off/on.
+    {
+        uint64_t l3_share = detect_cpu_cache_share(0, 3);
+        if (l3_share == 0) l3_share = 1024 * 1024;
+        MEDIUM_NTA_MIN_PRIMES = l3_share / 8;
+        if (const char* s = std::getenv("ERATOSTENES_MEDIUM_NTA"))
+            MEDIUM_NTA_MIN_PRIMES = std::strtoull(s, nullptr, 10) ? 0 : UINT64_MAX;
+    }
+
     Presieve presieve = build_presieve(PRESIEVE_GROUPS);
 
     std::fprintf(stderr, "Iniciando %u hilos, limite=%llu, segmento=%llu, rueda mod %llu (%zu primos), "
@@ -682,6 +703,14 @@ int main(int argc, char** argv) {
                  WHEEL_PRIMES.size(),
                  small_primes.size(), static_cast<unsigned long long>(SUB_BLOCK_BYTES / 1024),
                  med64_primes.size(), medium_primes.size(), sparse_primes.size());
+    {
+        const char* nta = medium_primes.size() >= MEDIUM_NTA_MIN_PRIMES ? "si" : "no";
+        if (MEDIUM_NTA_MIN_PRIMES == 0 || MEDIUM_NTA_MIN_PRIMES == UINT64_MAX)
+            std::fprintf(stderr, "  prefetchnta del tier medio: %s (forzado por ERATOSTENES_MEDIUM_NTA)\n", nta);
+        else
+            std::fprintf(stderr, "  prefetchnta del tier medio: %s (a partir de %s primos medianos)\n", nta,
+                         format_thousands(MEDIUM_NTA_MIN_PRIMES).c_str());
+    }
     if (narrow_early) {
         unsigned narrow_chunks = 0;
         for (const auto& r : ranges) narrow_chunks += r.high <= narrow_k_end;

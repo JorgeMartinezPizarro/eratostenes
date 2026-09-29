@@ -170,10 +170,14 @@ sparse, then extraction.
   with the mod-210 table (§2), one table load per hit. The table holds two
   48-phase cycles so the phase `w` doesn't need wrapping on every hit (a medium
   prime has fewer than 48 hits per segment; `w` is folded back once per call).
-  One list per residue class (`medium_[8]`) makes the class a template
-  parameter, like the small tier. The unrolled loop, a 4-way interleave,
-  prefetching and the 64-list layout were all measured slower here -- see
-  [RESEARCH.md](RESEARCH.md#erat_smallhpp).
+  One list per residue class makes the class a template parameter, like the
+  small tier. The state is two parallel arrays per class (struct of arrays):
+  `(pos << 6) | w`, rewritten every segment, and `qp`, read-only -- so only half
+  of it is ever dirty and written back. Once that state outgrows the per-thread
+  L3 share, it is also read with `prefetchnta` (once per prime), keeping it out
+  of L2 so the segment stays there. The unrolled loop, a 4-way interleave,
+  per-hit prefetching and the 64-list layout were all measured slower here --
+  see [RESEARCH.md](RESEARCH.md#erat_smallhpp).
 - **Sparse** (`p >= seg_k_width`, at most ~1 hit per segment): the only tier where
   a *bucket* earns its keep -- most segments have nothing to do for most of these
   primes, so each one is filed into the ring slot of the segment its next hit

@@ -48,10 +48,11 @@ public:
     // flooring seg_k_width to the nearest power of 2 (in bytes) whenever
     // has_sparse is true; this constructor just verifies that was done.
     SegmentSieve(uint64_t seg_k_width, uint64_t base_prime_max, const Presieve& presieve,
-                 uint64_t sub_block_bytes, bool has_sparse)
+                 uint64_t sub_block_bytes, bool has_sparse, bool medium_nta)
         : words_((seg_k_width + 63) / 64, 0),
           seg_k_width_(seg_k_width),
           sub_block_bytes_(sub_block_bytes),
+          medium_nta_(medium_nta),
           presieve_(presieve) {
         // The byte-addressed dense tiers (erat_small.hpp) need every
         // segment to start on a byte (k multiple of 8) and to stay a whole
@@ -64,6 +65,12 @@ public:
         // DenseState::pos), and p / 30 has to fit its packed qp field.
         if (seg_k_width / WHEEL_MOD >= erat::QP_LIMIT || seg_k_width >= (uint64_t{1} << 30)) {
             throw std::runtime_error("SegmentSieve: segmento demasiado grande para el estado denso empaquetado");
+        }
+        // Medium tier packs a pending hit's byte position into 26 bits
+        // (erat_small.hpp::cross_off_medium): at most one segment plus one
+        // step of a medium prime (p < seg_k_width, step <= qp * 10 + 16).
+        if (seg_k_width / 8 + seg_k_width / WHEEL_MOD * 10 + 16 >= erat::MEDIUM_POS_LIMIT) {
+            throw std::runtime_error("SegmentSieve: segmento demasiado grande para el estado del tier medio");
         }
         uint64_t sb = seg_k_width_ / 8; // segment width in bytes
         if (has_sparse && (sb & (sb - 1))) {
@@ -98,7 +105,8 @@ public:
         for (auto& v : small_) v.clear();
         for (auto& v : m64_cur_) v.clear();
         for (auto& v : m64_nxt_) v.clear();
-        for (auto& v : medium_) v.clear();
+        for (auto& v : medium_dyn_) v.clear();
+        for (auto& v : medium_qp_) v.clear();
         std::fill(head_.begin(), head_.end(), nullptr);
         std::fill(tail_.begin(), tail_.end(), nullptr);
         // Blocks aren't freed, just handed back to the pool: every block
@@ -145,7 +153,7 @@ public:
         }
         activate_dense(small_primes, next_small_idx_, small_, true, high_n, low_n, k_low);
         activate_med64(med64_primes, next_med64_idx_, m64_cur_.data(), high_n, low_n, k_low);
-        activate_medium(medium_primes, next_medium_idx_, medium_, high_n, low_n, k_low);
+        activate_medium(medium_primes, next_medium_idx_, medium_dyn_, medium_qp_, high_n, low_n, k_low);
 
         // EratBig-style activation (see header comment): find the smallest
         // multiplier m coprime to 210 (not just 30) with p*m >= max(p*p,
@@ -226,17 +234,12 @@ public:
         }
 
         // Medium tier: one pass over the whole segment each, one list per
-        // residue class (medium_[pr]) so PR is a compile-time template
-        // parameter in cross_off_medium<PR>, same reasoning as the small
-        // tier's cross_off_class<PR> calls just above.
-        erat::cross_off_medium<0>(bytes, bytes_needed, medium_[0].data(), medium_[0].data() + medium_[0].size(), bytes_needed);
-        erat::cross_off_medium<1>(bytes, bytes_needed, medium_[1].data(), medium_[1].data() + medium_[1].size(), bytes_needed);
-        erat::cross_off_medium<2>(bytes, bytes_needed, medium_[2].data(), medium_[2].data() + medium_[2].size(), bytes_needed);
-        erat::cross_off_medium<3>(bytes, bytes_needed, medium_[3].data(), medium_[3].data() + medium_[3].size(), bytes_needed);
-        erat::cross_off_medium<4>(bytes, bytes_needed, medium_[4].data(), medium_[4].data() + medium_[4].size(), bytes_needed);
-        erat::cross_off_medium<5>(bytes, bytes_needed, medium_[5].data(), medium_[5].data() + medium_[5].size(), bytes_needed);
-        erat::cross_off_medium<6>(bytes, bytes_needed, medium_[6].data(), medium_[6].data() + medium_[6].size(), bytes_needed);
-        erat::cross_off_medium<7>(bytes, bytes_needed, medium_[7].data(), medium_[7].data() + medium_[7].size(), bytes_needed);
+        // residue class so PR is a compile-time template parameter in
+        // cross_off_medium<PR>, same reasoning as the small tier's
+        // cross_off_class<PR> calls just above; NTA picked per TierSet (see
+        // main.cpp's MEDIUM_NTA_MIN_PRIMES).
+        if (medium_nta_) run_medium<true>(bytes, bytes_needed);
+        else run_medium<false>(bytes, bytes_needed);
 
         // Sparse tier: see process_sparse_bucket below (pulled out of this
         // function on purpose -- see its own comment). sparse_primes is
@@ -371,7 +374,7 @@ private:
     // branch above, just mod-210 stepping instead of mod-30. Same t/w
     // decomposition as the sparse tier's own EratBig-style activation.
     static void activate_medium(const std::vector<uint64_t>& primes, size_t& next,
-                                 std::vector<erat::DenseState>* medium,
+                                 std::vector<uint32_t>* dyn, std::vector<uint32_t>* qps,
                                  uint64_t high_n, uint64_t low_n, uint64_t k_low) {
         while (next < primes.size()) {
             uint64_t p = primes[next];
@@ -384,8 +387,8 @@ private:
             if (w == 48) { ++t; w = 0; }
             uint64_t m = t * 210 + big::M210[w];
             uint64_t pos = (p * m) / WHEEL_MOD - k_low / 8; // byte position, like the small tier's
-            medium[pr].push_back({static_cast<uint32_t>(((p / WHEEL_MOD) << 6) | w),
-                                   static_cast<uint32_t>(pos)});
+            dyn[pr].push_back(static_cast<uint32_t>((pos << 6) | w));
+            qps[pr].push_back(static_cast<uint32_t>(p / WHEEL_MOD));
             ++next;
         }
     }
@@ -422,6 +425,20 @@ private:
                     {static_cast<uint32_t>((qp << 6) | (PR << 3) | jj), static_cast<uint32_t>(i - bytes_needed)});
             }
         }
+    }
+
+    // Medium tier over the whole segment, one call per residue class; the
+    // rebase is the segment's own width, like process_med64's.
+    template <bool NTA>
+    void run_medium(uint8_t* bytes, uint64_t bytes_needed) {
+        erat::cross_off_medium<0, NTA>(bytes, bytes_needed, medium_dyn_[0].data(), medium_dyn_[0].data() + medium_dyn_[0].size(), medium_qp_[0].data(), bytes_needed);
+        erat::cross_off_medium<1, NTA>(bytes, bytes_needed, medium_dyn_[1].data(), medium_dyn_[1].data() + medium_dyn_[1].size(), medium_qp_[1].data(), bytes_needed);
+        erat::cross_off_medium<2, NTA>(bytes, bytes_needed, medium_dyn_[2].data(), medium_dyn_[2].data() + medium_dyn_[2].size(), medium_qp_[2].data(), bytes_needed);
+        erat::cross_off_medium<3, NTA>(bytes, bytes_needed, medium_dyn_[3].data(), medium_dyn_[3].data() + medium_dyn_[3].size(), medium_qp_[3].data(), bytes_needed);
+        erat::cross_off_medium<4, NTA>(bytes, bytes_needed, medium_dyn_[4].data(), medium_dyn_[4].data() + medium_dyn_[4].size(), medium_qp_[4].data(), bytes_needed);
+        erat::cross_off_medium<5, NTA>(bytes, bytes_needed, medium_dyn_[5].data(), medium_dyn_[5].data() + medium_dyn_[5].size(), medium_qp_[5].data(), bytes_needed);
+        erat::cross_off_medium<6, NTA>(bytes, bytes_needed, medium_dyn_[6].data(), medium_dyn_[6].data() + medium_dyn_[6].size(), medium_qp_[6].data(), bytes_needed);
+        erat::cross_off_medium<7, NTA>(bytes, bytes_needed, medium_dyn_[7].data(), medium_dyn_[7].data() + medium_dyn_[7].size(), medium_qp_[7].data(), bytes_needed);
     }
 
     // Processes exactly the sparse-tier entries due this segment: mark,
@@ -567,13 +584,17 @@ private:
     std::vector<uint64_t> words_;
     uint64_t seg_k_width_;
     uint64_t sub_block_bytes_;
+    bool medium_nta_; // prefetchnta the medium state (erat_small.hpp::cross_off_medium)
     const Presieve& presieve_;
 
     // Dense tiers' per-prime state (erat_small.hpp), in lockstep with
     // small_primes/medium_primes as they activate -- no bucket, walked
     // every segment (small: every sub-block).
     std::vector<erat::DenseState> small_[8]; // one list per residue class p % 30
-    std::vector<erat::DenseState> medium_[8]; // one list per residue class p % 30
+    // Medium tier, struct of arrays per residue class p % 30 (see
+    // erat_small.hpp::cross_off_medium): (pos << 6) | w, and read-only qp.
+    std::vector<uint32_t> medium_dyn_[8];
+    std::vector<uint32_t> medium_qp_[8];
 
     // med64 tier (kept default, see docs/RESEARCH.md): double-buffered, one
     // pair of (class, entry phase) lists swapped every segment instead of

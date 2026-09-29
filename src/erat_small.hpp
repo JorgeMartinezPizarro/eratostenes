@@ -44,7 +44,7 @@ constexpr uint8_t M(int pr, int j) { return static_cast<uint8_t>(1u << pos30(R[p
 // Per-prime state, 8 bytes: qw = (qp << 6) | (pr << 3) | j, with qp = p / 30,
 // pr = WHEEL_POS[p % 30] and j the pending hit's multiplier phase; pos is
 // that hit's byte position relative to the current segment's start (the
-// medium tier packs qw as (qp << 6) | w instead, see cross_off_medium).
+// medium tier keeps its state as two arrays instead, see cross_off_medium).
 // qp < 2^26 (p < ~2e9) is checked by
 // SegmentSieve's constructor.
 struct DenseState {
@@ -230,13 +230,38 @@ inline void cross_off_class(uint8_t* s, uint64_t end, DenseState* first, DenseSt
 //
 // Out of line (pinned, as measured): GCC inlines some classes into
 // sieve_chunk on its own when surrounding code changes.
-template <int PR>
-__attribute__((noinline)) void cross_off_medium(uint8_t* s, uint64_t end, DenseState* first, DenseState* last, uint64_t rebase) {
+//
+// State is split in two parallel arrays (struct of arrays): `dyn[i]` =
+// (pos << 6) | w, rewritten every segment, and `qps[i]` = qp, read-only
+// once activated. Rewriting qp along with pos/w every segment made the whole
+// 8-byte state dirty -- ~1 MB per thread at 1e14, written back through L2
+// and L3 every segment, flushing the segment itself: ~75% of this tier's
+// L2 misses and ~80% of its L3 misses were on s[pos], not on the state.
+// Now 4 of the 8 bytes per prime are clean and just get dropped. pos fits
+// 26 bits (checked by SegmentSieve's constructor).
+//
+// NTA: prefetchnta both streams MEDIUM_NTA_DIST entries ahead, once per
+// prime (not per hit), so they come into L1 without being allocated in L2
+// and the segment stays there. Only pays once the medium state no longer
+// fits the per-thread L3 share (dev PC: +0.8% at 1e12 with ~0.5 MB/thread,
+// -6.1% at 1e13 and -12.1% at 1e14 on top of SoA) -- chosen per TierSet in
+// main.cpp, see MEDIUM_NTA_MIN_PRIMES.
+constexpr uint64_t MEDIUM_NTA_DIST = 32;
+constexpr uint64_t MEDIUM_POS_LIMIT = uint64_t{1} << 26;
+
+template <int PR, bool NTA>
+__attribute__((noinline)) void cross_off_medium(uint8_t* s, uint64_t end, uint32_t* dyn, uint32_t* dyn_last,
+                                                const uint32_t* qps, uint64_t rebase) {
     const uint32_t* pack = big::PACK210[PR].data();
-    for (DenseState* st = first; st != last; ++st) {
-        uint64_t pos = st->pos;
-        uint64_t qp = st->qw >> 6;
-        uint64_t w = st->qw & 63;
+    for (; dyn != dyn_last; ++dyn, ++qps) {
+        if constexpr (NTA) {
+            __builtin_prefetch(dyn + MEDIUM_NTA_DIST, 0, 0);
+            __builtin_prefetch(qps + MEDIUM_NTA_DIST, 0, 0);
+        }
+        uint32_t d = *dyn;
+        uint64_t pos = d >> 6;
+        uint64_t w = d & 63;
+        uint64_t qp = *qps;
         while (pos < end) {
             uint32_t t = pack[w]; // mask | dm << 8 | corr << 16
             s[pos] |= static_cast<uint8_t>(t);
@@ -244,8 +269,7 @@ __attribute__((noinline)) void cross_off_medium(uint8_t* s, uint64_t end, DenseS
             if (++w == 96) [[unlikely]] w = 48;
         }
         if (w >= 48) w -= 48;
-        st->qw = static_cast<uint32_t>((qp << 6) | w);
-        st->pos = static_cast<uint32_t>(pos - rebase);
+        *dyn = static_cast<uint32_t>(((pos - rebase) << 6) | w);
     }
 }
 

@@ -29,6 +29,7 @@ throughout below).
   - [`cross_off`: branchless tail for the small and med64 tiers (tried, reverted, 2026-09-27)](#cross_off-branchless-tail-for-the-small-and-med64-tiers-tried-reverted-2026-09-27)
   - [`cross_off_medium`: byte positions + doubled tables (kept, 2026-09-27)](#cross_off_medium-byte-positions--doubled-tables-kept-2026-09-27)
   - [med64: EratMedium-style checked loop, `cross_off_checked` (kept, 2026-09-29)](#med64-eratmedium-style-checked-loop-cross_off_checked-kept-2026-09-29)
+  - [`cross_off_medium`: struct-of-arrays state + gated `prefetchnta` (kept, 2026-09-29)](#cross_off_medium-struct-of-arrays-state--gated-prefetchnta-kept-2026-09-29)
 - [wheel.hpp](#wheelhpp)
   - [Wheel size: mod 6 vs. mod 30 vs. mod 210 (historical, pre-tiered-marking architecture)](#wheel-size-mod-6-vs-mod-30-vs-mod-210-historical-pre-tiered-marking-architecture)
   - [`ONFLY_CORRECTION`/`GAP_K`: shared table replacing a per-prime `delta[]` (kept)](#onfly_correctiongap_k-shared-table-replacing-a-per-prime-delta-kept)
@@ -49,6 +50,7 @@ throughout below).
   - [Attempt 11: shrinking the live entry from 8 to 7 bytes (tried, reverted, 2026-09-27)](#attempt-11-shrinking-the-live-entry-from-8-to-7-bytes-tried-reverted-2026-09-27)
   - [Segment processed in parts for the sparse tier (tried, reverted, 2026-09-29)](#segment-processed-in-parts-for-the-sparse-tier-tried-reverted-2026-09-29)
   - [Sparse tier: `process_big` loads per hit, ~12 -> 5 (kept, 2026-09-29)](#sparse-tier-process_big-loads-per-hit-12---5-kept-2026-09-29)
+  - [med64: re-filing without `std::vector::push_back` (tried, reverted, 2026-09-29)](#med64-re-filing-without-stdvectorpush_back-tried-reverted-2026-09-29)
 - [gap_encoding.hpp](#gap_encodinghpp)
   - [Gap encoding: wheel-index deltas](#gap-encoding-wheel-index-deltas)
 - [sqlite_prime_store.hpp](#sqlite_prime_storehpp)
@@ -602,6 +604,47 @@ best), 1e13 305.02s vs 308.04s (-1.0%, best of the first 2 reps; primesieve
 and 23.17s at 1e12 minutes apart), so only best-of-N or same-session ABBA can
 see an effect this size. Small and growing with N, as med64's share does. 1e14/1e15
 pending.
+
+### `cross_off_medium`: struct-of-arrays state + gated `prefetchnta` (kept, 2026-09-29)
+
+**Where the medium tier's misses were.** Dev PC, 1e14 1% tail, per-tier
+attribution (`perf record` on `mem_load_retired.{l1,l2,l3}_miss:u`, non-precise --
+no PEBS under WSL): medium was 43% of cycles, 40% of L2 misses and 50% of L3
+misses. `perf annotate` put ~75% of its L2 misses and ~81% of its L3 misses on
+`s[pos] |= mask` -- the *segment*, not its own state, which the hardware streamer
+already covers. The state (8 bytes per prime, read and rewritten every segment:
+~1.1 MB per thread here, ~1 MB per thread x 20 threads on the i5-13500, i.e. its
+whole L3) was flushing the segment out of L2 and, across threads, out of L3.
+
+**Change 1, struct of arrays (SoA).** `qp` never changes, but rewriting `pos`/`w`
+made the whole 8-byte entry dirty, so every line was written back. Now each class
+has `dyn[i] = (pos << 6) | w` (rewritten) and `qps[i] = qp` (read-only): half the
+bytes per prime stay clean and are dropped without a writeback. `pos` fits 26 bits
+(checked by `SegmentSieve`'s constructor). Not the 7-byte sparse entry (attempt 11,
+odd stride, byte packing): two aligned 4-byte arrays, +0.4% instructions.
+
+**Change 2, `prefetchnta`.** Both streams prefetched 32 entries ahead with the NTA
+hint, once per *prime* (not per hit, which is what failed before), so they reach
+L1 without being allocated in L2.
+
+Correct: `make test` for both variants, pi(1e12) exact, and every row below.
+Dev PC (i5-11400F), `perf stat cycles:u`, 3 interleaved reps against `8b0174e`
+(control built the same way, byte-identical to the `make` build):
+
+| | control | SoA | SoA + NTA |
+|---|---:|---:|---:|
+| 1e12 full | 1211.8G | 1212.4G (tie) | 1222.0G (+0.8%) |
+| 1e13, 10% tail | 1849.1G | 1811.3G (-2.0%) | 1736.9G (**-6.1%**) |
+| 1e14, 5% tail | 14072.9G | 13334.4G (-5.2%) | 12367.7G (**-12.1%**) |
+| 1e14, 5% tail, wall | 324.53s | 308.11s | 279.87s (**-13.8%**) |
+
+Every NTA rep beat every control rep at 1e13 and 1e14 (1e14: 12276-12522G vs
+13669-14446G). NTA only pays once the state overflows the caches, so it is gated
+per tier set: on when medium primes x 8 bytes exceed the per-thread L3 share
+(`MEDIUM_NTA_MIN_PRIMES` in main.cpp; 131,072 primes on the dev PC, whose 1e12 has
+62,601 and 1e13 197,708). The crossover between those two points isn't measured.
+`ERATOSTENES_MEDIUM_NTA=0/1` forces it. Gated binary, 1 rep: 1e12 1205.1G (NTA
+off), 1e13 tail 1726.9G (on). Server A/B pending.
 
 ## wheel.hpp
 
@@ -1311,6 +1354,35 @@ Dev PC: neutral, as expected -- on the i5-11400F the sparse cutoff is 1/1 and th
 are 0 sparse primes up to 1e13 (1e13 tail: 1831.6G vs 1833.3G for compact
 presieve alone; 1e12 1208.3G vs 1211.0G). This change targets the i5-13500, where
 `process_big` is ~30% of cycles at 1e14 and ~39% at 1e15. Server A/B pending.
+
+### med64: re-filing without `std::vector::push_back` (tried, reverted, 2026-09-29)
+
+Same audit, applied to `process_med64`: after every `cross_off_checked` call,
+`push_back` reloaded `_M_finish`/`_M_end_of_storage` through `this` (the byte
+stores may alias them), compared them, and built the entry with
+`vmovd`/`vpinsrd`. Replaced the 128 med64 vectors with a minimal POD buffer:
+before each class, every output list gets room for the class's whole population
+(worst case: all entries leave on one phase), then the loop writes through 8 local
+tail pointers (one per exit phase) with a single 8-byte store and no capacity
+check. Per-call epilogue: 1 load instead of 3. `Presieve::fill` had to be pinned
+`noinline` (GCC started inlining it into `sieve_chunk`); growth path out of line.
+
+Correct (`make test`, pi(1e12)). Dev PC, `perf stat cycles:u`, 3 interleaved reps
+against `8b0174e`:
+
+| | 8b0174e | no push_back | delta |
+|---|---:|---:|---:|
+| 1e13, 10% tail, cycles:u | 1856.5G | 1859.9G | +0.2% |
+| 1e13, 10% tail, instructions:u | 1675.3G | 1661.8G | -0.8% |
+| 1e12 full, cycles:u | 1211.3G | 1213.8G | +0.2% |
+| 1e12 full, instructions:u | 1283.3G | 1269.8G | -1.05% |
+
+~1% fewer instructions, cycles flat (within the ~±1% spread of this test): the
+per-call epilogue isn't on med64's critical path -- the tier is bound by its
+byte stores and the one exit mispredict per call, not by the loads around the
+re-file. Reverted. Not tried on the server, where med64 is a bigger share (~33 of
+100 at 1e14) and the E-cores have 2 load ports; if revisited, that's the one
+place it could still show.
 
 ## gap_encoding.hpp
 
