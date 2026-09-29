@@ -152,7 +152,7 @@ struct Presieve {
     // pre-sieve buffers period-sized the same way). Sizing them to a whole
     // segment instead made the 16 tables ~8 MB at a 512KiB segment,
     // streamed through L2 every segment.
-    void fill(uint64_t* dst, uint64_t k_low, uint64_t count) const {
+    __attribute__((noinline)) void fill(uint64_t* dst, uint64_t k_low, uint64_t count) const {
         constexpr uint64_t CHUNK_WORDS = PRESIEVE_CHUNK_BYTES / 8;
         const uint64_t words_needed = (count + 63) / 64;
         const size_t nt = tables.size();

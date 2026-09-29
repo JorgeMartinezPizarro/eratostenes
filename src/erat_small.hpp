@@ -174,6 +174,55 @@ done:
     j_io = j;
 }
 
+// cross_off_checked on the mod-210 multiplier wheel (w = 0..47, M210[w]):
+// skips the 1/7 of mod-30 hits whose multiplier is a multiple of 7 (7 is
+// always presieved, and every med64 prime is > 163). Same shape -- switch
+// into a for (;;), one check per hit -- so there's no per-call offset table
+// (what sank the earlier mod-210 med64 attempts): the byte step from phase w
+// to w+1 is qp*dm + corr with dm in {2,4,6,8,10}, so 5 multiples of qp in
+// registers plus compile-time constants (big::TABLE) cover all 48 cases.
+template <int PR>
+__attribute__((always_inline)) inline void cross_off_checked210(uint8_t* s, uint64_t end, uint64_t qp, uint64_t& i_io, uint32_t& w_io) {
+    const uint64_t q2 = qp * 2, q4 = qp * 4, q8 = qp * 8;
+    const uint64_t q6 = q2 + q4, q10 = q2 + q8;
+    uint64_t i = i_io;
+    uint32_t w = 0; // always set before `done`; the init only silences -Wmaybe-uninitialized
+
+#define ERAT_CHK210(W) \
+    case W: { \
+        constexpr big::Entry E = big::TABLE[PR * 48 + W]; \
+        if (i >= end) { w = W; goto done; } \
+        s[i] |= E.mask; \
+        i += (E.dm == 2 ? q2 : E.dm == 4 ? q4 : E.dm == 6 ? q6 : E.dm == 8 ? q8 : q10) + E.corr; \
+    }
+
+    switch (w_io) {
+        for (;;) {
+            ERAT_CHK210(0) [[fallthrough]]; ERAT_CHK210(1) [[fallthrough]]; ERAT_CHK210(2) [[fallthrough]];
+            ERAT_CHK210(3) [[fallthrough]]; ERAT_CHK210(4) [[fallthrough]]; ERAT_CHK210(5) [[fallthrough]];
+            ERAT_CHK210(6) [[fallthrough]]; ERAT_CHK210(7) [[fallthrough]]; ERAT_CHK210(8) [[fallthrough]];
+            ERAT_CHK210(9) [[fallthrough]]; ERAT_CHK210(10) [[fallthrough]]; ERAT_CHK210(11) [[fallthrough]];
+            ERAT_CHK210(12) [[fallthrough]]; ERAT_CHK210(13) [[fallthrough]]; ERAT_CHK210(14) [[fallthrough]];
+            ERAT_CHK210(15) [[fallthrough]]; ERAT_CHK210(16) [[fallthrough]]; ERAT_CHK210(17) [[fallthrough]];
+            ERAT_CHK210(18) [[fallthrough]]; ERAT_CHK210(19) [[fallthrough]]; ERAT_CHK210(20) [[fallthrough]];
+            ERAT_CHK210(21) [[fallthrough]]; ERAT_CHK210(22) [[fallthrough]]; ERAT_CHK210(23) [[fallthrough]];
+            ERAT_CHK210(24) [[fallthrough]]; ERAT_CHK210(25) [[fallthrough]]; ERAT_CHK210(26) [[fallthrough]];
+            ERAT_CHK210(27) [[fallthrough]]; ERAT_CHK210(28) [[fallthrough]]; ERAT_CHK210(29) [[fallthrough]];
+            ERAT_CHK210(30) [[fallthrough]]; ERAT_CHK210(31) [[fallthrough]]; ERAT_CHK210(32) [[fallthrough]];
+            ERAT_CHK210(33) [[fallthrough]]; ERAT_CHK210(34) [[fallthrough]]; ERAT_CHK210(35) [[fallthrough]];
+            ERAT_CHK210(36) [[fallthrough]]; ERAT_CHK210(37) [[fallthrough]]; ERAT_CHK210(38) [[fallthrough]];
+            ERAT_CHK210(39) [[fallthrough]]; ERAT_CHK210(40) [[fallthrough]]; ERAT_CHK210(41) [[fallthrough]];
+            ERAT_CHK210(42) [[fallthrough]]; ERAT_CHK210(43) [[fallthrough]]; ERAT_CHK210(44) [[fallthrough]];
+            ERAT_CHK210(45) [[fallthrough]]; ERAT_CHK210(46) [[fallthrough]]; ERAT_CHK210(47)
+        }
+    }
+#undef ERAT_CHK210
+
+done:
+    i_io = i;
+    w_io = w;
+}
+
 // Runs every state in [first, last) -- all of residue class PR -- over
 // s[0, end), then rebases each pending hit by `rebase` bytes (the
 // segment's byte width on its last pass over a segment, 0 otherwise). One

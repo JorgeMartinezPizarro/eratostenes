@@ -128,6 +128,10 @@ static uint64_t MEDIUM_NTA_MIN_PRIMES = UINT64_MAX;
 // ERATOSTENES_MED64_NTA=0 turns it off (A/B).
 static bool MED64_NTA = true;
 
+// med64 on the mod-210 multiplier wheel (erat_small.hpp::cross_off_checked210),
+// on by default; ERATOSTENES_MED64_210=0 goes back to mod-30 (A/B).
+static bool MED64_210 = true;
+
 struct ChunkRange {
     uint64_t low;   // first wheel index of the chunk (inclusive)
     uint64_t high;  // upper bound in wheel index (exclusive)
@@ -185,7 +189,7 @@ static void sieve_chunk(ChunkRange range, uint64_t seg_k_width, uint64_t base_pr
                          Writer& out, uint64_t& local_count,
                          std::atomic<uint64_t>& progress) {
     SegmentSieve sieve(seg_k_width, base_prime_max, presieve, SUB_BLOCK_BYTES, !sparse_primes.empty(),
-                       medium_primes.size() >= MEDIUM_NTA_MIN_PRIMES, MED64_NTA);
+                       medium_primes.size() >= MEDIUM_NTA_MIN_PRIMES, MED64_NTA, MED64_210);
     sieve.begin_chunk();
     for (uint64_t k_low = range.low; k_low < range.high; k_low += seg_k_width) {
         uint64_t k_high = std::min(k_low + seg_k_width, range.high);
@@ -696,6 +700,7 @@ int main(int argc, char** argv) {
             MEDIUM_NTA_MIN_PRIMES = std::strtoull(s, nullptr, 10) ? 0 : UINT64_MAX;
     }
     if (const char* s = std::getenv("ERATOSTENES_MED64_NTA")) MED64_NTA = std::strtoull(s, nullptr, 10) != 0;
+    if (const char* s = std::getenv("ERATOSTENES_MED64_210")) MED64_210 = std::strtoull(s, nullptr, 10) != 0;
 
     Presieve presieve = build_presieve(PRESIEVE_GROUPS);
 
@@ -717,6 +722,7 @@ int main(int argc, char** argv) {
                          format_thousands(MEDIUM_NTA_MIN_PRIMES).c_str());
     }
     if (!MED64_NTA) std::fprintf(stderr, "  prefetchnta del tier med64: no (ERATOSTENES_MED64_NTA=0)\n");
+    if (!MED64_210) std::fprintf(stderr, "  tier med64 en rueda mod 30 (ERATOSTENES_MED64_210=0)\n");
     if (narrow_early) {
         unsigned narrow_chunks = 0;
         for (const auto& r : ranges) narrow_chunks += r.high <= narrow_k_end;
