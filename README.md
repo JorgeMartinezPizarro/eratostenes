@@ -112,7 +112,7 @@ What this project is built from, one term each — follow the link for the conce
 |---|---:|---:|---:|
 | 1e10 | 0.14s | 0.133s | 1.05x |
 | 1e11 | 1.62s | 1.623s | 1.00x |
-| 1e12 | 23.90s | 24.291s | 0.98x |
+| 1e12 | 23.17s | 24.291s | 0.95x |
 | 1e13 | 308.04s | 292.218s | 1.05x |
 | 1e14 | 3767.59s | 3349.907s | 1.12x |
 
