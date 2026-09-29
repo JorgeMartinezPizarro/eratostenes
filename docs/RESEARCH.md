@@ -51,6 +51,7 @@ throughout below).
   - [Segment processed in parts for the sparse tier (tried, reverted, 2026-09-29)](#segment-processed-in-parts-for-the-sparse-tier-tried-reverted-2026-09-29)
   - [Sparse tier: `process_big` loads per hit, ~12 -> 5 (kept, 2026-09-29)](#sparse-tier-process_big-loads-per-hit-12---5-kept-2026-09-29)
   - [med64: re-filing without `std::vector::push_back` (tried, reverted, 2026-09-29)](#med64-re-filing-without-stdvectorpush_back-tried-reverted-2026-09-29)
+  - [med64: `prefetchnta` on the state stream (kept, 2026-09-29)](#med64-prefetchnta-on-the-state-stream-kept-2026-09-29)
 - [gap_encoding.hpp](#gap_encodinghpp)
   - [Gap encoding: wheel-index deltas](#gap-encoding-wheel-index-deltas)
 - [sqlite_prime_store.hpp](#sqlite_prime_storehpp)
@@ -1383,6 +1384,66 @@ byte stores and the one exit mispredict per call, not by the loads around the
 re-file. Reverted. Not tried on the server, where med64 is a bigger share (~33 of
 100 at 1e14) and the E-cores have 2 load ports; if revisited, that's the one
 place it could still show.
+
+### med64: `prefetchnta` on the state stream (kept, 2026-09-29)
+
+Idea: after the medium tier's SoA + NTA win, med64's double-buffered state is the
+largest non-segment stream left through L2 -- ~29k primes x 8 bytes read from
+`m64_cur_` and rewritten into `m64_nxt_` every segment (~2 x 233 KB per thread
+from 5e12 up, dirty lines), the same mechanism that flushed the segment out of L2
+in the medium tier. Change: `prefetchnta` 32 entries ahead once per entry in
+`process_med64` (read side only; NT stores into 8 interleaved `m64_nxt_` streams
+per class were ruled out up front, too many for the write-combining buffers),
+behind an `ERATOSTENES_MED64_NTA` knob (now default on, `=0` turns it off). `make test` green with it on.
+
+Dev PC, `perf stat cycles:u`, same binary with the knob 0/1 (plus the `904317d`
+binary as control), counts exact everywhere:
+
+| | control | NTA=0 | NTA=1 |
+|---|---:|---:|---:|
+| 1e12 full (2 reps) | 1202.0G | 1204.1G | 1208.1G (+0.5%) |
+| 1e13, 10% tail (2 reps) | 1720.1G | 1719.7G | 1710.2G (-0.6%) |
+| 1e14, 5% tail (ABBA x2, idle PC) | | 12619G / 280.3s | 12245G / 272.8s (-3.0%) |
+
+The 1e14 -3% did not hold up: same-config reps spread up to 7% (NTA=0 12218G to
+13139G), 2 of 4 pairs went to NTA, t ~ 1.5. Settled with cache counters (4 GP
+events, no multiplexing, 1e14 5% tail, order 0 1 1 0):
+
+| | NTA=0 | NTA=1 | NTA=1 | NTA=0 |
+|---|---:|---:|---:|---:|
+| cycles:u | 12617G | 12123G | 12016G | 12010G |
+| `mem_load_retired.l2_miss` | 256.3e9 | 243.0e9 | 246.2e9 | 246.1e9 |
+| `mem_load_retired.l3_miss` | 1.53e9 | 0.86e9 | 0.72e9 | 0.75e9 |
+| `l2_lines_out.non_silent` | 299.8e9 | 286.7e9 | 290.6e9 | 289.1e9 |
+
+The second NTA=0 run is indistinguishable from both NTA=1 runs on every counter:
+in a "good" run the prefetch doesn't change L2 misses or writebacks, so the
+hypothesized mechanism (less L2 pollution by the state stream) is not what's
+happening. What differs is the slow runs: pooling all 12 clean 1e14 runs, NTA=0
+12517G / 277.3s vs NTA=1 12187G / 271.0s (**-2.6% cycles, -2.3% wall**), NTA=1
+lower in 28 of 36 cross-pairs (p ~ 0.09 two-sided), and the three slowest runs
+are all NTA=0 -- the slow ones carry ~2x the L3 misses. So NTA looks like it
+makes the tier less sensitive to a bad memory state rather than faster in a good
+one; not proven.
+
+**Full runs vs README.md#benchmarks (dev PC, best of N, NTA=1):**
+
+| N | NTA=1 (best of) | README best of 7 | change |
+|---|---:|---:|---:|
+| 1e10 | 0.17s (5) | 0.17s | = |
+| 1e11 | 2.04s (5) | 2.04s | = |
+| 1e12 | 24.78s (3) | 24.88s | -0.4% |
+| 1e13 | 322.55s (2; other rep 324.16s) | 326.03s | **-1.1%** |
+
+Both 1e13 reps beat the README's best of 7. **Kept, default on, no gate**: no
+measurable wall cost at 1e10-1e12 (the +0.5% cycles:u at 1e12 in the first A/B
+is within that test's spread). Pending: full 1e14 on the dev PC (README
+4530.74s) and the server, where med64 is ~33 of 100 at 1e14.
+
+Method note: on the dev PC a single 1e14 5% tail can land ~5% slow with no code
+change, in `cycles:u` too (12 threads + HT: cycles:u is not immune to machine
+state). Pair A/B tails with counters that measure the mechanism, and with
+best-of-N full runs against the README.
 
 ## gap_encoding.hpp
 

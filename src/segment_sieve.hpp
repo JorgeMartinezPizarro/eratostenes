@@ -48,11 +48,12 @@ public:
     // flooring seg_k_width to the nearest power of 2 (in bytes) whenever
     // has_sparse is true; this constructor just verifies that was done.
     SegmentSieve(uint64_t seg_k_width, uint64_t base_prime_max, const Presieve& presieve,
-                 uint64_t sub_block_bytes, bool has_sparse, bool medium_nta)
+                 uint64_t sub_block_bytes, bool has_sparse, bool medium_nta, bool med64_nta)
         : words_((seg_k_width + 63) / 64, 0),
           seg_k_width_(seg_k_width),
           sub_block_bytes_(sub_block_bytes),
           medium_nta_(medium_nta),
+          med64_nta_(med64_nta),
           presieve_(presieve) {
         // The byte-addressed dense tiers (erat_small.hpp) need every
         // segment to start on a byte (k multiple of 8) and to stay a whole
@@ -221,14 +222,8 @@ public:
         // run has no med64 primes, matching the sparse tier's own
         // skip-when-empty guard below.
         if (!med64_primes.empty()) {
-            process_med64<0>(bytes, bytes_needed);
-            process_med64<1>(bytes, bytes_needed);
-            process_med64<2>(bytes, bytes_needed);
-            process_med64<3>(bytes, bytes_needed);
-            process_med64<4>(bytes, bytes_needed);
-            process_med64<5>(bytes, bytes_needed);
-            process_med64<6>(bytes, bytes_needed);
-            process_med64<7>(bytes, bytes_needed);
+            if (med64_nta_) run_med64<true>(bytes, bytes_needed);
+            else run_med64<false>(bytes, bytes_needed);
             for (auto& v : m64_cur_) v.clear();
             std::swap(m64_cur_, m64_nxt_);
         }
@@ -413,10 +408,18 @@ private:
     // there's no sub-block rebase to chain off) -- sieve_and_emit clears
     // m64_cur_ and swaps the two buffers once every PR has run, so next
     // segment reads what this one just wrote.
-    template <int PR>
+    //
+    // NTA: prefetchnta m64_cur_ MED64_NTA_DIST entries ahead, once per
+    // entry, like cross_off_medium's own NTA path: the double-buffered state
+    // (~2 x 233 KB per thread from 5e12 up) is streamed through once per
+    // segment. Dev PC: 1e13 322.55s vs the README's best-of-7 326.03s
+    // (-1.1%), 1e14 5% tail -2.6% over 6+6 runs; 1e10-1e12 unchanged. See
+    // docs/RESEARCH.md. ERATOSTENES_MED64_NTA=0 turns it off (main.cpp).
+    template <int PR, bool NTA>
     void process_med64(uint8_t* bytes, uint64_t bytes_needed) {
         for (int j = 0; j < 8; ++j) {
             for (erat::DenseState& st : m64_cur_[PR * 8 + j]) {
+                if constexpr (NTA) __builtin_prefetch(&st + MED64_NTA_DIST, 0, 0);
                 uint64_t i = st.pos;
                 uint64_t qp = st.qw >> 6;
                 uint32_t jj = st.qw & 7;
@@ -425,6 +428,18 @@ private:
                     {static_cast<uint32_t>((qp << 6) | (PR << 3) | jj), static_cast<uint32_t>(i - bytes_needed)});
             }
         }
+    }
+
+    template <bool NTA>
+    void run_med64(uint8_t* bytes, uint64_t bytes_needed) {
+        process_med64<0, NTA>(bytes, bytes_needed);
+        process_med64<1, NTA>(bytes, bytes_needed);
+        process_med64<2, NTA>(bytes, bytes_needed);
+        process_med64<3, NTA>(bytes, bytes_needed);
+        process_med64<4, NTA>(bytes, bytes_needed);
+        process_med64<5, NTA>(bytes, bytes_needed);
+        process_med64<6, NTA>(bytes, bytes_needed);
+        process_med64<7, NTA>(bytes, bytes_needed);
     }
 
     // Medium tier over the whole segment, one call per residue class; the
@@ -585,6 +600,8 @@ private:
     uint64_t seg_k_width_;
     uint64_t sub_block_bytes_;
     bool medium_nta_; // prefetchnta the medium state (erat_small.hpp::cross_off_medium)
+    bool med64_nta_;  // prefetchnta the med64 state (process_med64)
+    static constexpr ptrdiff_t MED64_NTA_DIST = 32; // entries ahead (4 cache lines)
     const Presieve& presieve_;
 
     // Dense tiers' per-prime state (erat_small.hpp), in lockstep with
