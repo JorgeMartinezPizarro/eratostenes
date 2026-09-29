@@ -42,6 +42,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include <stdexcept>
 #include <vector>
 
 #include "wheel.hpp"
@@ -59,7 +60,8 @@
 // around 6000-10000 (e.g. 41*163=6683, 97*101=9797) instead of ballooning
 // as primes grow -- naively grouping consecutive primes instead (7,11,13 /
 // 17,19,23 / ...) hits multi-megabyte tables by the time it reaches
-// primes past ~130. All 16 tables combined: ~123KB.
+// primes past ~130. All 16 tables combined: ~123KB of periods, plus one
+// PRESIEVE_CHUNK_BYTES tail each (~190KB).
 // Extending coverage past 163 was tried three ways (two group-count-
 // preserving pairings, and one "just use a huge table" attempt) and all
 // three measured a regression, not a win -- see docs/RESEARCH.md.
@@ -89,9 +91,16 @@ inline const std::vector<std::vector<uint64_t>> PRESIEVE_GROUPS = {
     {97, 101},
 };
 
+// fill() works through dst in chunks of this many bytes, so a table only
+// needs one period plus one chunk (+ slack) to serve any window without
+// wrapping mid-loop -- see Presieve::fill.
+constexpr uint64_t PRESIEVE_CHUNK_BYTES = 4096;
+
 struct PresieveTable {
     uint64_t period_k = 0;       // WHEEL_SIZE * product(this group's primes)
-    std::vector<uint64_t> words; // period_k + max_seg_k_width + slack bits; bit=1 => composite
+    uint64_t period_bytes = 0;   // period_k / 8
+    std::vector<uint64_t> words; // period_k + one fill chunk + slack bits; bit=1 => composite
+    const uint8_t* bytes() const { return reinterpret_cast<const uint8_t*>(words.data()); }
 };
 
 struct Presieve {
@@ -136,32 +145,51 @@ struct Presieve {
     // of once per table (16 tables -> 4 writes instead of 16); each
     // group's 4 loads plus 3 ORs per output word is still simple enough
     // for the compiler to auto-vectorize across words, same as before.
+    //
+    // dst is covered in PRESIEVE_CHUNK_BYTES chunks, each table's read
+    // offset advancing by one chunk and wrapping by its period in between,
+    // so a table is one period plus one chunk long (primesieve keeps its
+    // pre-sieve buffers period-sized the same way). Sizing them to a whole
+    // segment instead made the 16 tables ~8 MB at a 512KiB segment,
+    // streamed through L2 every segment.
     void fill(uint64_t* dst, uint64_t k_low, uint64_t count) const {
-        uint64_t words_needed = (count + 63) / 64;
-        size_t t = 0;
-        bool first = true;
+        constexpr uint64_t CHUNK_WORDS = PRESIEVE_CHUNK_BYTES / 8;
+        const uint64_t words_needed = (count + 63) / 64;
+        const size_t nt = tables.size();
+        uint64_t off[MAX_TABLES]; // byte offset of the current chunk in each table's period
+        for (size_t t = 0; t < nt; ++t) off[t] = (k_low % tables[t].period_k) >> 3; // multiple of 8, see above
 
-        for (; t + 4 <= tables.size(); t += 4) {
-            const uint8_t* s0 = byte_ptr(tables[t + 0], k_low);
-            const uint8_t* s1 = byte_ptr(tables[t + 1], k_low);
-            const uint8_t* s2 = byte_ptr(tables[t + 2], k_low);
-            const uint8_t* s3 = byte_ptr(tables[t + 3], k_low);
-            if (first) {
-                for (uint64_t i = 0; i < words_needed; ++i) dst[i] = load_u64(s0, i) | load_u64(s1, i) | load_u64(s2, i) | load_u64(s3, i);
-                first = false;
-            } else {
-                for (uint64_t i = 0; i < words_needed; ++i) dst[i] |= load_u64(s0, i) | load_u64(s1, i) | load_u64(s2, i) | load_u64(s3, i);
+        for (uint64_t w0 = 0; w0 < words_needed; w0 += CHUNK_WORDS) {
+            const uint64_t n = std::min(CHUNK_WORDS, words_needed - w0);
+            uint64_t* d = dst + w0;
+            size_t t = 0;
+            bool first = true;
+            for (; t + 4 <= nt; t += 4) {
+                const uint8_t* s0 = tables[t + 0].bytes() + off[t + 0];
+                const uint8_t* s1 = tables[t + 1].bytes() + off[t + 1];
+                const uint8_t* s2 = tables[t + 2].bytes() + off[t + 2];
+                const uint8_t* s3 = tables[t + 3].bytes() + off[t + 3];
+                if (first) {
+                    for (uint64_t i = 0; i < n; ++i) d[i] = load_u64(s0, i) | load_u64(s1, i) | load_u64(s2, i) | load_u64(s3, i);
+                    first = false;
+                } else {
+                    for (uint64_t i = 0; i < n; ++i) d[i] |= load_u64(s0, i) | load_u64(s1, i) | load_u64(s2, i) | load_u64(s3, i);
+                }
             }
-        }
-        // Tail: fewer than 4 tables left (PRESIEVE_GROUPS is 16 long, an
-        // exact multiple of 4, but a smaller/custom group list wouldn't be).
-        for (; t < tables.size(); ++t) {
-            const uint8_t* s = byte_ptr(tables[t], k_low);
-            if (first) {
-                for (uint64_t i = 0; i < words_needed; ++i) dst[i] = load_u64(s, i);
-                first = false;
-            } else {
-                for (uint64_t i = 0; i < words_needed; ++i) dst[i] |= load_u64(s, i);
+            // Tail: fewer than 4 tables left (PRESIEVE_GROUPS is 16 long, an
+            // exact multiple of 4, but a smaller/custom group list wouldn't be).
+            for (; t < nt; ++t) {
+                const uint8_t* s = tables[t].bytes() + off[t];
+                if (first) {
+                    for (uint64_t i = 0; i < n; ++i) d[i] = load_u64(s, i);
+                    first = false;
+                } else {
+                    for (uint64_t i = 0; i < n; ++i) d[i] |= load_u64(s, i);
+                }
+            }
+            for (size_t u = 0; u < nt; ++u) {
+                off[u] += PRESIEVE_CHUNK_BYTES;
+                while (off[u] >= tables[u].period_bytes) off[u] -= tables[u].period_bytes;
             }
         }
 
@@ -182,11 +210,10 @@ struct Presieve {
         }
     }
 
+    // fill() keeps its per-table offsets on the stack (checked by build_presieve).
+    static constexpr size_t MAX_TABLES = 32;
+
 private:
-    static const uint8_t* byte_ptr(const PresieveTable& tbl, uint64_t k_low) {
-        uint64_t bit_start = k_low % tbl.period_k; // always a multiple of 8, see fill()'s comment
-        return reinterpret_cast<const uint8_t*>(tbl.words.data()) + (bit_start >> 3);
-    }
     static uint64_t load_u64(const uint8_t* base, uint64_t word_idx) {
         uint64_t v;
         std::memcpy(&v, base + word_idx * 8, sizeof(v));
@@ -197,18 +224,17 @@ private:
 // Builds one table for a single group of primes (all coprime with
 // WHEEL_MOD, already filtered by build_presieve below).
 inline PresieveTable build_presieve_table(const std::vector<uint64_t>& primes,
-                                           uint64_t max_seg_k_width,
                                            std::vector<uint64_t>& self_k_out) {
     PresieveTable tbl;
     uint64_t period_k = static_cast<uint64_t>(WHEEL_SIZE);
     for (uint64_t p : primes) period_k *= p;
     tbl.period_k = period_k;
+    tbl.period_bytes = period_k / 8;
 
-    // +max_seg_k_width: any bit_start in [0, period_k) plus a segment-sized
-    // window still lands inside the buffer, no wraparound needed. +128:
-    // the shifted-word read touches one word past the last one fill()
-    // logically needs.
-    uint64_t total_bits = period_k + max_seg_k_width + 128;
+    // +one fill chunk: any byte offset in [0, period) plus a chunk-sized
+    // window (see Presieve::fill) still lands inside the buffer, no
+    // wraparound needed within a chunk. +128: slack past the last word.
+    uint64_t total_bits = period_k + PRESIEVE_CHUNK_BYTES * 8 + 128;
     tbl.words.assign((total_bits + 63) / 64, 0);
 
     // Mark every wheel-representable multiple of p, starting at m=1 (value
@@ -250,14 +276,16 @@ inline PresieveTable build_presieve_table(const std::vector<uint64_t>& primes,
 // Builds one table per group in `groups`, dropping primes already covered
 // by the active WHEEL_PRIMES config (e.g. 7 is dropped for mod 210+) and
 // dropping any group that ends up empty as a result.
-inline Presieve build_presieve(const std::vector<std::vector<uint64_t>>& groups,
-                                uint64_t max_seg_k_width) {
+inline Presieve build_presieve(const std::vector<std::vector<uint64_t>>& groups) {
     Presieve ps;
     for (const auto& group : groups) {
         std::vector<uint64_t> filtered;
         for (uint64_t p : group) if (p >= FIRST_WHEEL_PRIME) filtered.push_back(p);
         if (filtered.empty()) continue;
-        ps.tables.push_back(build_presieve_table(filtered, max_seg_k_width, ps.self_k));
+        ps.tables.push_back(build_presieve_table(filtered, ps.self_k));
+    }
+    if (ps.tables.size() > Presieve::MAX_TABLES) {
+        throw std::runtime_error("build_presieve: demasiados grupos de pre-criba");
     }
     for (uint64_t sk : ps.self_k) ps.max_self_k = std::max(ps.max_self_k, sk);
     return ps;

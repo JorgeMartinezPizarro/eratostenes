@@ -66,8 +66,11 @@ One table covering many primes would have a period equal to the *product* of all
 them, so the 35 primes 7..163 are split into 16 small groups (primesieve's own
 grouping, reused as-is: `{7,23,37}`, `{11,19,31}`, `{13,17,29}`, then pairs like
 `{41,163}` ... `{97,101}`), each with a period of 8 × product ≈ 48K-80K bits. Each
-table is stored unrolled one full segment width past its period, so the window for
-any segment is one contiguous read. `fill()`:
+table is stored one 4 KiB fill chunk past its period (~190 KB for all 16), and
+`fill()` covers `dst` chunk by chunk, advancing each table's offset and wrapping it
+by its period in between -- primesieve's period-sized buffers, rather than tables
+unrolled a whole segment past their period (~8 MB at a 512 KiB segment, see
+docs/RESEARCH.md). `fill()`:
 
 - reads each table at `k_low mod period` -- always byte-aligned (segment starts are
   multiples of 64, periods multiples of 8), so each output word is a single

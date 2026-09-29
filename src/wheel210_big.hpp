@@ -42,6 +42,16 @@ constexpr std::array<Entry, 384> make_table() {
     return t;
 }
 inline constexpr std::array<Entry, 384> TABLE = make_table();
+// TABLE packed into one word per row (mask | dm << 8 | corr << 16 | next << 32)
+// so SegmentSieve::process_big reads a row with a single load -- see its comment.
+constexpr std::array<uint64_t, 384> make_table64() {
+    std::array<uint64_t, 384> a{};
+    for (int i = 0; i < 384; ++i)
+        a[i] = uint64_t{TABLE[i].mask} | (uint64_t{TABLE[i].dm} << 8) | (uint64_t{TABLE[i].corr} << 16) |
+               (uint64_t{TABLE[i].next} << 32);
+    return a;
+}
+inline constexpr std::array<uint64_t, 384> TABLE64 = make_table64();
 // first index w with M210[w] >= s (s in [0,210]), or 48 if none
 constexpr std::array<uint8_t, 211> make_next() {
     std::array<uint8_t, 211> a{};

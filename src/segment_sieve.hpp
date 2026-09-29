@@ -17,6 +17,7 @@
 #include <vector>
 #include <memory>
 #include <cstdlib>
+#include <cstring>
 #include <algorithm>
 #include <stdexcept>
 #include <utility>
@@ -453,6 +454,10 @@ private:
     void process_big() {
         const uint32_t slot = static_cast<uint32_t>(cur_segment_ & (num_buckets_ - 1));
         uint8_t* const s = reinterpret_cast<uint8_t*>(words_.data());
+        // Local copy of the ring's tail array base: the s[pos] byte store may
+        // alias anything, so tail_.data() would otherwise be reloaded from
+        // `this` on every hit.
+        erat::DenseState** const tails = tail_.data();
         const uint32_t log2sb = log2_sb_;
         const uint64_t modsb = (uint64_t{1} << log2sb) - 1;
         const uint64_t bmask = num_buckets_ - 1;
@@ -475,17 +480,28 @@ private:
                 }
                 erat::DenseState* it = blk->entries();
                 erat::DenseState* end = next_blk ? blk->block_end() : last_end;
+                // One 8-byte load per entry and per table row (fields split
+                // with shifts), the entry rebuilt as one 8-byte store, and the
+                // new-block path out of line: the loop is load-port bound, and
+                // field-by-field loads plus spills of the loop constants
+                // around the inline allocation cost ~12 loads per hit.
                 for (; it != end; ++it) {
-                    uint32_t qw = it->qw;
-                    uint64_t pos = it->pos;
+                    uint64_t ent;
+                    std::memcpy(&ent, it, sizeof(ent)); // qw | pos << 32
+                    uint64_t qw = static_cast<uint32_t>(ent);
+                    uint64_t pos = ent >> 32;
                     uint64_t a = qw >> 9;
-                    uint32_t idx = qw & 511;
-                    const big::Entry& te = big::TABLE[idx];
-                    s[pos] |= te.mask;
-                    pos += a * te.dm + te.corr;
-                    uint64_t ahead = pos >> log2sb;
-                    erat::DenseState e{static_cast<uint32_t>((a << 9) | te.next), static_cast<uint32_t>(pos & modsb)};
-                    push_sparse_entry(static_cast<uint32_t>((cur + ahead) & bmask), e);
+                    uint64_t te = big::TABLE64[qw & 511]; // mask | dm << 8 | corr << 16 | next << 32
+                    s[pos] |= static_cast<uint8_t>(te);
+                    pos += a * ((te >> 8) & 0xff) + ((te >> 16) & 0xff);
+                    uint64_t sl = (cur + (pos >> log2sb)) & bmask;
+                    uint64_t e = (a << 9) | (te >> 32) | ((pos & modsb) << 32);
+                    erat::DenseState* w = tails[sl];
+                    // Null (empty slot) or on a block boundary (block full).
+                    if ((reinterpret_cast<uintptr_t>(w) & (BLK_BYTES - 1)) == 0) [[unlikely]]
+                        w = new_block(static_cast<uint32_t>(sl));
+                    std::memcpy(w, &e, sizeof(e));
+                    tails[sl] = w + 1;
                 }
                 free_.push_back(blk);
                 blk = next_blk;
@@ -500,15 +516,22 @@ private:
     // or the slot is empty.
     void push_sparse_entry(uint32_t slot, erat::DenseState entry) {
         erat::DenseState* w = tail_[slot];
-        if (w == nullptr || (reinterpret_cast<uintptr_t>(w) & (BLK_BYTES - 1)) == 0) {
-            Blk* nb = alloc_blk();
-            nb->next = nullptr;
-            if (w == nullptr) head_[slot] = nb;
-            else reinterpret_cast<Blk*>(reinterpret_cast<char*>(w) - BLK_BYTES)->next = nb;
-            w = nb->entries();
-        }
+        if ((reinterpret_cast<uintptr_t>(w) & (BLK_BYTES - 1)) == 0) w = new_block(slot);
         *w = entry;
         tail_[slot] = w + 1;
+    }
+
+    // Slow path of a push (tail_[slot] null or at a block boundary): links a
+    // fresh block into ring slot `slot` and returns its first entry. Out of
+    // line so process_big's loop keeps its constants in registers.
+    __attribute__((noinline))
+    erat::DenseState* new_block(uint32_t slot) {
+        erat::DenseState* w = tail_[slot];
+        Blk* nb = alloc_blk();
+        nb->next = nullptr;
+        if (w == nullptr) head_[slot] = nb;
+        else reinterpret_cast<Blk*>(reinterpret_cast<char*>(w) - BLK_BYTES)->next = nb;
+        return nb->entries();
     }
 
     // BLK_BYTES-aligned blocks pulled from a pool of aligned_alloc'd

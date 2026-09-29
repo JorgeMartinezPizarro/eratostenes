@@ -48,6 +48,7 @@ throughout below).
   - [Sparse tier attempts 7-10 (all tried, reverted)](#sparse-tier-attempts-7-10-all-tried-reverted)
   - [Attempt 11: shrinking the live entry from 8 to 7 bytes (tried, reverted, 2026-09-27)](#attempt-11-shrinking-the-live-entry-from-8-to-7-bytes-tried-reverted-2026-09-27)
   - [Segment processed in parts for the sparse tier (tried, reverted, 2026-09-29)](#segment-processed-in-parts-for-the-sparse-tier-tried-reverted-2026-09-29)
+  - [Sparse tier: `process_big` loads per hit, ~12 -> 5 (kept, 2026-09-29)](#sparse-tier-process_big-loads-per-hit-12---5-kept-2026-09-29)
 - [gap_encoding.hpp](#gap_encodinghpp)
   - [Gap encoding: wheel-index deltas](#gap-encoding-wheel-index-deltas)
 - [sqlite_prime_store.hpp](#sqlite_prime_storehpp)
@@ -74,6 +75,7 @@ throughout below).
   - [Narrow segment for the chunks below narrow² (kept, 2026-09-28)](#narrow-segment-for-the-chunks-below-narrow-kept-2026-09-28)
   - [`seg_k_width_from_l2_bytes`'s extra /2 margin, applied on top of an already-per-thread L2 share (kept, counterintuitive)](#seg_k_width_from_l2_bytess-extra-2-margin-applied-on-top-of-an-already-per-thread-l2-share-kept-counterintuitive)
 - [presieve.hpp](#presievehpp)
+  - [Period-sized tables: fill in 4 KiB chunks with wraparound (kept, 2026-09-29)](#period-sized-tables-fill-in-4-kib-chunks-with-wraparound-kept-2026-09-29)
   - [`fill()`: skip the `self_k` correction loop when it can't possibly match (kept, 2026-09-26)](#fill-skip-the-self_k-correction-loop-when-it-cant-possibly-match-kept-2026-09-26)
   - [Extending pre-sieve coverage past prime 163 (tried three ways, all reverted)](#extending-pre-sieve-coverage-past-prime-163-tried-three-ways-all-reverted)
 - [Makefile](#makefile)
@@ -1283,6 +1285,33 @@ with the rest. Before an A/B of a structural change: `nm -C -S` both binaries an
 diff the hot functions, and always keep the previous commit's binary as a control
 in the same session.
 
+### Sparse tier: `process_big` loads per hit, ~12 -> 5 (kept, 2026-09-29)
+
+The disassembly of `process_big`'s hit loop showed ~12 loads per hit on a loop that
+is load-port bound (3 ports on Golden Cove, 2 on Gracemont): `DenseState` read as
+two fields, `big::TABLE`'s row as 4 byte loads (mask, dm, corr, next), three loop
+constants spilled to the stack and reloaded every iteration (spilled around the
+inlined block-allocation path), `tail_.data()` reloaded from `this` every hit (the
+`s[pos]` byte store may alias anything), and the new entry assembled through
+`vmovd`/`vpinsrd`. Changes:
+
+- `big::TABLE64`: the same rows packed into one `uint64_t` (mask | dm << 8 |
+  corr << 16 | next << 32), one load per row -- the trick `cross_off_medium`'s
+  `PACK210` already won with;
+- the entry read and written as one 8-byte load/store (`memcpy`);
+- `tail_.data()` hoisted into a local;
+- the new-block path moved out of line (`new_block`, noinline), with the null
+  check folded into the block-boundary check (null & 1023 == 0).
+
+Result: 5 loads per hit (entry, row, `s[pos]`, `tails[slot]`, one remaining stack
+reload of `modsb`), no vector-domain crossing. `nm`: only `process_big` changed
+size. Correct: `make test`, and the A/B rows in the presieve entry above.
+
+Dev PC: neutral, as expected -- on the i5-11400F the sparse cutoff is 1/1 and there
+are 0 sparse primes up to 1e13 (1e13 tail: 1831.6G vs 1833.3G for compact
+presieve alone; 1e12 1208.3G vs 1211.0G). This change targets the i5-13500, where
+`process_big` is ~30% of cycles at 1e14 and ~39% at 1e15. Server A/B pending.
+
 ## gap_encoding.hpp
 
 ### Gap encoding: wheel-index deltas
@@ -2280,6 +2309,39 @@ L3/memory bandwidth), the smaller resulting segment is reliably faster than the
 A/B trail behind reversing that "fix".
 
 ## presieve.hpp
+
+### Period-sized tables: fill in 4 KiB chunks with wraparound (kept, 2026-09-29)
+
+Each table used to be stored unrolled `max_seg_k_width` bits past its period, so a
+segment's window was one contiguous read. That made each table as big as the
+segment: 16 × ~512 KiB ≈ **8.3 MB** on the i5-13500 (512 KiB segment in the sparse
+regime), 4 MB on the dev PC -- not the ~123 KB the header comment claimed. Every
+segment, every thread streamed a segment's worth of every table (8 MB on the
+server) through L2, evicting the segment and the med64/medium state right before
+those tiers ran. This fits the server's LLC-loads at 14x primesieve's, spread over
+med64/medium/sparse rather than presieve itself (see the i5-13500 gap entry in
+main.cpp), and the gap opening at 1e13, where the segment doubles.
+
+Now `fill()` covers `dst` in `PRESIEVE_CHUNK_BYTES` = 4 KiB chunks: each table's
+byte offset advances one chunk and wraps by its period in between, so a table only
+needs its period plus one chunk (~190 KB for all 16) -- primesieve keeps its
+pre-sieve buffers period-sized the same way. The inner loops are unchanged (4
+tables per pass, unaligned 8-byte loads, vectorized). Startup also stops
+allocating and marking 4-8 MB of tables.
+
+Correct: `make test`, pi(N) vs primecount up to 1.2e11, and every A/B row below.
+Only `Presieve::fill` changed size in `nm`. Dev PC (i5-11400F), `perf stat
+cycles:u`, 3 interleaved reps against the previous commit's binary:
+
+| | base | compact tables | delta |
+|---|---:|---:|---:|
+| 1e13, 10% tail (`START=9e12`) | 1858.1G | 1833.3G | -1.3% |
+| 1e12 full | 1220.7G | 1211.0G | -0.8% |
+
+Full runs after the change (together with the `process_big` entry below, which
+doesn't run on this machine at these N -- 0 sparse primes): 1e11 2.09s -> 2.05s,
+1e12 25.46s -> 25.05s, 1e13 343.79s -> 336.33s (0.94x primesieve). Server A/B
+pending (1e14 10% tail).
 
 ### `fill()`: skip the `self_k` correction loop when it can't possibly match (kept, 2026-09-26)
 

@@ -671,7 +671,7 @@ int main(int argc, char** argv) {
 
     uint64_t total_span = ranges.back().high - ranges.front().low;
 
-    Presieve presieve = build_presieve(PRESIEVE_GROUPS, seg_k_width);
+    Presieve presieve = build_presieve(PRESIEVE_GROUPS);
 
     std::fprintf(stderr, "Iniciando %u hilos, limite=%llu, segmento=%llu, rueda mod %llu (%zu primos), "
                  "%zu primos base pequenos (sub-bloque %llu KiB), %zu med64, %zu medianos, %zu dispersos...\n",
