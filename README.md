@@ -116,6 +116,7 @@ What this project is built from, one term each — follow the link for the conce
 | 1e13 | 301.13s | 292.554s | 1.03x |
 | 1e14 | 3617.87s | 3349.907s | 1.08x |
 | 1e15 | 45339.71s | - | - |
+
 The same results on an Intel Core i5-11400F:
 
 | N | eratostenes | primesieve | ratio |
