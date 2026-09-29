@@ -66,9 +66,9 @@ outside the container.
 ./eratostenes 1t -o ~/primes_100b.db      # Write to db
 ```
 
-## DB compression
+## Compression
 
-The `.db` format is a indexed sqlite file (max 256TB size), so it is suitable up to `e16`, around `190TB`. To query for primes you can use the `nth_prime` companion:
+The `.db` format is a indexed sqlite file (max 256TB size), so it is suitable up to `e16`, around `160TB`. To query for primes you can use the `nth_prime` companion:
 
 ```sh
 ./nth_prime out.db 1000000     # the 1,000,000th prime
@@ -91,7 +91,7 @@ Below the results for `./eratostenes limit -o base.db`:
 |1E12   | 18.84 GiB  |      4.30 |  317.5 |    63.70 |
 |1E13   | 180.69 GiB  |      4.48 |  222.32s |     832.26 |
 
-## Techniques
+## Algorithms
 
 What this project is built from, one term each — follow the link for the concept itself. See [docs/ALGORITHM.md](docs/ALGORITHM.md) for how they combine, and [docs/RESEARCH.md](docs/RESEARCH.md) for the log of tried, measured, and reverted optimization attempts behind the current design.
 
@@ -104,7 +104,7 @@ What this project is built from, one term each — follow the link for the conce
 - [Random access](https://en.wikipedia.org/wiki/Random_access) 
 - [Delta encoding](https://en.wikipedia.org/wiki/Delta_encoding)
 
-## Benchmarks
+## Benchmark
 
 `./eratostenes N` (counts only) on an Intel Core i5-13500, [primesieve](https://github.com/kimwalisch/primesieve) alongside it for reference:
 
@@ -112,8 +112,8 @@ What this project is built from, one term each — follow the link for the conce
 |---|---:|---:|---:|
 | 1e10 | 0.14s | 0.136s | 1.03x |
 | 1e11 | 1.61s | 1.644s | 0.98x |
-| 1e12 | 23.55s | 24.295s | 0.97x |
-| 1e13 | 301.13s | 292.554s | 1.03x |
+| 1e12 | 23.00s | 24.295s | 0.95x |
+| 1e13 | 299.80s | 292.554s | 1.02x |
 | 1e14 | 3617.87s | 3349.907s | 1.08x |
 | 1e15 | 45339.71s | - | - |
 
@@ -127,7 +127,7 @@ The same results on an Intel Core i5-11400F:
 | 1e13 | 326.03s | 364.91s | 0.89x |
 | 1e14 | 4530.74s | 5804.52s | 0.78x |
 
-## Tests
+## Validation
 
 `make test` checks pi(N) and primes by position against [primecount](https://github.com/kimwalisch/primecount) across several N and parameter combinations (threads, segment width, cache-size overrides, `.db` block size, zstd level), and checks `.db` output against plain text output position by position.
 
