@@ -678,6 +678,13 @@ int main(int argc, char** argv) {
         // every base prime) weighs what it does there.
         double frac = 1.0 - static_cast<double>(wheel_count_upto(range_start)) / static_cast<double>(wheel_count_upto(opt.limit));
         target_chunks = static_cast<unsigned>(std::max<double>(opt.threads, target_chunks * frac + 0.5));
+        // ERATOSTENES_TAIL_CHUNKS_PER_THREAD=K (benchmarking only): at least K
+        // chunks per thread, so short tails (1-2%) don't leave cores idle in
+        // their last round -- idle skews wall-clock and, on HT cores, also
+        // cycles:u (sibling occupancy). Per-chunk setup is ~4ms (RESEARCH.md).
+        if (const char* s = std::getenv("ERATOSTENES_TAIL_CHUNKS_PER_THREAD"))
+            target_chunks = static_cast<unsigned>(std::max<uint64_t>(target_chunks,
+                uint64_t{opt.threads} * std::strtoull(s, nullptr, 10)));
     }
     auto ranges = split_ranges(opt.limit, target_chunks, range_start);
     unsigned num_chunks = static_cast<unsigned>(ranges.size());
