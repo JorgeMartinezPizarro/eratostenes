@@ -157,7 +157,7 @@ for i in "${!NS[@]}"; do
         # reboot-level cooldown would), but it should keep the fastest-of-
         # REPS figure this script reports from being measured hot every
         # time REPS>1 is used on that kind of machine.
-        [ "$r" -lt "$REPS" ] && sleep "$COOLDOWN"
+        [ "$r" -lt "$REPS" ]
     done
     ERATO_TIME["$n"]="$best_e"
     PRIMESIEVE_TIME["$n"]="$t_p"
