@@ -111,7 +111,7 @@ What this project is built from, one term each — follow the link for the conce
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
 | 1e10 | 0.128s | 0.136s | 0.94x |
-| 1e11 | 1.56s | 1.644s | 0.95x |
+| 1e11 | 1.51s | 1.644s | 0.92x |
 | 1e12 | 21.14s | 24.295s | 0.87x |
 | 1e13 | 281.98s | 292.554s | 0.96x |
 | 1e14 | 3617.87s | 3349.907s | 1.08x |
