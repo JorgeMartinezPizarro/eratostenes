@@ -286,8 +286,7 @@ struct Options {
     Fraction tune_small;  // small/med64 cutoff, default 1/4
     Fraction tune_med64;  // med64/medium cutoff, default 1/12 (0 = no med64 tier)
     Fraction tune_sparse; // medium/sparse cutoff, default 1/1 or 1/2 (main.cpp); lowering only
-    bool big2310 = true;         // sparse tier on the mod-2310 wheel (false: mod-210)
-    bool db_journal_off = false; // .db: PRAGMA journal_mode=OFF (sqlite_prime_store.hpp)
+    bool big2310 = true; // sparse tier on the mod-2310 wheel (false: mod-210)
 };
 
 // Interprets suffixes: k=1e3 m=1e6 b=1e9 (short scale billion) t=1e12
@@ -362,8 +361,7 @@ inline void parse_tune(Options& opt, const std::string& kv) {
     else if (k == "med64") opt.tune_med64 = parse_fraction(k, v);
     else if (k == "sparse") opt.tune_sparse = parse_fraction(k, v);
     else if (k == "big2310") opt.big2310 = parse_switch(k, v, "1", "0");
-    else if (k == "db-journal") opt.db_journal_off = !parse_switch(k, v, "on", "off");
-    else throw std::runtime_error("--tune: clave desconocida '" + k + "' (small, med64, sparse, big2310, db-journal)");
+    else throw std::runtime_error("--tune: clave desconocida '" + k + "' (small, med64, sparse, big2310)");
 }
 
 inline void print_usage(const char* prog) {
@@ -413,7 +411,6 @@ inline void print_usage(const char* prog) {
         "      sparse=a/b         Corte medianos/dispersos, solo a la baja\n"
         "                         (default 1/1, o 1/2 con L2 >= 512 KiB por hilo)\n"
         "      big2310=1|0        Dispersos en rueda mod 2310 (default 1) o 210\n"
-        "      db-journal=on|off  Journal de SQLite en modo .db (default on)\n"
         "\n"
         "La rueda (que primos se descartan de entrada) se fija en tiempo de\n"
         "compilacion en src/wheel.hpp (WHEEL_PRIMES) -- ver ese fichero para\n"

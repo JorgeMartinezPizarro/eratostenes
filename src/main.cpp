@@ -782,7 +782,7 @@ int main(int argc, char** argv) {
             // for how start_index gets corrected to its true global value
             // afterwards, from these same counts.
             std::vector<uint64_t> prime_counts(num_chunks, 0);
-            SqlitePrimeStore store(opt.output, opt.db_journal_off);
+            SqlitePrimeStore store(opt.output);
             {
                 std::atomic<uint64_t> progress{0};
                 std::atomic<bool> done{false};

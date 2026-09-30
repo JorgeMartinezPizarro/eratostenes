@@ -175,7 +175,7 @@ check_combo "combo 1h/cache chica/bloque chico" -t 1 -s 2000 --l1-bytes 16384 --
 check_combo "combo 2h/segmento grande/bloque grande" -t 2 -s 5000000 --db-block-size 500000 --zstd-level 1
 check_combo "combo cache forzada grande"       -t "$THREADS" --l1-bytes 1048576 --l2-bytes 8388608 --db-block-size 65536 --zstd-level 9
 check_combo "combo segmento minimo"            -t "$THREADS" -s 64 --db-block-size 100 --zstd-level 1
-check_combo "combo disperso mod 210/sin journal" -t 3 -s 2000 --tune big2310=0 --tune db-journal=off --db-block-size 1000
+check_combo "combo disperso mod 210"           -t 3 -s 2000 --tune big2310=0 --db-block-size 1000
 check_combo "combo cortes rebajados"           -t "$THREADS" -s 100000 --tune small=1/2 --tune med64=1/8 --tune sparse=1/2
 check_combo "combo sin med64/disperso"         -t 2 -s 2000 --tune med64=0 --zstd-level 3
 

@@ -14,7 +14,8 @@ environment variables. They're gone now: the benchmark ones became flags
 `ERATOSTENES_TAIL_CHUNKS_PER_THREAD` is automatic, 8 chunks per thread with
 `--start`), the still-useful ones became `--tune` keys (`SMALL_NUM/_DEN` ->
 `small=a/b`, `MED64_NUM/_DEN` -> `med64=a/b`, `SPARSE_NUM/_DEN` -> `sparse=a/b`,
-`BIG_2310` -> `big2310=0|1`, `DB_JOURNAL` -> `db-journal=on|off`), and the ones whose
+`BIG_2310` -> `big2310=0|1`), `DB_JOURNAL` was removed after its server A/B
+lost (see the `journal_mode=OFF` entry), and the ones whose
 decision was settled were removed together with the code they switched off
 (`MED64_210` and the mod-30 med64 tier, `MED64_NTA`, `MEDIUM_NTA`'s override,
 `NARROW_EARLY`, `MIN_SEGS_PER_CHUNK`). The entries keep the names they were
@@ -70,7 +71,7 @@ throughout below).
 - [gap_encoding.hpp](#gap_encodinghpp)
   - [Gap encoding: wheel-index deltas](#gap-encoding-wheel-index-deltas)
 - [sqlite_prime_store.hpp](#sqlite_prime_storehpp)
-  - [`journal_mode=OFF` for the bulk load (open, 2026-09-28)](#journal_modeoff-for-the-bulk-load-open-2026-09-28)
+  - [`journal_mode=OFF` for the bulk load (tried, reverted, 2026-10-01)](#journal_modeoff-for-the-bulk-load-tried-reverted-2026-10-01)
   - [Write-pipeline knobs: `BATCH`, `--db-block-size`, `wal_autocheckpoint` (all measured, kept at their defaults)](#write-pipeline-knobs-batch---db-block-size-wal_autocheckpoint-all-measured-kept-at-their-defaults)
   - [`PRAGMA cache_size` increase (tried, reverted, 2026-09-25)](#pragma-cache_size-increase-tried-reverted-2026-09-25)
   - [`blocks`/`block_data` table split (kept)](#blocksblock_data-table-split-kept)
@@ -1734,13 +1735,13 @@ primes.
 
 ## sqlite_prime_store.hpp
 
-### `journal_mode=OFF` for the bulk load (open, 2026-09-28)
+### `journal_mode=OFF` for the bulk load (tried, reverted, 2026-10-01)
 
 With `journal_mode=WAL` every page is written twice: into the `-wal` file, then read
 back and copied into the `.db` at each checkpoint. After the wheel-index gaps cut
 the server's 1e13 `.db` from 216 to 190 GB with no clear change in time (~930-950s,
 ~200-250 MB/s), that double write became the main suspect. `ERATOSTENES_DB_JOURNAL=off`
-(experimental knob, default unchanged; now `--tune db-journal=off`) sets `journal_mode=OFF` + `synchronous=OFF`
+(experimental knob, default unchanged) sets `journal_mode=OFF` + `synchronous=OFF`
 and skips the final checkpoint; a crash mid-run corrupts the file, but a partial
 `.db` is useless anyway. The knobs measured earlier in this section tuned the WAL;
 none removed it.
@@ -1749,6 +1750,31 @@ Only data point so far, dev PC 1e11 (interleaved, files valid: count and positio
 checked against primecount, no sidecars left): WAL 11.49 / 21.22s, off 6.74 /
 6.03s. The 1e12 A/B was stopped (the dev PC disk is not the target); decide on a
 server A/B at 1e12 (A, B, B, A).
+
+**Server A/B, 2026-10-01** (i5-13500, 1e12 `.db`, WAL/off/off/WAL, `sync` inside the
+timed span so `synchronous=OFF` can't leave its writes in the page cache; all four
+files 20,226.5 MB +-0.003%, `--count` and the last position correct, no sidecars):
+
+| order | mode | time |
+|---|---|---:|
+| 1 | WAL | 59.85s |
+| 2 | off | 67.39s |
+| 3 | off | 87.89s |
+| 4 | WAL | 85.86s |
+
+`off` never wins: +12.6% in the first pair, +2.4% in the second, +6.6% by the ABBA
+estimator. Not a large loss, but none of the dev PC's 2-3x shows up. Plausible
+mechanism: WAL appends sequentially to the `-wal` file and checkpoints in bulk, while
+`journal_mode=OFF` writes every page in place, scattered by B-tree page splits.
+**Reverted**: knob and code removed, WAL stays.
+
+Side finding, worth more than the knob: both modes got ~30% slower between runs 2
+and 3 (60-67s -> 86-88s) after ~40-60 GB written back to back -- most likely the
+SSD's fast write cache running out, or dirty-page writeback throttling. `.db`
+timings on the server depend on the disk's recent write history; ABBA only cancels
+linear drift, so space such runs out (or check the drift) before reading small
+differences. For the 1e15 plan (~16-19 TB in one run) the sustained write speed, not
+the burst one, is what counts.
 
 ### Write-pipeline knobs: `BATCH`, `--db-block-size`, `wal_autocheckpoint` (all measured, kept at their defaults)
 

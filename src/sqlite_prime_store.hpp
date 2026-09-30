@@ -30,7 +30,7 @@
 
 class SqlitePrimeStore {
 public:
-    explicit SqlitePrimeStore(const std::string& path, bool journal_off = false) : journal_off_(journal_off) {
+    explicit SqlitePrimeStore(const std::string& path) {
         // PRAGMA page_size only takes effect on a page-less (brand new)
         // database, so any stale file at this path must go first. See
         // docs/RESEARCH.md#page-size-kept.
@@ -38,17 +38,12 @@ public:
 
         check(sqlite3_open(path.c_str(), &db_), "open");
         exec("PRAGMA page_size=4096;");
-        // journal_off (--tune db-journal=off, experimental, A/B only): no
-        // journal at all, so every page hits the disk once instead of twice
-        // (WAL, then copied into the .db at each checkpoint). A crash mid-run
-        // leaves a corrupt file, but a half-written .db is useless anyway.
-        if (journal_off_) {
-            exec("PRAGMA journal_mode=OFF;");
-            exec("PRAGMA synchronous=OFF;");
-        } else {
-            exec("PRAGMA journal_mode=WAL;");
-            exec("PRAGMA synchronous=NORMAL;");
-        }
+        // WAL, not journal_mode=OFF: OFF writes every page once instead of
+        // twice, and won 2-3x on the dev PC at 1e11, but lost clearly on the
+        // server at 1e12 (A/B, sync included) -- in-place page writes scatter
+        // where WAL appends. See docs/RESEARCH.md.
+        exec("PRAGMA journal_mode=WAL;");
+        exec("PRAGMA synchronous=NORMAL;");
         // A bigger PRAGMA cache_size (512MB, up from SQLite's own default
         // 2MB) was tried and measured worse on the server at both N=1e12
         // and N=1e13 -- see docs/RESEARCH.md.
@@ -156,7 +151,7 @@ public:
         write_meta("zstd_level", std::to_string(zstd_level));
         write_meta("total_primes", std::to_string(total_primes));
 
-        if (!journal_off_) exec("PRAGMA wal_checkpoint(TRUNCATE);");
+        exec("PRAGMA wal_checkpoint(TRUNCATE);");
         exec("PRAGMA journal_mode=DELETE;");
     }
 
@@ -273,7 +268,6 @@ private:
     }
 
     sqlite3* db_ = nullptr;
-    bool journal_off_ = false; // --tune db-journal=off, see the constructor
     sqlite3_stmt* insert_stmt_ = nullptr;
     sqlite3_stmt* insert_data_stmt_ = nullptr;
 
