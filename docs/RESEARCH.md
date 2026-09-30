@@ -54,6 +54,7 @@ throughout below).
   - [Sparse tier: `process_big` loads per hit, ~12 -> 5 (kept, 2026-09-29)](#sparse-tier-process_big-loads-per-hit-12---5-kept-2026-09-29)
   - [med64: re-filing without `std::vector::push_back` (tried, reverted, 2026-09-29)](#med64-re-filing-without-stdvectorpush_back-tried-reverted-2026-09-29)
   - [med64: `prefetchnta` on the state stream (kept, 2026-09-29)](#med64-prefetchnta-on-the-state-stream-kept-2026-09-29)
+  - [Sparse tier: mod-2310 multiplier wheel (kept, 2026-09-30)](#sparse-tier-mod-2310-multiplier-wheel-kept-2026-09-30)
 - [gap_encoding.hpp](#gap_encodinghpp)
   - [Gap encoding: wheel-index deltas](#gap-encoding-wheel-index-deltas)
 - [sqlite_prime_store.hpp](#sqlite_prime_storehpp)
@@ -208,6 +209,10 @@ limit=6.3e16.)
 The MEDIUM tier's mod-2310 half doesn't have this problem (its primes stay under
 `seg_k_width`, orders of magnitude below this ceiling either way) -- it's still just
 the cache-pressure argument above for that tier, not a hard rejection.
+
+**Update 2026-09-30:** both objections to the sparse half are gone (the entry is one
+64-bit word now, and a 32-bit row makes the table 15 KiB) -- implemented and kept, see
+[Sparse tier: mod-2310 multiplier wheel](#sparse-tier-mod-2310-multiplier-wheel-kept-2026-09-30).
 
 ### `cross_off_medium`: 4-way interleaved stepping (tried, reverted)
 
@@ -1594,6 +1599,78 @@ Method note: on the dev PC a single 1e14 5% tail can land ~5% slow with no code
 change, in `cycles:u` too (12 threads + HT: cycles:u is not immune to machine
 state). Pair A/B tails with counters that measure the mechanism, and with
 best-of-N full runs against the README.
+
+### Sparse tier: mod-2310 multiplier wheel (kept, 2026-09-30)
+
+Idea: every prime up to 163 is presieved (`PRESIEVE_GROUPS`), 11 included, so a
+sparse hit `p*m` with `11 | m` re-marks a composite the presieve pattern already
+has -- exactly the argument that took the multiplier wheel from mod 30 to mod 210
+for 7. Stepping `m` through the residues coprime to 2310 instead of 210:
+480/2310 = 0.2078 vs 48/210 = 0.2286 candidates per unit of `m`, **-9.1% sparse
+hits**, each costing what a mod-210 hit costs. primesieve's EratBig stays on
+mod 210, so this is ground it doesn't cover.
+
+The 2026-09-25 entry
+([`cross_off_medium`: mod-2310 stepping, considered, not implemented](#cross_off_medium-mod-2310-stepping-considered-not-implemented-2026-09-25-external-review-opus-55))
+rejected the sparse half for two reasons that no longer hold:
+
+- **`qp` bits.** Back then the entry was read as `DenseState` fields, `qw` a
+  `uint32_t` with 9 bits of (class, phase), and 12 bits would have left `qp` 20
+  bits (< isqrt(1e15)/30). Since the 5-loads-per-hit rewrite (2026-09-29) the entry
+  is ONE 64-bit word and `pos` only needs log2(segment bytes) = 19 bits of the 32 it
+  had. New packing: `idx` (ri*480 + w) bits 0-11, `pos` 12-35 (24 bits, checked in
+  the constructor: log2(segment bytes) <= 24), `qp` 36-63 (28 bits, up to
+  p ~ 8e9, far past isqrt(1e16) = 1e8; also checked).
+- **Table size.** 8 x 480 rows at 8 bytes is 30 KiB. At 4 bytes
+  (`mask | dm << 8 | corr << 16 | next << 20`; dm <= 14, corr <= 14, next < 3840)
+  it's 15 KiB -- `big::TABLE2310`, generated and range-checked at compile time.
+
+First version used 16-bit rows (7.5 KiB: dm/2 in 3 bits plus a wrap bit, next
+index computed as `idx + 1 - wrap * 480`). The wrap arithmetic cost 6 more
+instructions per hit (43 vs 37, objdump), instructions:u went **up** 2.0% despite
+the fewer hits, and cycles:u only moved -2.1% mean / -2.4% median. Storing the next
+index in the row (32-bit table) brings the hit loop to 38 instructions vs mod-210's
+37. That's the version kept.
+
+Implementation: `process_big<bool W2310>` (the mod-210 loop is the `false`
+instantiation, unchanged), a mod-2310 branch in the sparse activation
+(`M2310`/`NEXT_W2310`, same t/w decomposition), ring sizing with max(dm) = 14.
+Default on; `ERATOSTENES_BIG_2310=0` goes back to mod-210 in the same binary (A/B).
+
+Correctness: pi(N) equal to primecount at 1e6, 123456789, 1e10, 3e11, 1e12, each
+with the sparse tier forced (`-s 100000`, `-t 3 -s 500000`, `-t 5 -s 2000000`);
+tails [1e15 - 1e10, 1e15] and [1e16 - 1e10, 1e16] (the latter with `qp` past 2^20)
+equal between both wheels and to primecount's difference; `make test` with the knob
+on and off; full 1e14 = 3,204,941,750,802.
+
+Dev PC (i5-11400F, 12 threads, 1.66M sparse primes at 1e15, cutoff 1/1), same binary,
+knob 0 vs 1, ABBA, `perf stat`:
+
+| test | cycles:u mean | cycles:u min | instructions:u | wall mean | wall min |
+|---|---:|---:|---:|---:|---:|
+| 1e15 0.1% tail, 3 pairs, `TAIL_CHUNKS_PER_THREAD=4` | -5.1% | -4.2% | -2.5% | -5.1% | -4.2% |
+| 1e15 1% tail, 1 pair, `TAIL_CHUNKS_PER_THREAD=8` | -7.7% | -6.3% | -2.5% | -9.2% | -8.9% |
+
+All three 0.1% pairs agree (-6.0/-4.1/-5.2%). The 1% tail gains more than -9.1% of
+the sparse tier alone could explain; L3 misses fall 32% there (4.95G -> 3.37G): the
+bucket stream is ~16 bytes of traffic per hit shared by 12 threads, and cutting 9%
+of it relieves the other tiers too. One pair only -- the min-vs-min figures are the
+conservative ones.
+
+Full runs: 1e10-1e13 have no sparse primes on the dev PC, and HEAD vs the new
+binary interleaved (HEAD, new, new, HEAD) tie at every N (1e12 23.65/23.70 vs
+23.74/23.76s, 1e13 309.27/313.35 vs 309.72/311.96s) -- the code-layout change costs
+nothing. 1e14 (368,632 sparse primes): **4185.20s** vs the README's 4530.74s
+(-7.6%, 0.72x primesieve); that README row predates the other 2026-09-29/30
+changes, which are worth ~4% at 1e13, so ~3.5% of it is this.
+
+Server (i5-13500): `process_big` is ~39% of cycles at 1e15 there, so -3.5% or more
+is the expectation at 1e15; ~1% at 1e14, where few primes are sparse. A/B pending.
+
+Not extended to the other mod-210 tiers yet: medium primes have 1-3 hits per segment
+and their cost is dominated by the loop exit mispredict, not the hits, and its
+`(pos << 6) | w` state has no room for 480 phases; med64's fully unrolled 48-case
+`switch` would become 480 cases (~60 KB of code) and 3840 lists.
 
 ## gap_encoding.hpp
 

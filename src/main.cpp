@@ -132,6 +132,10 @@ static bool MED64_NTA = true;
 // on by default; ERATOSTENES_MED64_210=0 goes back to mod-30 (A/B).
 static bool MED64_210 = true;
 
+// Sparse tier on the mod-2310 multiplier wheel (SegmentSieve::process_big<true>),
+// on by default; ERATOSTENES_BIG_2310=0 goes back to mod-210 (A/B). See docs/RESEARCH.md.
+static bool BIG_2310 = true;
+
 struct ChunkRange {
     uint64_t low;   // first wheel index of the chunk (inclusive)
     uint64_t high;  // upper bound in wheel index (exclusive)
@@ -189,7 +193,7 @@ static void sieve_chunk(ChunkRange range, uint64_t seg_k_width, uint64_t base_pr
                          Writer& out, uint64_t& local_count,
                          std::atomic<uint64_t>& progress) {
     SegmentSieve sieve(seg_k_width, base_prime_max, presieve, SUB_BLOCK_BYTES, !sparse_primes.empty(),
-                       medium_primes.size() >= MEDIUM_NTA_MIN_PRIMES, MED64_NTA, MED64_210);
+                       medium_primes.size() >= MEDIUM_NTA_MIN_PRIMES, MED64_NTA, MED64_210, BIG_2310);
     sieve.begin_chunk();
     for (uint64_t k_low = range.low; k_low < range.high; k_low += seg_k_width) {
         uint64_t k_high = std::min(k_low + seg_k_width, range.high);
@@ -708,6 +712,7 @@ int main(int argc, char** argv) {
     }
     if (const char* s = std::getenv("ERATOSTENES_MED64_NTA")) MED64_NTA = std::strtoull(s, nullptr, 10) != 0;
     if (const char* s = std::getenv("ERATOSTENES_MED64_210")) MED64_210 = std::strtoull(s, nullptr, 10) != 0;
+    if (const char* s = std::getenv("ERATOSTENES_BIG_2310")) BIG_2310 = std::strtoull(s, nullptr, 10) != 0;
 
     Presieve presieve = build_presieve(PRESIEVE_GROUPS);
 
@@ -730,6 +735,7 @@ int main(int argc, char** argv) {
     }
     if (!MED64_NTA) std::fprintf(stderr, "  prefetchnta del tier med64: no (ERATOSTENES_MED64_NTA=0)\n");
     if (!MED64_210) std::fprintf(stderr, "  tier med64 en rueda mod 30 (ERATOSTENES_MED64_210=0)\n");
+    if (!BIG_2310 && !sparse_primes.empty()) std::fprintf(stderr, "  tier disperso en rueda mod 210 (ERATOSTENES_BIG_2310=0)\n");
     if (narrow_early) {
         unsigned narrow_chunks = 0;
         for (const auto& r : ranges) narrow_chunks += r.high <= narrow_k_end;

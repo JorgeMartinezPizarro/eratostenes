@@ -49,6 +49,11 @@ phase); med64 reads it as compile-time constants, the sparse tier as one packed
 word per row) and the same data packed one word per (class, phase) for the medium
 tier (`PACK210[pr][w] = mask | dm << 8 | corr << 16`: hit = `s[pos] |= mask`, next
 hit `pos += qp*dm + corr`, no division).
+The sparse tier goes one step further, to the 480 residues coprime to 2310: the
+presieve covers 11 as well, so multipliers divisible by 11 are redundant too
+(~9.1% fewer sparse hits). `big::TABLE2310` holds its rows as one 32-bit word
+(`mask | dm << 8 | corr << 16 | next << 20`, 15 KiB); `ERATOSTENES_BIG_2310=0`
+switches back to mod-210.
 The small tier stays on mod-30 multipliers: its unrolled loop depends on the
 8-hits-per-p-bytes cycle, and the mod-210 version tried lost (see
 [RESEARCH.md](RESEARCH.md#erat_smallhpp)).
@@ -193,7 +198,8 @@ sparse, then extraction.
   primesieve's EratBig design). Each ring slot is a linked list of 1 KiB,
   1 KiB-aligned blocks from a pool (a tail pointer landing on a block boundary
   means "full", so there's no count field); hits are byte marks stepped with
-  `big::TABLE` (mod-210, §2); the slot is `byte position >> log2(segment bytes)`,
+  `big::TABLE2310` (mod-2310, §2; each entry one 64-bit word, class/phase index |
+  byte position << 12 | qp << 36); the slot is `byte position >> log2(segment bytes)`,
   so whenever any prime is sparse `main.cpp` floors the segment to a power of 2
   bytes. The next block of a chain is prefetched once per block, since pooled
   blocks are scattered in memory. [RESEARCH.md](RESEARCH.md#segment_sievehpp)

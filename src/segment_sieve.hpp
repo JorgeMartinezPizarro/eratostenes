@@ -49,13 +49,14 @@ public:
     // has_sparse is true; this constructor just verifies that was done.
     SegmentSieve(uint64_t seg_k_width, uint64_t base_prime_max, const Presieve& presieve,
                  uint64_t sub_block_bytes, bool has_sparse, bool medium_nta, bool med64_nta,
-                 bool med64_210)
+                 bool med64_210, bool big2310 = false)
         : words_((seg_k_width + 63) / 64, 0),
           seg_k_width_(seg_k_width),
           sub_block_bytes_(sub_block_bytes),
           medium_nta_(medium_nta),
           med64_nta_(med64_nta),
           med64_210_(med64_210),
+          big2310_(big2310),
           presieve_(presieve) {
         // The byte-addressed dense tiers (erat_small.hpp) need every
         // segment to start on a byte (k multiple of 8) and to stay a whole
@@ -86,7 +87,12 @@ public:
         // multiplier wheel (the largest gap between consecutive 210-
         // coprime residues) -- a few extra WHEEL_SIZE's of slack (+16)
         // cost nothing (buckets are cheap) and keep this comfortably safe.
-        uint64_t maxstep = base_prime_max / WHEEL_MOD * 10 + 16;
+        // mod-2310 (big2310_): max(dm) = 14, and the packed entry (see
+        // activation) holds pos in 24 bits and qp in 28.
+        if (big2310_ && (log2_sb_ > 24 || base_prime_max / WHEEL_MOD >= (uint64_t{1} << 28))) {
+            throw std::runtime_error("SegmentSieve: segmento o primo base demasiado grande para el tier disperso mod 2310");
+        }
+        uint64_t maxstep = base_prime_max / WHEEL_MOD * (big2310_ ? 14 : 10) + 16;
         uint64_t ahead = (maxstep >> log2_sb_) + 2;
         num_buckets_ = 1;
         while (num_buckets_ < ahead * 2) num_buckets_ <<= 1; // power of 2, 2x margin
@@ -170,6 +176,29 @@ public:
             if (p * p >= high_n) break;
             uint64_t start_val = std::max(p * p, low_n);
             uint64_t m = (start_val + p - 1) / p;
+            if (big2310_) {
+                // Packed as one word: idx (ri * 480 + w) in bits 0-11, pos
+                // in 12-35, qp in 36-63 -- see process_big<true>.
+                uint64_t t = m / 2310, sres = m % 2310;
+                uint64_t w = big::NEXT_W2310[sres];
+                if (w == big::W2310) { ++t; w = 0; }
+                m = t * 2310 + big::M2310[w];
+                uint64_t pos = p * m / WHEEL_MOD - k_low / 8;
+                uint64_t ri = static_cast<uint64_t>(WHEEL_POS[p % WHEEL_MOD]);
+                uint64_t ahead = pos >> log2_sb_;
+                if (ahead >= num_buckets_) {
+                    throw std::runtime_error(
+                        "bucket sieve: salto de un primo disperso mayor que el margen del anillo de "
+                        "cubos (bug de dimensionamiento en el constructor de SegmentSieve)");
+                }
+                uint64_t ent = (ri * big::W2310 + w) | ((pos & ((uint64_t{1} << log2_sb_) - 1)) << 12) |
+                               ((p / WHEEL_MOD) << 36);
+                erat::DenseState e;
+                std::memcpy(&e, &ent, sizeof(e));
+                push_sparse_entry(static_cast<uint32_t>((cur_segment_ + ahead) & (num_buckets_ - 1)), e);
+                ++next_sparse_idx_;
+                continue;
+            }
             uint64_t t = m / 210, sres = m % 210;
             uint64_t w = big::NEXT_W[sres];
             if (w == 48) { ++t; w = 0; }
@@ -252,7 +281,10 @@ public:
         // avoids paying a real (non-inlined) call's overhead every single
         // segment for N where this tier never has anything to do (every N
         // tested up to 1e12 on this machine, see README#benchmarks).
-        if (!sparse_primes.empty()) process_big();
+        if (!sparse_primes.empty()) {
+            if (big2310_) process_big<true>();
+            else process_big<false>();
+        }
         ++cur_segment_;
 
         // Extraction: bit=0 => prime candidate. Accumulated locally and
@@ -546,6 +578,13 @@ private:
     // position with a shift/mask instead of a division. `pos` in a live
     // entry is always relative to whichever segment it's due in, so no
     // k_low/k_high parameters are needed here.
+    //
+    // W2310 (the default; ERATOSTENES_BIG_2310=0 goes back to mod-210):
+    // mod-2310 multiplier wheel instead, entry packed as
+    // idx | pos << 12 | qp << 36 and big::TABLE2310 (32-bit rows, next index
+    // included) -- same work per hit (38 instructions vs 37), ~9.1% fewer
+    // hits. See docs/RESEARCH.md#sparse-tier-mod-2310-multiplier-wheel-kept-2026-09-30.
+    template <bool W2310>
     __attribute__((noinline))
     void process_big() {
         const uint32_t slot = static_cast<uint32_t>(cur_segment_ & (num_buckets_ - 1));
@@ -583,15 +622,30 @@ private:
                 // around the inline allocation cost ~12 loads per hit.
                 for (; it != end; ++it) {
                     uint64_t ent;
-                    std::memcpy(&ent, it, sizeof(ent)); // qw | pos << 32
-                    uint64_t qw = static_cast<uint32_t>(ent);
-                    uint64_t pos = ent >> 32;
-                    uint64_t a = qw >> 9;
-                    uint64_t te = big::TABLE64[qw & 511]; // mask | dm << 8 | corr << 16 | next << 32
-                    s[pos] |= static_cast<uint8_t>(te);
-                    pos += a * ((te >> 8) & 0xff) + ((te >> 16) & 0xff);
+                    std::memcpy(&ent, it, sizeof(ent));
+                    uint64_t pos, e_keep, nidx;
+                    if constexpr (W2310) { // idx | pos << 12 | qp << 36
+                        uint64_t idx = ent & 4095;
+                        pos = (ent >> 12) & 0xffffff;
+                        uint64_t a = ent >> 36;
+                        uint64_t te = big::TABLE2310[idx]; // mask | dm << 8 | corr << 16 | next << 20
+                        s[pos] |= static_cast<uint8_t>(te);
+                        pos += a * ((te >> 8) & 0xff) + ((te >> 16) & 15);
+                        nidx = te >> 20;
+                        e_keep = ent & ~((uint64_t{1} << 36) - 1);
+                    } else { // qw | pos << 32
+                        uint64_t qw = static_cast<uint32_t>(ent);
+                        pos = ent >> 32;
+                        uint64_t a = qw >> 9;
+                        uint64_t te = big::TABLE64[qw & 511]; // mask | dm << 8 | corr << 16 | next << 32
+                        s[pos] |= static_cast<uint8_t>(te);
+                        pos += a * ((te >> 8) & 0xff) + ((te >> 16) & 0xff);
+                        nidx = te >> 32;
+                        e_keep = a << 9;
+                    }
                     uint64_t sl = (cur + (pos >> log2sb)) & bmask;
-                    uint64_t e = (a << 9) | (te >> 32) | ((pos & modsb) << 32);
+                    uint64_t e = W2310 ? (e_keep | nidx | ((pos & modsb) << 12))
+                                       : (e_keep | nidx | ((pos & modsb) << 32));
                     erat::DenseState* w = tails[sl];
                     // Null (empty slot) or on a block boundary (block full).
                     if ((reinterpret_cast<uintptr_t>(w) & (BLK_BYTES - 1)) == 0) [[unlikely]]
@@ -666,6 +720,7 @@ private:
     bool medium_nta_; // prefetchnta the medium state (erat_small.hpp::cross_off_medium)
     bool med64_nta_;  // prefetchnta the med64 state (process_med64)
     bool med64_210_;  // med64 on the mod-210 wheel: 384 (class, phase) lists, cross_off_checked210
+    bool big2310_;    // sparse tier on the mod-2310 wheel (process_big<true>)
     static constexpr ptrdiff_t MED64_NTA_DIST = 32; // entries ahead (4 cache lines)
     const Presieve& presieve_;
 
