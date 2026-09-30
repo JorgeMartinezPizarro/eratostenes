@@ -27,14 +27,14 @@
 
 static void print_usage(const char* prog) {
     std::fprintf(stderr,
-        "Uso: %s FICHERO.db N\n"
-        "     %s FICHERO.db --count\n"
+        "Usage: %s FILE.db N\n"
+        "       %s FILE.db --count\n"
         "\n"
-        "Imprime el primo N-esimo (N empieza en 1: N=1 -> 2) almacenado en\n"
-        "FICHERO.db, generado con 'eratostenes -o FICHERO.db'.\n"
+        "Prints the N-th prime (N starts at 1: N=1 -> 2) stored in FILE.db,\n"
+        "generated with 'eratostenes -o FILE.db'.\n"
         "\n"
-        "  --count    Imprime el total de primos almacenados (pi(limit)) y sale\n"
-        "  -h, --help Muestra esta ayuda\n",
+        "  --count    Print the number of stored primes (pi(limit)) and exit\n"
+        "  -h, --help Show this help\n",
         prog, prog);
 }
 
@@ -50,7 +50,7 @@ static std::string read_meta(sqlite3* db, const char* key) {
         result = text ? reinterpret_cast<const char*>(text) : "";
     } else {
         sqlite3_finalize(stmt);
-        throw std::runtime_error(std::string("fichero .db invalido: falta meta.") + key);
+        throw std::runtime_error(std::string("invalid .db file: missing meta.") + key);
     }
     sqlite3_finalize(stmt);
     return result;
@@ -71,7 +71,7 @@ static uint64_t lookup(sqlite3* db, uint64_t target_index) {
 
     if (sqlite3_step(stmt) != SQLITE_ROW) {
         sqlite3_finalize(stmt);
-        throw std::runtime_error("indice fuera de rango: no hay ningun bloque para esa posicion");
+        throw std::runtime_error("index out of range: no block holds that position");
     }
 
     uint64_t start_index = static_cast<uint64_t>(sqlite3_column_int64(stmt, 0));
@@ -82,20 +82,20 @@ static uint64_t lookup(sqlite3* db, uint64_t target_index) {
 
     if (target_index >= start_index + count) {
         sqlite3_finalize(stmt);
-        throw std::runtime_error("indice fuera de rango: mas alla del ultimo primo generado");
+        throw std::runtime_error("index out of range: past the last generated prime");
     }
 
     unsigned long long raw_size = ZSTD_getFrameContentSize(blob, static_cast<size_t>(blob_size));
     if (raw_size == ZSTD_CONTENTSIZE_ERROR || raw_size == ZSTD_CONTENTSIZE_UNKNOWN) {
         sqlite3_finalize(stmt);
-        throw std::runtime_error("bloque .db corrupto: tamano zstd desconocido");
+        throw std::runtime_error("corrupt .db block: unknown zstd size");
     }
 
     std::vector<uint8_t> raw(raw_size);
     size_t decoded = ZSTD_decompress(raw.data(), raw.size(), blob, static_cast<size_t>(blob_size));
     sqlite3_finalize(stmt); // done with the blob pointer before we return
     if (ZSTD_isError(decoded) || decoded != raw_size) {
-        throw std::runtime_error("bloque .db corrupto: fallo la descompresion zstd");
+        throw std::runtime_error("corrupt .db block: zstd decompression failed");
     }
 
     uint64_t value = start_prime;
@@ -122,7 +122,7 @@ int main(int argc, char** argv) {
 
     sqlite3* db = nullptr;
     if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK) {
-        std::fprintf(stderr, "Error: no se pudo abrir %s: %s\n", path, sqlite3_errmsg(db));
+        std::fprintf(stderr, "Error: could not open %s: %s\n", path, sqlite3_errmsg(db));
         if (db) sqlite3_close(db);
         return 1;
     }
@@ -132,8 +132,8 @@ int main(int argc, char** argv) {
         // silently return wrong primes (see gap_encoding.hpp).
         std::string version = read_meta(db, "format_version");
         if (version != "2") {
-            throw std::runtime_error("formato .db version " + version +
-                                     " no soportado (se espera 2): regeneralo con este eratostenes");
+            throw std::runtime_error("unsupported .db format version " + version +
+                                     " (expected 2): regenerate it with this eratostenes");
         }
         if (std::strcmp(arg2, "--count") == 0) {
             std::string total = read_meta(db, "total_primes");
@@ -142,7 +142,7 @@ int main(int argc, char** argv) {
             char* end = nullptr;
             unsigned long long n = std::strtoull(arg2, &end, 10);
             if (end == arg2 || *end != '\0' || n == 0) {
-                throw std::runtime_error("N debe ser un entero >= 1");
+                throw std::runtime_error("N must be an integer >= 1");
             }
             uint64_t value = lookup(db, n - 1);
             std::printf("%llu\n", static_cast<unsigned long long>(value));

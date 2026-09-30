@@ -1,5 +1,10 @@
+# init: true runs a minimal init (tini) as PID 1 in front of the binary. Without
+# it eratostenes itself is PID 1, and the kernel ignores signals PID 1 has no
+# handler for: Ctrl+C on `make run` (SIGINT, forwarded by `docker compose run`)
+# did nothing and the container, --rm included, stayed up until `docker kill`.
 services:
   eratostenes:
+    init: true
     build:
       context: ..
       dockerfile: docker/Dockerfile
@@ -11,6 +16,7 @@ services:
   # Full toolchain (gcc + primesieve): runs `make test`/`benchmark` inside
   # the container, see Makefile's docker-* targets below.
   dev:
+    init: true
     build:
       context: ..
       dockerfile: docker/Dockerfile
@@ -24,6 +30,7 @@ services:
   # warning on pgo-builder): `docker compose build eratostenes-pgo` run
   # directly on that machine, not built elsewhere and shipped in.
   eratostenes-pgo:
+    init: true
     build:
       context: ..
       dockerfile: docker/Dockerfile

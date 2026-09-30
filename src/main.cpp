@@ -388,7 +388,7 @@ int main(int argc, char** argv) {
     // .txt/.db would still get the wheel primes and, for .db,
     // chunk-relative positions that aren't global prime indices.
     if (opt.start && !opt.output.empty()) {
-        std::fprintf(stderr, "Error: --start solo vale en modo conteo (sin -o).\n");
+        std::fprintf(stderr, "Error: --start only works in count mode (without -o).\n");
         return 1;
     }
     DEBUG_IDLE = opt.debug_idle;
@@ -400,14 +400,14 @@ int main(int argc, char** argv) {
 
     if (opt.limit < 2) {
         if (opt.output.empty()) {
-            std::fprintf(stderr, "Listo. 0 primos encontrados hasta %llu.\n",
+            std::fprintf(stderr, "Done. 0 primes found up to %llu.\n",
                          static_cast<unsigned long long>(opt.limit));
         } else if (is_db_output(opt.output)) {
             write_tiny_db(opt.output, {}, opt.limit, opt.db_block_size, opt.zstd_level);
-            std::fprintf(stderr, "N < 2: no hay primos. Fichero .db vacio creado en %s\n", opt.output.c_str());
+            std::fprintf(stderr, "N < 2: no primes. Empty .db file created at %s\n", opt.output.c_str());
         } else {
             std::ofstream(opt.output, std::ios::binary | std::ios::trunc);
-            std::fprintf(stderr, "N < 2: no hay primos. Fichero vacio creado en %s\n", opt.output.c_str());
+            std::fprintf(stderr, "N < 2: no primes. Empty file created at %s\n", opt.output.c_str());
         }
         return 0;
     }
@@ -418,24 +418,24 @@ int main(int argc, char** argv) {
         std::vector<uint64_t> small;
         for (uint64_t p : WHEEL_PRIMES) if (opt.limit >= p) small.push_back(p);
         if (opt.output.empty()) {
-            std::fprintf(stderr, "Listo. %zu primo(s) encontrado(s) hasta %llu.\n",
+            std::fprintf(stderr, "Done. %zu prime(s) found up to %llu.\n",
                          small.size(), static_cast<unsigned long long>(opt.limit));
         } else if (is_db_output(opt.output)) {
             write_tiny_db(opt.output, small, opt.limit, opt.db_block_size, opt.zstd_level);
-            std::fprintf(stderr, "Listo. %zu primo(s) escrito(s) en %s\n", small.size(), opt.output.c_str());
+            std::fprintf(stderr, "Done. %zu prime(s) written to %s\n", small.size(), opt.output.c_str());
         } else {
             std::ofstream ofs(opt.output, std::ios::binary | std::ios::trunc);
             for (uint64_t p : small) ofs << p << "\n";
-            std::fprintf(stderr, "Listo. %zu primo(s) escrito(s) en %s\n", small.size(), opt.output.c_str());
+            std::fprintf(stderr, "Done. %zu prime(s) written to %s\n", small.size(), opt.output.c_str());
         }
         return 0;
     }
 
     uint64_t base_limit = isqrt(opt.limit);
-    std::fprintf(stderr, "Calculando primos base hasta %llu...\n",
+    std::fprintf(stderr, "Computing base primes up to %llu...\n",
                  static_cast<unsigned long long>(base_limit));
     std::vector<uint64_t> base_primes = sieve_base_primes(base_limit);
-    std::fprintf(stderr, "  %zu primos base encontrados.\n", base_primes.size());
+    std::fprintf(stderr, "  %zu base primes found.\n", base_primes.size());
 
     // --segment-width is a numeric width (so the option keeps meaning the
     // same thing to the user); it's converted to a width in wheel indices
@@ -478,7 +478,7 @@ int main(int argc, char** argv) {
             for (uint64_t s : topo.l2_share) if (s && s < min_l2_share) min_l2_share = s;
             if (min_l2_share < topo.l2_share[0]) {
                 seg_k_width = seg_k_width_from_l2_bytes(min_l2_share);
-                opt.segment_width = seg_k_width * WHEEL_MOD / WHEEL_SIZE; // keep the startup log's "segmento=" accurate
+                opt.segment_width = seg_k_width * WHEEL_MOD / WHEEL_SIZE; // keep the startup log's "segment=" accurate
             }
         }
         // L1d: largest, not smallest -- sizing the P-cores' sub-block for
@@ -508,7 +508,7 @@ int main(int argc, char** argv) {
     const bool sparse_regime = base_limit >= seg_k_width;
     if (!opt.segment_width_set && sparse_regime) {
         seg_k_width *= 2;
-        opt.segment_width = seg_k_width * WHEEL_MOD / WHEEL_SIZE; // keep the startup log's "segmento=" accurate
+        opt.segment_width = seg_k_width * WHEEL_MOD / WHEEL_SIZE; // keep the startup log's "segment=" accurate
     }
 
     // The sparse tier's EratBig-style rewrite (segment_sieve.hpp) needs
@@ -555,7 +555,7 @@ int main(int argc, char** argv) {
         while (p2 * 2 <= sb) p2 *= 2;
         if (p2 != sb) {
             seg_k_width = std::max<uint64_t>(64, p2 * 8);
-            opt.segment_width = seg_k_width * WHEEL_MOD / WHEEL_SIZE; // keep the startup log's "segmento=" accurate
+            opt.segment_width = seg_k_width * WHEEL_MOD / WHEEL_SIZE; // keep the startup log's "segment=" accurate
         }
     }
 
@@ -658,7 +658,7 @@ int main(int argc, char** argv) {
     // The printed count is then only for that tail, not pi(N).
     uint64_t range_start = opt.start < opt.limit ? opt.start : 0;
     if (range_start) {
-        std::fprintf(stderr, "AVISO: --start %llu -- solo se criba [%llu, %llu]; el recuento NO es pi(N).\n",
+        std::fprintf(stderr, "WARNING: --start %llu -- only [%llu, %llu] is sieved; the count is NOT pi(N).\n",
                      static_cast<unsigned long long>(range_start), static_cast<unsigned long long>(range_start),
                      static_cast<unsigned long long>(opt.limit));
         // Same chunk width as the full run where that still leaves every
@@ -697,8 +697,8 @@ int main(int argc, char** argv) {
 
     Presieve presieve = build_presieve(PRESIEVE_GROUPS);
 
-    std::fprintf(stderr, "Iniciando %u hilos, limite=%llu, segmento=%llu, rueda mod %llu (%zu primos), "
-                 "%zu primos base pequenos (sub-bloque %llu KiB), %zu med64, %zu medianos, %zu dispersos...\n",
+    std::fprintf(stderr, "Starting %u threads, limit=%llu, segment=%llu, wheel mod %llu (%zu primes), "
+                 "%zu small base primes (sub-block %llu KiB), %zu med64, %zu medium, %zu sparse...\n",
                  actual_threads,
                  static_cast<unsigned long long>(opt.limit),
                  static_cast<unsigned long long>(opt.segment_width),
@@ -706,14 +706,14 @@ int main(int argc, char** argv) {
                  WHEEL_PRIMES.size(),
                  small_primes.size(), static_cast<unsigned long long>(SUB_BLOCK_BYTES / 1024),
                  med64_primes.size(), medium_primes.size(), sparse_primes.size());
-    std::fprintf(stderr, "  prefetchnta del tier medio: %s (a partir de %s primos medianos)\n",
-                 medium_primes.size() >= MEDIUM_NTA_MIN_PRIMES ? "si" : "no",
+    std::fprintf(stderr, "  medium-tier prefetchnta: %s (from %s medium primes)\n",
+                 medium_primes.size() >= MEDIUM_NTA_MIN_PRIMES ? "yes" : "no",
                  format_thousands(MEDIUM_NTA_MIN_PRIMES).c_str());
-    if (!BIG_2310 && !sparse_primes.empty()) std::fprintf(stderr, "  tier disperso en rueda mod 210 (--tune big2310=0)\n");
+    if (!BIG_2310 && !sparse_primes.empty()) std::fprintf(stderr, "  sparse tier on the mod-210 wheel (--tune big2310=0)\n");
     if (narrow_early) {
         unsigned narrow_chunks = 0;
         for (const auto& r : ranges) narrow_chunks += r.high <= narrow_k_end;
-        std::fprintf(stderr, "  segmento estrecho (%llu) hasta %llu: %u de %u chunks\n",
+        std::fprintf(stderr, "  narrow segment (%llu) up to %llu: %u of %u chunks\n",
                      static_cast<unsigned long long>(narrow.width * WHEEL_MOD / WHEEL_SIZE),
                      static_cast<unsigned long long>(std::min(opt.limit, narrow.width * narrow.width)),
                      narrow_chunks, num_chunks);
@@ -732,7 +732,7 @@ int main(int argc, char** argv) {
             {
                 std::atomic<uint64_t> progress{0};
                 std::atomic<bool> done{false};
-                std::thread prog(print_progress, std::cref(C), "contando", std::ref(progress), total_span, std::ref(done));
+                std::thread prog(print_progress, std::cref(C), "counting", std::ref(progress), total_span, std::ref(done));
                 ProgressGuard guard{done, prog};
 
                 run_parallel_chunks(actual_threads, num_chunks, [&](unsigned i) {
@@ -754,11 +754,11 @@ int main(int argc, char** argv) {
             double total_mprimes = total_s > 0 ? (total_primes / 1e6 / total_s) : 0.0;
 
             std::string range_desc = range_start
-                ? "en [" + format_thousands(range_start) + ", " + format_thousands(opt.limit) + "]"
-                : "hasta " + format_thousands(opt.limit);
+                ? "in [" + format_thousands(range_start) + ", " + format_thousands(opt.limit) + "]"
+                : "up to " + format_thousands(opt.limit);
             std::fprintf(stderr,
-                "%sListo.%s %s%s%s primos encontrados %s.\n"
-                "  %stotal:%s      %s%.2fs%s (%s%.1f M primos/s%s)\n",
+                "%sDone.%s %s%s%s primes found %s.\n"
+                "  %stotal:%s      %s%.2fs%s (%s%.1f M primes/s%s)\n",
                 C.headline, C.reset,
                 C.bold, format_thousands(total_primes).c_str(), C.reset,
                 range_desc.c_str(),
@@ -786,7 +786,7 @@ int main(int argc, char** argv) {
             {
                 std::atomic<uint64_t> progress{0};
                 std::atomic<bool> done{false};
-                std::thread prog(print_progress, std::cref(C), "escribiendo", std::ref(progress), total_span, std::ref(done));
+                std::thread prog(print_progress, std::cref(C), "writing", std::ref(progress), total_span, std::ref(done));
                 ProgressGuard guard{done, prog};
 
                 run_parallel_chunks(actual_threads, num_chunks, [&](unsigned i) {
@@ -812,8 +812,8 @@ int main(int argc, char** argv) {
             double bytes_per_prime = total_primes ? static_cast<double>(db_bytes) / total_primes : 0.0;
 
             std::fprintf(stderr,
-                "%sListo.%s %s%s%s primos encontrados hasta %s %s(%.2f GB, %.3f B/primo)%s.\n"
-                "  %stotal:%s      %s%6.2fs%s  (%s%.1f M primos/s%s)\n",
+                "%sDone.%s %s%s%s primes found up to %s %s(%.2f GB, %.3f B/prime)%s.\n"
+                "  %stotal:%s      %s%6.2fs%s  (%s%.1f M primes/s%s)\n",
                 C.headline, C.reset,
                 C.bold, format_thousands(total_primes).c_str(), C.reset,
                 format_thousands(opt.limit).c_str(),
@@ -829,7 +829,7 @@ int main(int argc, char** argv) {
         {
             std::atomic<uint64_t> progress{0};
             std::atomic<bool> done{false};
-            std::thread prog(print_progress, std::cref(C), "contando", std::ref(progress), total_span, std::ref(done));
+            std::thread prog(print_progress, std::cref(C), "counting", std::ref(progress), total_span, std::ref(done));
             ProgressGuard guard{done, prog};
 
             run_parallel_chunks(actual_threads, num_chunks, [&](unsigned i) {
@@ -858,7 +858,7 @@ int main(int argc, char** argv) {
 
         int fd = ::open(opt.output.c_str(), O_WRONLY);
         if (fd < 0) {
-            std::fprintf(stderr, "Error: no se pudo abrir %s para escritura\n", opt.output.c_str());
+            std::fprintf(stderr, "Error: could not open %s for writing\n", opt.output.c_str());
             return 1;
         }
 
@@ -866,7 +866,7 @@ int main(int argc, char** argv) {
         {
             std::atomic<uint64_t> progress{0};
             std::atomic<bool> done{false};
-            std::thread prog(print_progress, std::cref(C), "escribiendo", std::ref(progress), total_span, std::ref(done));
+            std::thread prog(print_progress, std::cref(C), "writing", std::ref(progress), total_span, std::ref(done));
             ProgressGuard guard{done, prog};
 
             try {
@@ -891,10 +891,10 @@ int main(int argc, char** argv) {
         double total_mprimes = total_s > 0 ? (total_primes / 1e6 / total_s) : 0.0;
 
         std::fprintf(stderr,
-            "%sListo.%s %s%s%s primos encontrados hasta %s %s(%.2f GB)%s.\n"
-            "  %sconteo:%s     %s%6.2fs%s  (%s%.1f M primos/s%s)\n"
-            "  %sescritura:%s  %s%6.2fs%s  (%s%.2f GB/s%s)\n"
-            "  %stotal:%s      %s%6.2fs%s  (%s%.1f M primos/s%s)\n",
+            "%sDone.%s %s%s%s primes found up to %s %s(%.2f GB)%s.\n"
+            "  %scount:%s      %s%6.2fs%s  (%s%.1f M primes/s%s)\n"
+            "  %swrite:%s      %s%6.2fs%s  (%s%.2f GB/s%s)\n"
+            "  %stotal:%s      %s%6.2fs%s  (%s%.1f M primes/s%s)\n",
             C.headline, C.reset,
             C.bold, format_thousands(total_primes).c_str(), C.reset,
             format_thousands(opt.limit).c_str(),

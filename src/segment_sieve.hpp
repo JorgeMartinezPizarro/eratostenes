@@ -59,23 +59,23 @@ public:
         // segment to start on a byte (k multiple of 8) and to stay a whole
         // number of words; callers align chunk starts to 64 too.
         if (seg_k_width % 64 != 0 || sub_block_bytes % 8 != 0 || sub_block_bytes == 0) {
-            throw std::runtime_error("SegmentSieve: ancho de segmento/sub-bloque no alineado");
+            throw std::runtime_error("SegmentSieve: segment/sub-block width not aligned");
         }
         // Dense primes are p < seg_k_width, so their pending hit stays
         // within a few segment widths of the segment start (fits
         // DenseState::pos), and p / 30 has to fit its packed qp field.
         if (seg_k_width / WHEEL_MOD >= erat::QP_LIMIT || seg_k_width >= (uint64_t{1} << 30)) {
-            throw std::runtime_error("SegmentSieve: segmento demasiado grande para el estado denso empaquetado");
+            throw std::runtime_error("SegmentSieve: segment too large for the packed dense state");
         }
         // Medium tier packs a pending hit's byte position into 26 bits
         // (erat_small.hpp::cross_off_medium): at most one segment plus one
         // step of a medium prime (p < seg_k_width, step <= qp * 10 + 16).
         if (seg_k_width / 8 + seg_k_width / WHEEL_MOD * 10 + 16 >= erat::MEDIUM_POS_LIMIT) {
-            throw std::runtime_error("SegmentSieve: segmento demasiado grande para el estado del tier medio");
+            throw std::runtime_error("SegmentSieve: segment too large for the medium-tier state");
         }
         uint64_t sb = seg_k_width_ / 8; // segment width in bytes
         if (has_sparse && (sb & (sb - 1))) {
-            throw std::runtime_error("SegmentSieve: el tier disperso (EratBig) necesita un segmento potencia de 2 (bytes)");
+            throw std::runtime_error("SegmentSieve: the sparse tier (EratBig) needs a power-of-2 segment (bytes)");
         }
         log2_sb_ = 0;
         while ((uint64_t{1} << log2_sb_) < sb) ++log2_sb_;
@@ -87,7 +87,7 @@ public:
         // mod-2310 (big2310_): max(dm) = 14, and the packed entry (see
         // activation) holds pos in 24 bits and qp in 28.
         if (big2310_ && (log2_sb_ > 24 || base_prime_max / WHEEL_MOD >= (uint64_t{1} << 28))) {
-            throw std::runtime_error("SegmentSieve: segmento o primo base demasiado grande para el tier disperso mod 2310");
+            throw std::runtime_error("SegmentSieve: segment or base prime too large for the mod-2310 sparse tier");
         }
         uint64_t maxstep = base_prime_max / WHEEL_MOD * (big2310_ ? 14 : 10) + 16;
         uint64_t ahead = (maxstep >> log2_sb_) + 2;
@@ -184,8 +184,8 @@ public:
                 uint64_t ahead = pos >> log2_sb_;
                 if (ahead >= num_buckets_) {
                     throw std::runtime_error(
-                        "bucket sieve: salto de un primo disperso mayor que el margen del anillo de "
-                        "cubos (bug de dimensionamiento en el constructor de SegmentSieve)");
+                        "bucket sieve: a sparse prime's step exceeds the bucket ring's margin "
+                        "(sizing bug in SegmentSieve's constructor)");
                 }
                 uint64_t ent = (ri * big::W2310 + w) | ((pos & ((uint64_t{1} << log2_sb_) - 1)) << 12) |
                                ((p / WHEEL_MOD) << 36);
@@ -207,8 +207,8 @@ public:
             e.pos = static_cast<uint32_t>(pos & ((uint64_t{1} << log2_sb_) - 1));
             if (ahead >= num_buckets_) {
                 throw std::runtime_error(
-                    "bucket sieve: salto de un primo disperso mayor que el margen del anillo de "
-                    "cubos (bug de dimensionamiento en el constructor de SegmentSieve)");
+                    "bucket sieve: a sparse prime's step exceeds the bucket ring's margin "
+                    "(sizing bug in SegmentSieve's constructor)");
             }
             push_sparse_entry(static_cast<uint32_t>((cur_segment_ + ahead) & (num_buckets_ - 1)), e);
             ++next_sparse_idx_;
@@ -440,7 +440,7 @@ private:
             } else {
                 uint32_t d = qp - qp_last[pr];
                 if (d > 255) {
-                    throw std::runtime_error("SegmentSieve: salto entre primos medianos de la misma clase > 255*30");
+                    throw std::runtime_error("SegmentSieve: gap between same-class medium primes > 255*30");
                 }
                 qds[pr].push_back(static_cast<uint8_t>(d));
             }

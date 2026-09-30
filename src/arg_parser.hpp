@@ -292,7 +292,7 @@ struct Options {
 // Interprets suffixes: k=1e3 m=1e6 b=1e9 (short scale billion) t=1e12
 // Also accepts scientific notation (1e11) and plain numbers (100000000000)
 inline uint64_t parse_size(const std::string& raw) {
-    if (raw.empty()) throw std::runtime_error("valor de tamano vacio");
+    if (raw.empty()) throw std::runtime_error("empty size value");
     std::string s = raw;
     char suffix = 0;
     char last = s.back();
@@ -300,15 +300,15 @@ inline uint64_t parse_size(const std::string& raw) {
         suffix = static_cast<char>(std::tolower(static_cast<unsigned char>(last)));
         s.pop_back();
     }
-    if (s.empty()) throw std::runtime_error("valor de tamano invalido: " + raw);
+    if (s.empty()) throw std::runtime_error("invalid size value: " + raw);
 
     double value;
     try {
         size_t pos = 0;
         value = std::stod(s, &pos);
-        if (pos != s.size()) throw std::runtime_error("valor de tamano invalido: " + raw);
+        if (pos != s.size()) throw std::runtime_error("invalid size value: " + raw);
     } catch (const std::exception&) {
-        throw std::runtime_error("valor de tamano invalido: " + raw);
+        throw std::runtime_error("invalid size value: " + raw);
     }
 
     double mult = 1.0;
@@ -320,11 +320,11 @@ inline uint64_t parse_size(const std::string& raw) {
         case 'g': mult = 1e9; break;   // giga, alias for b
         case 't': mult = 1e12; break;
         default:
-            throw std::runtime_error("sufijo desconocido en tamano: " + raw);
+            throw std::runtime_error("unknown size suffix: " + raw);
     }
     double result = value * mult;
     if (result < 0 || result > 1.8e19) {
-        throw std::runtime_error("tamano fuera de rango: " + raw);
+        throw std::runtime_error("size out of range: " + raw);
     }
     return static_cast<uint64_t>(std::llround(result));
 }
@@ -341,86 +341,85 @@ inline Options::Fraction parse_fraction(const std::string& key, const std::strin
         f.den = std::stoull(d, &pd);
         if (pn != n.size() || pd != d.size()) throw std::runtime_error("");
     } catch (const std::exception&) {
-        throw std::runtime_error("--tune " + key + ": se esperaba una fraccion a/b, no '" + v + "'");
+        throw std::runtime_error("--tune " + key + ": expected an a/b fraction, not '" + v + "'");
     }
-    if (f.den == 0) throw std::runtime_error("--tune " + key + ": denominador 0");
+    if (f.den == 0) throw std::runtime_error("--tune " + key + ": zero denominator");
     return f;
 }
 
 inline bool parse_switch(const std::string& key, const std::string& v, const char* on, const char* off) {
     if (v == on) return true;
     if (v == off) return false;
-    throw std::runtime_error("--tune " + key + ": se esperaba " + on + " o " + off + ", no '" + v + "'");
+    throw std::runtime_error("--tune " + key + ": expected " + on + " or " + off + ", not '" + v + "'");
 }
 
 inline void parse_tune(Options& opt, const std::string& kv) {
     const size_t eq = kv.find('=');
-    if (eq == std::string::npos) throw std::runtime_error("--tune espera clave=valor, no '" + kv + "'");
+    if (eq == std::string::npos) throw std::runtime_error("--tune expects key=value, not '" + kv + "'");
     const std::string k = kv.substr(0, eq), v = kv.substr(eq + 1);
     if (k == "small") opt.tune_small = parse_fraction(k, v);
     else if (k == "med64") opt.tune_med64 = parse_fraction(k, v);
     else if (k == "sparse") opt.tune_sparse = parse_fraction(k, v);
     else if (k == "big2310") opt.big2310 = parse_switch(k, v, "1", "0");
-    else throw std::runtime_error("--tune: clave desconocida '" + k + "' (small, med64, sparse, big2310)");
+    else throw std::runtime_error("--tune: unknown key '" + k + "' (small, med64, sparse, big2310)");
 }
 
 inline void print_usage(const char* prog) {
     std::fprintf(stderr,
-        "Uso: %s N [opciones]\n"
+        "Usage: %s N [options]\n"
         "\n"
-        "Criba de Eratostenes segmentada y paralela. Sin -o/--output, solo\n"
-        "cuenta los primos hasta N (inclusive) -- no escribe ningun fichero.\n"
-        "Con -o, los escribe uno por linea en texto plano, o si PATH termina\n"
-        "en .db, en un fichero SQLite compacto (gaps entre primos\n"
-        "consecutivos, codificados a 1 byte y comprimidos con zstd por\n"
-        "bloques), consultable por posicion con el binario nth_prime.\n"
+        "Segmented, parallel Sieve of Eratosthenes. Without -o/--output it\n"
+        "only counts the primes up to N (inclusive) -- no file is written.\n"
+        "With -o it writes them one per line as plain text, or, if PATH ends\n"
+        "in .db, into a compact SQLite file (gaps between consecutive\n"
+        "primes, 1-byte encoded and zstd-compressed in blocks), queryable by\n"
+        "position with the nth_prime binary.\n"
         "\n"
-        "Opciones:\n"
-        "  N                      Limite superior. Acepta sufijos\n"
-        "                         k/m/b/t (b = billon ingles = 1e9).\n"
-        "                         Ej: 100b = 1e11.\n"
-        "  -o, --output PATH      Fichero de salida. Sin esta opcion, solo\n"
-        "                         cuenta (no escribe nada). Si PATH termina\n"
-        "                         en .db, escribe SQLite en vez de texto\n"
-        "                         plano (ver arriba).\n"
-        "  -t, --threads N        Numero de hilos (default: nucleos disponibles)\n"
-        "  -s, --segment-width N  Ancho numerico de cada segmento\n"
-        "                         (default: auto, calculado a partir de N)\n"
-        "      --db-block-size N  Primos por bloque comprimido en modo .db\n"
+        "Options:\n"
+        "  N                      Upper limit. Accepts k/m/b/t suffixes\n"
+        "                         (b = billion = 1e9) and 1e11-style\n"
+        "                         notation. E.g. 100b = 1e11.\n"
+        "  -o, --output PATH      Output file. Without it, only counts\n"
+        "                         (writes nothing). If PATH ends in .db,\n"
+        "                         writes SQLite instead of plain text\n"
+        "                         (see above).\n"
+        "  -t, --threads N        Number of threads (default: available cores)\n"
+        "  -s, --segment-width N  Numeric width of each segment\n"
+        "                         (default: auto, derived from N and the L2)\n"
+        "      --db-block-size N  Primes per compressed block in .db mode\n"
         "                         (default: 65536)\n"
-        "      --zstd-level N     Nivel de compresion zstd en modo .db\n"
+        "      --zstd-level N     zstd compression level in .db mode\n"
         "                         (default: 1)\n"
-        "      --l2-bytes N       Fuerza el tamano de L2 usado para el ancho\n"
-        "                         de segmento automatico (default: auto-\n"
-        "                         detectado via /sys; usar si la deteccion\n"
-        "                         falla, p.ej. dentro de un contenedor)\n"
-        "      --l1-bytes N       Fuerza el tamano de L1 (datos) usado para el\n"
-        "                         sub-bloque de primos pequenos (mismo caso\n"
-        "                         que --l2-bytes)\n"
-        "  -h, --help             Muestra esta ayuda\n"
+        "      --l2-bytes N       Force the L2 size used for the automatic\n"
+        "                         segment width (default: auto-detected via\n"
+        "                         /sys; use it if detection fails, e.g.\n"
+        "                         inside a container)\n"
+        "      --l1-bytes N       Force the L1 (data) size used for the small\n"
+        "                         primes' sub-block (same case as --l2-bytes)\n"
+        "  -h, --help             Show this help\n"
         "\n"
-        "Benchmark (solo en modo conteo, sin -o):\n"
-        "      --start N0         Criba solo [N0, N]; el recuento es el de ese\n"
-        "                         tramo, no pi(N). Ej: N = 1e15 con\n"
-        "                         --start 990e12 es el ultimo 1%%\n"
-        "      --debug-idle       Imprime cuando termina cada hilo (inactividad)\n"
+        "Benchmarking (count mode only, without -o):\n"
+        "      --start N0         Sieve only [N0, N]; the count is that range's,\n"
+        "                         not pi(N). E.g. N = 1e15 with\n"
+        "                         --start 990e12 is the last 1%%\n"
+        "      --debug-idle       Print how far apart the threads finished\n"
         "\n"
-        "Ajuste fino (--tune clave=valor, repetible; ver docs/RESEARCH.md):\n"
-        "      small=a/b          Corte pequenos/med64 (default 1/4 del segmento)\n"
-        "      med64=a/b          Corte med64/medianos (default 1/12; 0 = sin med64)\n"
-        "      sparse=a/b         Corte medianos/dispersos, solo a la baja\n"
-        "                         (default 1/1, o 1/2 con L2 >= 512 KiB por hilo)\n"
-        "      big2310=1|0        Dispersos en rueda mod 2310 (default 1) o 210\n"
+        "Fine tuning (--tune key=value, repeatable; see docs/RESEARCH.md):\n"
+        "      small=a/b          Small/med64 cutoff (default 1/4 of the segment)\n"
+        "      med64=a/b          med64/medium cutoff (default 1/12; 0 = no med64)\n"
+        "      sparse=a/b         Medium/sparse cutoff, lowering only\n"
+        "                         (default 1/1, or 1/2 with >= 512 KiB L2 per thread)\n"
+        "      big2310=1|0        Sparse tier on the mod-2310 (default 1) or mod-210 wheel\n"
         "\n"
-        "La rueda (que primos se descartan de entrada) se fija en tiempo de\n"
-        "compilacion en src/wheel.hpp (WHEEL_PRIMES) -- ver ese fichero para\n"
-        "las configuraciones ya preparadas y por que no es un flag de CLI.\n"
+        "The wheel (which primes are skipped up front) is fixed at compile\n"
+        "time in src/wheel.hpp (WHEEL_PRIMES) -- see that file for the\n"
+        "prepared configurations and why it isn't a CLI flag.\n"
         "\n"
-        "Ejemplos:\n"
-        "  %s 1000000 -o primos_1M.txt\n"
-        "  %s 100b -o primos_100b.txt -t 12\n"
+        "Examples:\n"
+        "  %s 1000000 -o primes_1M.txt\n"
+        "  %s 100b -o primes_100b.txt -t 12\n"
         "  %s 100b -t 12\n"
-        "  %s 100b -o primos_100b.db -t 12\n"
+        "  %s 100b -o primes_100b.db -t 12\n"
         "  %s 1e15 --start 990e12 --debug-idle\n",
         prog, prog, prog, prog, prog, prog);
 }
@@ -428,7 +427,7 @@ inline void print_usage(const char* prog) {
 inline Options parse_args(int argc, char** argv) {
     Options opt;
     auto need_value = [&](int& i, const char* name) -> std::string {
-        if (i + 1 >= argc) throw std::runtime_error(std::string("falta valor para ") + name);
+        if (i + 1 >= argc) throw std::runtime_error(std::string("missing value for ") + name);
         return argv[++i];
     };
 
@@ -468,13 +467,13 @@ inline Options parse_args(int argc, char** argv) {
             opt.limit = parse_size(a);
             has_limit = true;
         } else {
-            throw std::runtime_error("argumento desconocido: " + a);
+            throw std::runtime_error("unknown argument: " + a);
         }
     }
 
     if (opt.show_help) return opt;
 
-    if (!has_limit) throw std::runtime_error("falta N (limite superior)");
+    if (!has_limit) throw std::runtime_error("missing N (upper limit)");
     if (opt.threads == 0) {
         opt.threads = std::max(1u, std::thread::hardware_concurrency());
     }

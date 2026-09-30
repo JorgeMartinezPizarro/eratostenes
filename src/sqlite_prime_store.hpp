@@ -159,7 +159,7 @@ private:
     void check(int rc, const char* what) {
         if (rc != SQLITE_OK) {
             std::string msg = std::string("sqlite ") + what + ": " +
-                               (db_ ? sqlite3_errmsg(db_) : "no se pudo abrir");
+                               (db_ ? sqlite3_errmsg(db_) : "could not open");
             throw std::runtime_error(msg);
         }
     }
@@ -167,9 +167,9 @@ private:
     void exec(const char* sql) {
         char* err = nullptr;
         if (sqlite3_exec(db_, sql, nullptr, nullptr, &err) != SQLITE_OK) {
-            std::string msg = err ? err : "error desconocido";
+            std::string msg = err ? err : "unknown error";
             sqlite3_free(err);
-            throw std::runtime_error("sqlite exec fallo (" + std::string(sql) + "): " + msg);
+            throw std::runtime_error("sqlite exec failed (" + std::string(sql) + "): " + msg);
         }
     }
 
@@ -181,7 +181,7 @@ private:
         sqlite3_bind_text(stmt, 2, value.c_str(), -1, SQLITE_TRANSIENT);
         int rc = sqlite3_step(stmt);
         sqlite3_finalize(stmt);
-        if (rc != SQLITE_DONE) throw std::runtime_error("sqlite: fallo insertando meta." + key);
+        if (rc != SQLITE_DONE) throw std::runtime_error("sqlite: failed inserting meta." + key);
     }
 
     void writer_loop() {
@@ -219,7 +219,7 @@ private:
         sqlite3_bind_int64(insert_stmt_, 3, static_cast<sqlite3_int64>(blk.count));
         sqlite3_bind_int64(insert_stmt_, 4, static_cast<sqlite3_int64>(blk.start_prime));
         if (sqlite3_step(insert_stmt_) != SQLITE_DONE) {
-            throw std::runtime_error(std::string("sqlite: fallo insertando bloque: ") + sqlite3_errmsg(db_));
+            throw std::runtime_error(std::string("sqlite: failed inserting block: ") + sqlite3_errmsg(db_));
         }
         sqlite3_int64 block_id = sqlite3_last_insert_rowid(db_);
 
@@ -228,7 +228,7 @@ private:
         sqlite3_bind_blob(insert_data_stmt_, 2, blk.compressed.data(),
                            static_cast<int>(blk.compressed.size()), SQLITE_TRANSIENT);
         if (sqlite3_step(insert_data_stmt_) != SQLITE_DONE) {
-            throw std::runtime_error(std::string("sqlite: fallo insertando datos de bloque: ") + sqlite3_errmsg(db_));
+            throw std::runtime_error(std::string("sqlite: failed inserting block data: ") + sqlite3_errmsg(db_));
         }
     }
 
@@ -259,7 +259,7 @@ private:
             sqlite3_bind_int64(stmt, 2, static_cast<sqlite3_int64>(i));
             if (sqlite3_step(stmt) != SQLITE_DONE) {
                 sqlite3_finalize(stmt);
-                throw std::runtime_error(std::string("sqlite: fallo corrigiendo start_index: ") + sqlite3_errmsg(db_));
+                throw std::runtime_error(std::string("sqlite: failed fixing start_index: ") + sqlite3_errmsg(db_));
             }
         }
         exec("COMMIT;");

@@ -285,7 +285,7 @@ inline Presieve build_presieve(const std::vector<std::vector<uint64_t>>& groups)
         ps.tables.push_back(build_presieve_table(filtered, ps.self_k));
     }
     if (ps.tables.size() > Presieve::MAX_TABLES) {
-        throw std::runtime_error("build_presieve: demasiados grupos de pre-criba");
+        throw std::runtime_error("build_presieve: too many presieve groups");
     }
     for (uint64_t sk : ps.self_k) ps.max_self_k = std::max(ps.max_self_k, sk);
     return ps;

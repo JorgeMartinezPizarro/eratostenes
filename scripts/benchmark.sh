@@ -127,11 +127,11 @@ for i in "${!NS[@]}"; do
         seg_args=()
         [ -n "$SEGMENT" ] && seg_args=(-s "$SEGMENT")
         out=$("$BIN" "$n" -t "$THREADS" "${seg_args[@]}" 2>&1)
-        t_e=$(echo "$out" | sed -nE 's/.*primos\), .*total: *([0-9.]+)s.*/\1/p')
-        # sed above only matches the "Iniciando..." + "total:" combined
+        t_e=$(echo "$out" | sed -nE 's/.*primes\), .*total: *([0-9.]+)s.*/\1/p')
+        # sed above only matches the "Starting..." + "total:" combined
         # blob in edge cases; fall back to a plain total: match.
         [ -z "$t_e" ] && t_e=$(echo "$out" | sed -nE 's/.*total: *([0-9.]+)s.*/\1/p')
-        count_e=$(echo "$out" | sed -nE 's/.*Listo\. ([0-9,]+) primos.*/\1/p' | tr -d ',')
+        count_e=$(echo "$out" | sed -nE 's/.*Done\. ([0-9,]+) primes.*/\1/p' | tr -d ',')
         if [ "$count_e" != "$expected" ]; then
             echo "n=$n rep=$r: eratostenes MAL: obtenido $count_e, esperado $expected" >&2
             exit 1
@@ -212,7 +212,7 @@ for i in "${!IO_SIZES[@]}"; do
         exit 1
     }
 
-    count=$(echo "$out" | sed -nE 's/.*Listo\. ([0-9,]+) primos.*/\1/p' | tr -d ',')
+    count=$(echo "$out" | sed -nE 's/.*Done\. ([0-9,]+) primes.*/\1/p' | tr -d ',')
     total_s=$(echo "$out" | sed -nE 's/.*total: *([0-9.]+)s.*/\1/p')
 
     if [ "$count" != "$expected" ]; then

@@ -59,7 +59,7 @@ check_count_only() {
     local n="$1" expected="$2" label="$3"; shift 3
     local output actual
     output=$("$BIN" "$n" "$@" 2>&1)
-    actual=$(echo "$output" | sed -nE 's/Listo\. ([0-9,]+) primos.*/\1/p' | tr -d ',')
+    actual=$(echo "$output" | sed -nE 's/Done\. ([0-9,]+) primes.*/\1/p' | tr -d ',')
     if [ "$actual" == "$expected" ]; then
         printf "OK   %-40s pi(N)=%s\n" "$label" "$actual"
     else
@@ -144,7 +144,7 @@ check_combo() {
     local out actual db actual_count ok=1
 
     out=$("$BIN" "$N3" "$@" 2>&1)
-    actual=$(echo "$out" | sed -nE 's/Listo\. ([0-9,]+) primos.*/\1/p' | tr -d ',')
+    actual=$(echo "$out" | sed -nE 's/Done\. ([0-9,]+) primes.*/\1/p' | tr -d ',')
     [ "$actual" == "$expected_pi_1e7" ] || ok=0
 
     db="$WORKDIR/combo.db"

@@ -19,7 +19,7 @@ struct Colors {
     const char* time;      // elapsed-time values
     const char* rate;      // primes/s values
     const char* io;        // disk throughput (GB/s) values
-    const char* headline;  // "Listo." line and the final total, made to stand out
+    const char* headline;  // "Done." line and the final total, made to stand out
 
     explicit Colors(bool on) {
         if (on) {
