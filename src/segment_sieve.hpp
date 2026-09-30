@@ -296,6 +296,31 @@ public:
         // loop; a local can't be aliased by anything, so it stays in a
         // register for the whole function.
         uint64_t local_prime_count = 0;
+        // count-only (NullSink): a plain popcount over the full words, four
+        // independent accumulators, and the partial last word masked once
+        // after the loop. The generic loop below checked "last word?" and
+        // "zero word?" on every word, which GCC kept as a cmove chain on the
+        // running sum: ~13 instructions per word instead of ~4, ~60% of
+        // sieve_chunk's own cycles on the i5-13500 (perf annotate, 1e14 tail).
+        if constexpr (!Writer::WANTS_VALUES) {
+            const uint64_t* wp = words_.data();
+            const size_t full = count / 64;
+            uint64_t c0 = 0, c1 = 0, c2 = 0, c3 = 0;
+            size_t w = 0;
+            for (; w + 4 <= full; w += 4) {
+                c0 += static_cast<uint64_t>(__builtin_popcountll(wp[w]));
+                c1 += static_cast<uint64_t>(__builtin_popcountll(wp[w + 1]));
+                c2 += static_cast<uint64_t>(__builtin_popcountll(wp[w + 2]));
+                c3 += static_cast<uint64_t>(__builtin_popcountll(wp[w + 3]));
+            }
+            for (; w < full; ++w) c0 += static_cast<uint64_t>(__builtin_popcountll(wp[w]));
+            // bit = 0 => prime: zeros among the full words, then the partial word's.
+            uint64_t primes = full * 64 - (c0 + c1 + c2 + c3);
+            if (const uint64_t rem = count % 64)
+                primes += static_cast<uint64_t>(__builtin_popcountll(~wp[full] & ((uint64_t{1} << rem) - 1)));
+            prime_count += primes;
+            return;
+        }
         for (size_t w = 0; w < words_needed; ++w) {
             uint64_t bits = ~words_[w];
             uint64_t base_idx = w * 64ULL;
@@ -304,14 +329,6 @@ public:
                 bits &= (remaining == 0) ? 0ULL : ((1ULL << remaining) - 1ULL);
             }
             if (bits == 0) continue;
-
-            // count-only (NullSink) never looks at the value written --
-            // skip straight to how many bits are set instead of decoding
-            // each one (ctz + wheel-index math) just to discard it below.
-            if constexpr (!Writer::WANTS_VALUES) {
-                local_prime_count += static_cast<uint64_t>(__builtin_popcountll(bits));
-                continue;
-            }
 
             uint64_t k_word_start = k_low + base_idx;
             uint64_t q = k_word_start / WHEEL_SIZE;
