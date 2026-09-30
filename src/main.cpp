@@ -124,17 +124,12 @@ static uint64_t SUB_BLOCK_BYTES = 32 * 1024;
 // their state (8 bytes each) outgrows the per-thread L3 share; set in main().
 static uint64_t MEDIUM_NTA_MIN_PRIMES = UINT64_MAX;
 
-// med64-tier prefetchnta (SegmentSieve::process_med64), on by default;
-// ERATOSTENES_MED64_NTA=0 turns it off (A/B).
-static bool MED64_NTA = true;
-
-// med64 on the mod-210 multiplier wheel (erat_small.hpp::cross_off_checked210),
-// on by default; ERATOSTENES_MED64_210=0 goes back to mod-30 (A/B).
-static bool MED64_210 = true;
-
 // Sparse tier on the mod-2310 multiplier wheel (SegmentSieve::process_big<true>),
-// on by default; ERATOSTENES_BIG_2310=0 goes back to mod-210 (A/B). See docs/RESEARCH.md.
+// on by default; --tune big2310=0 goes back to mod-210 (A/B). See docs/RESEARCH.md.
 static bool BIG_2310 = true;
+
+// --debug-idle: run_parallel_chunks prints how far apart the threads finished.
+static bool DEBUG_IDLE = false;
 
 struct ChunkRange {
     uint64_t low;   // first wheel index of the chunk (inclusive)
@@ -157,7 +152,7 @@ static std::vector<ChunkRange> split_ranges(uint64_t limit, unsigned threads, ui
     // Starts at k=0 (the number 1, cleared by SegmentSieve itself) rather
     // than k=1, and every chunk boundary is a multiple of 64: the
     // byte-addressed dense tiers (erat_small.hpp) need each segment to
-    // start on a word boundary. `start` > 0 (ERATOSTENES_START, see main)
+    // start on a word boundary. `start` > 0 (--start, see main)
     // sieves only the tail [start, limit], rounded down to that boundary.
     uint64_t k_start = start ? wheel_count_upto(start) / 64 * 64 : 0;
     uint64_t k_end = wheel_count_upto(limit);
@@ -193,7 +188,7 @@ static void sieve_chunk(ChunkRange range, uint64_t seg_k_width, uint64_t base_pr
                          Writer& out, uint64_t& local_count,
                          std::atomic<uint64_t>& progress) {
     SegmentSieve sieve(seg_k_width, base_prime_max, presieve, SUB_BLOCK_BYTES, !sparse_primes.empty(),
-                       medium_primes.size() >= MEDIUM_NTA_MIN_PRIMES, MED64_NTA, MED64_210, BIG_2310);
+                       medium_primes.size() >= MEDIUM_NTA_MIN_PRIMES, BIG_2310);
     sieve.begin_chunk();
     for (uint64_t k_low = range.low; k_low < range.high; k_low += seg_k_width) {
         uint64_t k_high = std::min(k_low + seg_k_width, range.high);
@@ -344,10 +339,9 @@ static void run_parallel_chunks(unsigned workers, unsigned num_chunks, Fn&& fn) 
     std::vector<std::exception_ptr> errors(workers);
     std::vector<std::thread> pool;
     pool.reserve(workers);
-    // ERATOSTENES_DEBUG_IDLE=1: per-thread finish timestamp, to check the
-    // shared-counter queue keeps every thread busy. See docs/RESEARCH.md
-    // (link above).
-    const bool debug_idle = std::getenv("ERATOSTENES_DEBUG_IDLE") != nullptr;
+    // --debug-idle: per-thread finish timestamp, to check the shared-counter
+    // queue keeps every thread busy. See docs/RESEARCH.md (link above).
+    const bool debug_idle = DEBUG_IDLE;
     auto t0 = std::chrono::steady_clock::now();
     std::vector<double> finish(debug_idle ? workers : 0);
     for (unsigned w = 0; w < workers; ++w) {
@@ -390,13 +384,15 @@ int main(int argc, char** argv) {
         print_usage(argv[0]);
         return 0;
     }
-    // ERATOSTENES_START (see below) is a count-only benchmarking aid: a
-    // partial .txt/.db would still get the wheel primes and, for .db,
+    // --start (see below) is a count-only benchmarking aid: a partial
+    // .txt/.db would still get the wheel primes and, for .db,
     // chunk-relative positions that aren't global prime indices.
-    if (std::getenv("ERATOSTENES_START") && !opt.output.empty()) {
-        std::fprintf(stderr, "Error: ERATOSTENES_START solo vale en modo conteo (sin -o).\n");
+    if (opt.start && !opt.output.empty()) {
+        std::fprintf(stderr, "Error: --start solo vale en modo conteo (sin -o).\n");
         return 1;
     }
+    DEBUG_IDLE = opt.debug_idle;
+    BIG_2310 = opt.big2310;
 
     const Colors C(stderr_supports_color());
 
@@ -448,14 +444,12 @@ int main(int argc, char** argv) {
     // need every segment to start on a word boundary.
     uint64_t seg_k_width = std::max<uint64_t>(64, (opt.segment_width * WHEEL_SIZE / WHEEL_MOD) / 64 * 64);
 
-    // small_limit's own divisor, joint-tuned with ERATOSTENES_MED64_NUM/_DEN
-    // below; default 1/4 (was 1/2 before med64 existed). Overridable via
-    // ERATOSTENES_SMALL_NUM/_DEN for further sweeps without recompiling.
+    // small_limit's own divisor, joint-tuned with med64_limit below; default
+    // 1/4 (was 1/2 before med64 existed). --tune small=a/b for sweeps on new
+    // hardware without recompiling.
     // See docs/RESEARCH.md#small_limit-re-tuned-jointly-with-med64_limit-kept-2026-09-26.
     uint64_t small_num = 1, small_den = 4;
-    if (const char* s = std::getenv("ERATOSTENES_SMALL_NUM")) small_num = std::strtoull(s, nullptr, 10);
-    if (const char* s = std::getenv("ERATOSTENES_SMALL_DEN")) small_den = std::strtoull(s, nullptr, 10);
-    if (small_den == 0) small_den = 4;
+    if (opt.tune_small.den) { small_num = opt.tune_small.num; small_den = opt.tune_small.den; }
 
     // The small tier is crossed off one sub-block at a time (see
     // SegmentSieve::sieve_and_emit); sub-block = half the machine's
@@ -541,7 +535,7 @@ int main(int argc, char** argv) {
     // docs/RESEARCH.md#eratbig-style-sparse-tier-forcing-a-power-of-2-segment-width-and-sparse_limit--seg_k_width4-all-attempts-reverted.
     // Detected from sysfs regardless of --l2-bytes (it's a property of the
     // hardware, not of the segment sizing); undetected -> 1/1.
-    // Overridable via ERATOSTENES_SPARSE_NUM/_DEN (lowering only).
+    // --tune sparse=a/b overrides it (lowering only).
     // Evaluated after the power-of-2 fixup below, like med64_limit.
     uint64_t min_l2_share = 0;
     for (uint64_t s : detect_cpu_cache_topology().l2_share)
@@ -549,8 +543,7 @@ int main(int argc, char** argv) {
     constexpr uint64_t SPARSE_HALF_MIN_L2_SHARE = 512 * 1024;
     uint64_t sparse_num = 1;
     uint64_t sparse_den = (sparse_regime && min_l2_share >= SPARSE_HALF_MIN_L2_SHARE) ? 2 : 1;
-    if (const char* s = std::getenv("ERATOSTENES_SPARSE_NUM")) sparse_num = std::strtoull(s, nullptr, 10);
-    if (const char* s = std::getenv("ERATOSTENES_SPARSE_DEN")) sparse_den = std::strtoull(s, nullptr, 10);
+    if (opt.tune_sparse.den) { sparse_num = opt.tune_sparse.num; sparse_den = opt.tune_sparse.den; }
     // Lowering only: dense-tier state is sized for p < seg_k_width (see
     // SegmentSieve's constructor checks).
     if (sparse_num == 0 || sparse_den == 0 || sparse_num > sparse_den) sparse_num = sparse_den = 1;
@@ -568,18 +561,16 @@ int main(int argc, char** argv) {
 
     // med64 tier: primes in [small_limit, med64_limit) use erat_small.hpp's
     // byte-marking cross_off<PR> (via SegmentSieve::process_med64), grouped
-    // into 64 (class, entry phase) lists -- a bounded sub-band close to
+    // into 384 (class, entry phase) lists -- a bounded sub-band close to
     // small_limit, not the whole medium tier (see
     // docs/RESEARCH.md#medium-tier-64-list-restructuring-scoped-to-a-bounded-sub-band-med64_primes-kept-2026-09-26
     // for why the whole-tier version was reverted first). med64_limit swept
-    // via ERATOSTENES_MED64_NUM/_DEN without recompiling; NUM=0 disables
+    // via --tune med64=a/b without recompiling; med64=0 disables
     // the tier, exactly reproducing the pre-med64 baseline. Default 1/12,
     // jointly re-tuned with small_limit's own divisor above -- see
     // docs/RESEARCH.md#small_limit-re-tuned-jointly-with-med64_limit-kept-2026-09-26.
     uint64_t med64_num = 1, med64_den = 12;
-    if (const char* s = std::getenv("ERATOSTENES_MED64_NUM")) med64_num = std::strtoull(s, nullptr, 10);
-    if (const char* s = std::getenv("ERATOSTENES_MED64_DEN")) med64_den = std::strtoull(s, nullptr, 10);
-    if (med64_den == 0) med64_den = 12;
+    if (opt.tune_med64.den) { med64_num = opt.tune_med64.num; med64_den = opt.tune_med64.den; }
     uint64_t med64_limit = seg_k_width * med64_num / med64_den;
     uint64_t sparse_limit = seg_k_width * sparse_num / sparse_den;
 
@@ -634,11 +625,9 @@ int main(int argc, char** argv) {
     // Its sparse list only holds primes that never activate there. narrow
     // is a power of 2 in bytes (half of the fixed-up wide width), as the
     // sparse ring requires. ~44% of a 1e13 run on a 256KiB/512KiB machine.
-    // ERATOSTENES_NARROW_EARLY=0 disables it (A/B).
     TierSet narrow{seg_k_width / 2, {}, {}, {}, {}};
     uint64_t narrow_k_end = 0; // chunks with high <= this use `narrow`
     bool narrow_early = !opt.segment_width_set && sparse_regime && narrow.width >= 64 && narrow.width % 64 == 0;
-    if (const char* s = std::getenv("ERATOSTENES_NARROW_EARLY")) narrow_early = narrow_early && std::strtoull(s, nullptr, 10) != 0;
     if (narrow_early) {
         classify(narrow, narrow.width * med64_num / med64_den, narrow.width);
         narrow_k_end = wheel_count_upto(std::min(opt.limit, narrow.width * narrow.width));
@@ -651,44 +640,42 @@ int main(int argc, char** argv) {
     // run_parallel_chunks for why: work per chunk isn't uniform across the
     // range) and hand them out from a shared queue instead of one static
     // chunk per thread.
-    // Floored so each chunk spans at least MIN_SEGS_PER_CHUNK segments: at
+    // Floored so each chunk spans at least MIN_SEGS_PER_CHUNK (4) segments: at
     // small N, threads*150 chunks would be narrower than one segment, and
     // per-chunk setup (SegmentSieve, re-activating every base prime) would
     // dominate. No effect at large N, where chunks span thousands of
     // segments. See
     // docs/RESEARCH.md#chunk-width-floor-at-least-4-segments-per-chunk-kept-2026-09-27.
     constexpr unsigned CHUNKS_PER_THREAD = 150;
-    uint64_t min_segs_per_chunk = 4;
-    if (const char* s = std::getenv("ERATOSTENES_MIN_SEGS_PER_CHUNK")) min_segs_per_chunk = std::strtoull(s, nullptr, 10);
-    // ERATOSTENES_MIN_SEGS_PER_CHUNK=0 disables the floor (exact old behavior).
-    uint64_t width_cap = min_segs_per_chunk == 0 ? UINT64_MAX
-        : wheel_count_upto(opt.limit) / (min_segs_per_chunk * seg_k_width);
+    constexpr uint64_t MIN_SEGS_PER_CHUNK = 4;
+    uint64_t width_cap = wheel_count_upto(opt.limit) / (MIN_SEGS_PER_CHUNK * seg_k_width);
     unsigned target_chunks = static_cast<unsigned>(std::max<uint64_t>(opt.threads,
         std::min<uint64_t>(uint64_t{opt.threads} * CHUNKS_PER_THREAD, width_cap)));
-    // ERATOSTENES_START=N0 (benchmarking only): sieve just [N0, N] instead
-    // of [0, N]. Every base prime is still activated for that range, so a
-    // tail of a large N costs exactly what the same segments cost in a full
-    // run -- e.g. the last 1% of 1e14 in about a minute instead of the
-    // whole run. The printed count (no -o) is then only for that tail, not
-    // pi(N).
-    uint64_t range_start = 0;
-    if (const char* s = std::getenv("ERATOSTENES_START")) range_start = static_cast<uint64_t>(std::strtod(s, nullptr));
-    if (range_start >= opt.limit) range_start = 0;
+    // --start N0 (benchmarking only): sieve just [N0, N] instead of [0, N].
+    // Every base prime is still activated for that range, so a tail of a
+    // large N costs exactly what the same segments cost in a full run --
+    // e.g. the last 1% of 1e14 in about a minute instead of the whole run.
+    // The printed count is then only for that tail, not pi(N).
+    uint64_t range_start = opt.start < opt.limit ? opt.start : 0;
     if (range_start) {
-        std::fprintf(stderr, "AVISO: ERATOSTENES_START=%llu -- solo se criba [%llu, %llu]; el recuento NO es pi(N).\n",
+        std::fprintf(stderr, "AVISO: --start %llu -- solo se criba [%llu, %llu]; el recuento NO es pi(N).\n",
                      static_cast<unsigned long long>(range_start), static_cast<unsigned long long>(range_start),
                      static_cast<unsigned long long>(opt.limit));
-        // Same chunk width as the full run, so per-chunk setup (activating
-        // every base prime) weighs what it does there.
-        double frac = 1.0 - static_cast<double>(wheel_count_upto(range_start)) / static_cast<double>(wheel_count_upto(opt.limit));
-        target_chunks = static_cast<unsigned>(std::max<double>(opt.threads, target_chunks * frac + 0.5));
-        // ERATOSTENES_TAIL_CHUNKS_PER_THREAD=K (benchmarking only): at least K
-        // chunks per thread, so short tails (1-2%) don't leave cores idle in
-        // their last round -- idle skews wall-clock and, on HT cores, also
-        // cycles:u (sibling occupancy). Per-chunk setup is ~4ms (RESEARCH.md).
-        if (const char* s = std::getenv("ERATOSTENES_TAIL_CHUNKS_PER_THREAD"))
-            target_chunks = static_cast<unsigned>(std::max<uint64_t>(target_chunks,
-                uint64_t{opt.threads} * std::strtoull(s, nullptr, 10)));
+        // Same chunk width as the full run where that still leaves every
+        // thread TAIL_CHUNKS_PER_THREAD chunks, so per-chunk setup (activating
+        // every base prime) weighs what it does there. Short tails get more,
+        // narrower chunks instead (never under MIN_SEGS_PER_CHUNK segments):
+        // the full run's width would leave ~1.5 chunks per thread in a 1% tail
+        // and cores idle in the last round (~20%), which skews wall-clock and,
+        // on HT cores, cycles:u too. 8/thread: 3.6% idle on a 1e15 1% tail
+        // (i5-13500, 20 threads); per-chunk setup is ~0.15% there.
+        constexpr uint64_t TAIL_CHUNKS_PER_THREAD = 8;
+        uint64_t span_k = wheel_count_upto(opt.limit) - wheel_count_upto(range_start);
+        double frac = static_cast<double>(span_k) / static_cast<double>(wheel_count_upto(opt.limit));
+        uint64_t scaled = static_cast<uint64_t>(target_chunks * frac + 0.5);
+        uint64_t floor_chunks = std::min<uint64_t>(uint64_t{opt.threads} * TAIL_CHUNKS_PER_THREAD,
+                                                   span_k / (MIN_SEGS_PER_CHUNK * seg_k_width));
+        target_chunks = static_cast<unsigned>(std::max<uint64_t>({uint64_t{opt.threads}, scaled, floor_chunks}));
     }
     auto ranges = split_ranges(opt.limit, target_chunks, range_start);
     unsigned num_chunks = static_cast<unsigned>(ranges.size());
@@ -701,18 +688,12 @@ int main(int argc, char** argv) {
     // per-thread L3 share, where it comes from DRAM anyway and keeping it out
     // of L2 only protects the segment. Dev PC (1 MB L3/thread): +0.8% at 1e12
     // (0.5 MB of state), -6.1% at 1e13 (1.6 MB), -12.1% at 1e14. See
-    // docs/RESEARCH.md. Undetected L3 -> 1 MiB. ERATOSTENES_MEDIUM_NTA=0/1
-    // forces it off/on.
+    // docs/RESEARCH.md. Undetected L3 -> 1 MiB.
     {
         uint64_t l3_share = detect_cpu_cache_share(0, 3);
         if (l3_share == 0) l3_share = 1024 * 1024;
         MEDIUM_NTA_MIN_PRIMES = l3_share / 8;
-        if (const char* s = std::getenv("ERATOSTENES_MEDIUM_NTA"))
-            MEDIUM_NTA_MIN_PRIMES = std::strtoull(s, nullptr, 10) ? 0 : UINT64_MAX;
     }
-    if (const char* s = std::getenv("ERATOSTENES_MED64_NTA")) MED64_NTA = std::strtoull(s, nullptr, 10) != 0;
-    if (const char* s = std::getenv("ERATOSTENES_MED64_210")) MED64_210 = std::strtoull(s, nullptr, 10) != 0;
-    if (const char* s = std::getenv("ERATOSTENES_BIG_2310")) BIG_2310 = std::strtoull(s, nullptr, 10) != 0;
 
     Presieve presieve = build_presieve(PRESIEVE_GROUPS);
 
@@ -725,17 +706,10 @@ int main(int argc, char** argv) {
                  WHEEL_PRIMES.size(),
                  small_primes.size(), static_cast<unsigned long long>(SUB_BLOCK_BYTES / 1024),
                  med64_primes.size(), medium_primes.size(), sparse_primes.size());
-    {
-        const char* nta = medium_primes.size() >= MEDIUM_NTA_MIN_PRIMES ? "si" : "no";
-        if (MEDIUM_NTA_MIN_PRIMES == 0 || MEDIUM_NTA_MIN_PRIMES == UINT64_MAX)
-            std::fprintf(stderr, "  prefetchnta del tier medio: %s (forzado por ERATOSTENES_MEDIUM_NTA)\n", nta);
-        else
-            std::fprintf(stderr, "  prefetchnta del tier medio: %s (a partir de %s primos medianos)\n", nta,
-                         format_thousands(MEDIUM_NTA_MIN_PRIMES).c_str());
-    }
-    if (!MED64_NTA) std::fprintf(stderr, "  prefetchnta del tier med64: no (ERATOSTENES_MED64_NTA=0)\n");
-    if (!MED64_210) std::fprintf(stderr, "  tier med64 en rueda mod 30 (ERATOSTENES_MED64_210=0)\n");
-    if (!BIG_2310 && !sparse_primes.empty()) std::fprintf(stderr, "  tier disperso en rueda mod 210 (ERATOSTENES_BIG_2310=0)\n");
+    std::fprintf(stderr, "  prefetchnta del tier medio: %s (a partir de %s primos medianos)\n",
+                 medium_primes.size() >= MEDIUM_NTA_MIN_PRIMES ? "si" : "no",
+                 format_thousands(MEDIUM_NTA_MIN_PRIMES).c_str());
+    if (!BIG_2310 && !sparse_primes.empty()) std::fprintf(stderr, "  tier disperso en rueda mod 210 (--tune big2310=0)\n");
     if (narrow_early) {
         unsigned narrow_chunks = 0;
         for (const auto& r : ranges) narrow_chunks += r.high <= narrow_k_end;
@@ -768,7 +742,7 @@ int main(int argc, char** argv) {
                 });
             } // guard destructs here: progress thread joined before the summary prints below
 
-            // With ERATOSTENES_START, only the wheel primes inside [range_start, N]
+            // With --start, only the wheel primes inside [range_start, N]
             // count (none, for any realistic start), so the tail total matches
             // e.g. `primesieve START N -c` exactly.
             uint64_t total_primes = 0;
@@ -808,7 +782,7 @@ int main(int argc, char** argv) {
             // for how start_index gets corrected to its true global value
             // afterwards, from these same counts.
             std::vector<uint64_t> prime_counts(num_chunks, 0);
-            SqlitePrimeStore store(opt.output);
+            SqlitePrimeStore store(opt.output, opt.db_journal_off);
             {
                 std::atomic<uint64_t> progress{0};
                 std::atomic<bool> done{false};

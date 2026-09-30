@@ -52,7 +52,7 @@ hit `pos += qp*dm + corr`, no division).
 The sparse tier goes one step further, to the 480 residues coprime to 2310: the
 presieve covers 11 as well, so multipliers divisible by 11 are redundant too
 (~9.1% fewer sparse hits). `big::TABLE2310` holds its rows as one 32-bit word
-(`mask | dm << 8 | corr << 16 | next << 20`, 15 KiB); `ERATOSTENES_BIG_2310=0`
+(`mask | dm << 8 | corr << 16 | next << 20`, 15 KiB); `--tune big2310=0`
 switches back to mod-210.
 The small tier stays on mod-30 multipliers: its unrolled loop depends on the
 8-hits-per-p-bytes cycle, and the mod-210 version tried lost (see
@@ -109,7 +109,7 @@ thread busy until the work genuinely runs out. 150 (not the more obvious-looking
 16) came out of an idle-time investigation on real target hardware -- see
 [RESEARCH.md](RESEARCH.md#run_parallel_chunks-chunk-granularity-idle-time-investigation-2026-09-25-external-review-opus-55).
 At small N the chunk count is capped so every chunk still spans at least 4
-segments (`ERATOSTENES_MIN_SEGS_PER_CHUNK`): each chunk re-creates its
+segments (`MIN_SEGS_PER_CHUNK`): each chunk re-creates its
 `SegmentSieve` and re-activates every base prime, and that setup would otherwise
 dominate. See `run_parallel_chunks` and `split_ranges` in `main.cpp`.
 
@@ -170,8 +170,8 @@ sparse, then extraction.
   double-buffered (`m64_cur_`/`m64_nxt_`): each segment reads one set and files
   every prime into the other by its new phase, so every call in one inner loop
   enters the cycle at the same phase and that entry switch is predictable.
-  `ERATOSTENES_MED64_210=0` switches back to the mod-30 version
-  (`cross_off_checked<PR>`, 64 lists). Applying the 64-list idea to
+  (The mod-30 version, `cross_off_checked<PR>` with 64 lists, was the default
+  until 2026-09-30 and has been removed.) Applying the 64-list idea to
   the *whole* medium tier was tried twice and reverted both times -- the medium
   population keeps growing with N and the footprint of 64 lists eventually costs
   more than it saves; a band next to `small_limit` saturates early and doesn't.
@@ -211,9 +211,8 @@ Finally, **extraction**: invert each word (bit = 0 means prime) and either
 The two cutoffs are tuned jointly (the lower bound of med64 *is* `small_limit`):
 `small_limit = sub-block / 4` (L1d/8: 6144 on a 48 KiB L1d) and `med64_limit =
 seg_k_width / 12`, re-confirmed after the sub-block moved to half the L1d. Both are
-overridable via `ERATOSTENES_SMALL_NUM`/`_DEN` and `ERATOSTENES_MED64_NUM`/`_DEN`
-for sweeps without recompiling; `ERATOSTENES_MED64_NUM=0` disables med64, giving
-the three-tier layout back. See [RESEARCH.md](RESEARCH.md) for the sweeps.
+overridable via `--tune small=a/b` and `--tune med64=a/b` for sweeps without
+recompiling; `--tune med64=0` disables med64, giving the three-tier layout back. See [RESEARCH.md](RESEARCH.md) for the sweeps.
 
 ### Where the time goes
 

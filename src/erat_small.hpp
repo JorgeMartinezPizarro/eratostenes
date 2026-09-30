@@ -61,7 +61,7 @@ constexpr uint64_t QP_LIMIT = uint64_t{1} << 26;
 // narrowing them from uint64_t was measured slower, not faster -- see
 // docs/RESEARCH.md.
 //
-// Small tier only (med64 uses cross_off_checked). Out of line, one call
+// Small tier only (med64 uses cross_off_checked210). Out of line, one call
 // per prime from cross_off_class: the layout every small-tier measurement
 // was taken on, which GCC stops choosing on its own once med64 no longer
 // shares this function.
@@ -127,57 +127,16 @@ done:
     j_io = j;
 }
 
-// Same contract as cross_off, primesieve EratMedium's loop shape: one
-// running byte index, one bounds check per hit, the switch jumping into
-// the middle of the 8-hit cycle. For the med64 tier (tens of hits per call):
-// its per-hit compare runs beside the store the loop is bound by, and the
-// call leaves at a single loop exit (~1 mispredict) instead of cross_off's
-// unrolled-loop exit plus data-dependent tail exit (~1.65), with no
-// per-call offset array.
-template <int PR>
-inline void cross_off_checked(uint8_t* s, uint64_t end, uint64_t qp, uint64_t& i_io, uint32_t& j_io) {
-    // Byte distance from hit j to hit j+1: qp*(R[j+1]-R[j]) plus a constant
-    // carry; from hit 7 to the next cycle's hit 0, p - (o7 - o0).
-    const uint64_t d0 = qp * (R[1] - R[0]) + C(PR, 1) - C(PR, 0);
-    const uint64_t d1 = qp * (R[2] - R[1]) + C(PR, 2) - C(PR, 1);
-    const uint64_t d2 = qp * (R[3] - R[2]) + C(PR, 3) - C(PR, 2);
-    const uint64_t d3 = qp * (R[4] - R[3]) + C(PR, 4) - C(PR, 3);
-    const uint64_t d4 = qp * (R[5] - R[4]) + C(PR, 5) - C(PR, 4);
-    const uint64_t d5 = qp * (R[6] - R[5]) + C(PR, 6) - C(PR, 5);
-    const uint64_t d6 = qp * (R[7] - R[6]) + C(PR, 7) - C(PR, 6);
-    const uint64_t d7 = qp * (30 + R[0] - R[7]) + R[PR] + C(PR, 0) - C(PR, 7);
-    uint64_t i = i_io;
-    uint32_t j;
-
-#define ERAT_CHK(J) \
-    case J: \
-        if (i >= end) { j = J; goto done; } \
-        s[i] |= M(PR, J); \
-        i += d##J;
-
-    switch (j_io) {
-        for (;;) {
-            ERAT_CHK(0) [[fallthrough]];
-            ERAT_CHK(1) [[fallthrough]];
-            ERAT_CHK(2) [[fallthrough]];
-            ERAT_CHK(3) [[fallthrough]];
-            ERAT_CHK(4) [[fallthrough]];
-            ERAT_CHK(5) [[fallthrough]];
-            ERAT_CHK(6) [[fallthrough]];
-            ERAT_CHK(7)
-        }
-    }
-#undef ERAT_CHK
-
-done:
-    i_io = i;
-    j_io = j;
-}
-
-// cross_off_checked on the mod-210 multiplier wheel (w = 0..47, M210[w]):
-// skips the 1/7 of mod-30 hits whose multiplier is a multiple of 7 (7 is
-// always presieved, and every med64 prime is > 163). Same shape -- switch
-// into a for (;;), one check per hit -- so there's no per-call offset table
+// med64 tier: same contract as cross_off, primesieve EratMedium's loop shape
+// -- one running byte index, one bounds check per hit, the switch jumping
+// into the middle of the cycle. For med64 (tens of hits per call) the
+// per-hit compare runs beside the store the loop is bound by, and the call
+// leaves at a single loop exit (~1 mispredict) instead of cross_off's
+// unrolled-loop exit plus data-dependent tail exit (~1.65).
+// On the mod-210 multiplier wheel (w = 0..47, M210[w]): skips the 1/7 of
+// mod-30 hits whose multiplier is a multiple of 7 (7 is always presieved,
+// and every med64 prime is > 163). Switch into a for (;;), one check per
+// hit -- so there's no per-call offset table
 // (what sank the earlier mod-210 med64 attempts): the byte step from phase w
 // to w+1 is qp*dm + corr with dm in {2,4,6,8,10}, so 5 multiples of qp in
 // registers plus compile-time constants (big::TABLE) cover all 48 cases.

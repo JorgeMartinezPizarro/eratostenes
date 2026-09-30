@@ -30,7 +30,7 @@
 
 class SqlitePrimeStore {
 public:
-    explicit SqlitePrimeStore(const std::string& path) {
+    explicit SqlitePrimeStore(const std::string& path, bool journal_off = false) : journal_off_(journal_off) {
         // PRAGMA page_size only takes effect on a page-less (brand new)
         // database, so any stale file at this path must go first. See
         // docs/RESEARCH.md#page-size-kept.
@@ -38,12 +38,10 @@ public:
 
         check(sqlite3_open(path.c_str(), &db_), "open");
         exec("PRAGMA page_size=4096;");
-        // ERATOSTENES_DB_JOURNAL=off (experimental, A/B only): no journal
-        // at all, so every page hits the disk once instead of twice (WAL,
-        // then copied into the .db at each checkpoint). A crash mid-run
+        // journal_off (--tune db-journal=off, experimental, A/B only): no
+        // journal at all, so every page hits the disk once instead of twice
+        // (WAL, then copied into the .db at each checkpoint). A crash mid-run
         // leaves a corrupt file, but a half-written .db is useless anyway.
-        const char* journal = std::getenv("ERATOSTENES_DB_JOURNAL");
-        journal_off_ = journal && std::string(journal) == "off";
         if (journal_off_) {
             exec("PRAGMA journal_mode=OFF;");
             exec("PRAGMA synchronous=OFF;");
@@ -275,7 +273,7 @@ private:
     }
 
     sqlite3* db_ = nullptr;
-    bool journal_off_ = false; // ERATOSTENES_DB_JOURNAL=off, see the constructor
+    bool journal_off_ = false; // --tune db-journal=off, see the constructor
     sqlite3_stmt* insert_stmt_ = nullptr;
     sqlite3_stmt* insert_data_stmt_ = nullptr;
 

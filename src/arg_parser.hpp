@@ -268,6 +268,26 @@ struct Options {
     // at startup.
     uint64_t l2_bytes_override = 0;
     uint64_t l1_bytes_override = 0;
+
+    // Benchmarking aids, count-only. --start N0 sieves just [N0, N]: every
+    // base prime is still activated, so a tail of a large N costs what the
+    // same segments cost in a full run (main.cpp sizes its chunks so no core
+    // idles). --debug-idle prints how far apart the threads finished.
+    uint64_t start = 0;
+    bool debug_idle = false;
+
+    // --tune key=value (see print_usage): tier cutoffs as fractions of the
+    // segment width (den == 0: built-in default), and the switches still
+    // under evaluation.
+    struct Fraction {
+        uint64_t num = 0;
+        uint64_t den = 0;
+    };
+    Fraction tune_small;  // small/med64 cutoff, default 1/4
+    Fraction tune_med64;  // med64/medium cutoff, default 1/12 (0 = no med64 tier)
+    Fraction tune_sparse; // medium/sparse cutoff, default 1/1 or 1/2 (main.cpp); lowering only
+    bool big2310 = true;         // sparse tier on the mod-2310 wheel (false: mod-210)
+    bool db_journal_off = false; // .db: PRAGMA journal_mode=OFF (sqlite_prime_store.hpp)
 };
 
 // Interprets suffixes: k=1e3 m=1e6 b=1e9 (short scale billion) t=1e12
@@ -310,6 +330,42 @@ inline uint64_t parse_size(const std::string& raw) {
     return static_cast<uint64_t>(std::llround(result));
 }
 
+// "a/b" or "a" (= a/1), for --tune's cutoff fractions.
+inline Options::Fraction parse_fraction(const std::string& key, const std::string& v) {
+    Options::Fraction f;
+    const size_t slash = v.find('/');
+    const std::string n = v.substr(0, slash);
+    const std::string d = slash == std::string::npos ? "1" : v.substr(slash + 1);
+    try {
+        size_t pn = 0, pd = 0;
+        f.num = std::stoull(n, &pn);
+        f.den = std::stoull(d, &pd);
+        if (pn != n.size() || pd != d.size()) throw std::runtime_error("");
+    } catch (const std::exception&) {
+        throw std::runtime_error("--tune " + key + ": se esperaba una fraccion a/b, no '" + v + "'");
+    }
+    if (f.den == 0) throw std::runtime_error("--tune " + key + ": denominador 0");
+    return f;
+}
+
+inline bool parse_switch(const std::string& key, const std::string& v, const char* on, const char* off) {
+    if (v == on) return true;
+    if (v == off) return false;
+    throw std::runtime_error("--tune " + key + ": se esperaba " + on + " o " + off + ", no '" + v + "'");
+}
+
+inline void parse_tune(Options& opt, const std::string& kv) {
+    const size_t eq = kv.find('=');
+    if (eq == std::string::npos) throw std::runtime_error("--tune espera clave=valor, no '" + kv + "'");
+    const std::string k = kv.substr(0, eq), v = kv.substr(eq + 1);
+    if (k == "small") opt.tune_small = parse_fraction(k, v);
+    else if (k == "med64") opt.tune_med64 = parse_fraction(k, v);
+    else if (k == "sparse") opt.tune_sparse = parse_fraction(k, v);
+    else if (k == "big2310") opt.big2310 = parse_switch(k, v, "1", "0");
+    else if (k == "db-journal") opt.db_journal_off = !parse_switch(k, v, "on", "off");
+    else throw std::runtime_error("--tune: clave desconocida '" + k + "' (small, med64, sparse, big2310, db-journal)");
+}
+
 inline void print_usage(const char* prog) {
     std::fprintf(stderr,
         "Uso: %s N [opciones]\n"
@@ -345,6 +401,20 @@ inline void print_usage(const char* prog) {
         "                         que --l2-bytes)\n"
         "  -h, --help             Muestra esta ayuda\n"
         "\n"
+        "Benchmark (solo en modo conteo, sin -o):\n"
+        "      --start N0         Criba solo [N0, N]; el recuento es el de ese\n"
+        "                         tramo, no pi(N). Ej: N = 1e15 con\n"
+        "                         --start 990e12 es el ultimo 1%%\n"
+        "      --debug-idle       Imprime cuando termina cada hilo (inactividad)\n"
+        "\n"
+        "Ajuste fino (--tune clave=valor, repetible; ver docs/RESEARCH.md):\n"
+        "      small=a/b          Corte pequenos/med64 (default 1/4 del segmento)\n"
+        "      med64=a/b          Corte med64/medianos (default 1/12; 0 = sin med64)\n"
+        "      sparse=a/b         Corte medianos/dispersos, solo a la baja\n"
+        "                         (default 1/1, o 1/2 con L2 >= 512 KiB por hilo)\n"
+        "      big2310=1|0        Dispersos en rueda mod 2310 (default 1) o 210\n"
+        "      db-journal=on|off  Journal de SQLite en modo .db (default on)\n"
+        "\n"
         "La rueda (que primos se descartan de entrada) se fija en tiempo de\n"
         "compilacion en src/wheel.hpp (WHEEL_PRIMES) -- ver ese fichero para\n"
         "las configuraciones ya preparadas y por que no es un flag de CLI.\n"
@@ -353,8 +423,9 @@ inline void print_usage(const char* prog) {
         "  %s 1000000 -o primos_1M.txt\n"
         "  %s 100b -o primos_100b.txt -t 12\n"
         "  %s 100b -t 12\n"
-        "  %s 100b -o primos_100b.db -t 12\n",
-        prog, prog, prog, prog, prog);
+        "  %s 100b -o primos_100b.db -t 12\n"
+        "  %s 1e15 --start 990e12 --debug-idle\n",
+        prog, prog, prog, prog, prog, prog);
 }
 
 inline Options parse_args(int argc, char** argv) {
@@ -384,6 +455,12 @@ inline Options parse_args(int argc, char** argv) {
             opt.l2_bytes_override = parse_size(need_value(i, a.c_str()));
         } else if (a == "--l1-bytes") {
             opt.l1_bytes_override = parse_size(need_value(i, a.c_str()));
+        } else if (a == "--start") {
+            opt.start = parse_size(need_value(i, a.c_str()));
+        } else if (a == "--debug-idle") {
+            opt.debug_idle = true;
+        } else if (a == "--tune") {
+            parse_tune(opt, need_value(i, a.c_str()));
         } else if (!a.empty() && a[0] != '-' && !has_limit) {
             // Bare positional limit (./eratostenes 1t -c), primesieve-style
             // -- the only way to give it; there's no -n/--limit flag (one

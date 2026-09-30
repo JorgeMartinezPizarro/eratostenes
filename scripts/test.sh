@@ -1,5 +1,5 @@
 #!/bin/bash
-# Prueba de regresion, cuatro partes:
+# Prueba de regresion, cinco partes:
 #   1. Compara pi(N) contra primecount (--nth-prime/plain, independiente de
 #      este proyecto -- ver https://github.com/kimwalisch/primecount) para
 #      N = 1e8..1e11, sin -o (modo conteo, sin E/S a disco).
@@ -7,15 +7,19 @@
 #      ancla mas varios cientos de posiciones aleatorias, todas contra
 #      primecount --nth-prime (ver README, seccion ".db output").
 #   3. Varias combinaciones de -t/-s/--l1-bytes/--l2-bytes/--db-block-size/
-#      --zstd-level a la vez (no una por una) en un N pequeño (1e7), cada
-#      una sin -o (modo conteo) y en .db: ninguna deberia cambiar el
+#      --zstd-level/--tune a la vez (no una por una) en un N pequeño (1e7),
+#      cada una sin -o (modo conteo) y en .db: ninguna deberia cambiar el
 #      resultado, solo como se calcula o se empaqueta.
 #   4. Round-trip texto vs .db en N=1e5..1e7: mismo pi(N) y, posicion por
 #      posicion (todas en el N mas chico, una muestra aleatoria en los
 #      demas -- comprobar cada posicion via nth_prime implica un proceso
 #      por consulta, caro a partir de cientos de miles de primos), el mismo
 #      primo en ambos formatos (antes scripts/verify_db.sh, fusionado aqui).
-# Los valores esperados en 1, 2 y 3 salen de primecount, no de constantes
+#   5. Modo conteo en N=1e10 contra primecount con los caminos que solo
+#      aparecen con N grande o -s pequeño (tier disperso forzado, en rueda
+#      mod 2310 y mod 210; sin med64; cortes rebajados, combinados), y
+#      --start sobre varios tramos (el recuento es pi(N) - pi(N0 - 1)).
+# Los valores esperados en 1, 2, 3 y 5 salen de primecount, no de constantes
 # hardcodeadas -- necesita estar instalado (Debian/Ubuntu: paquete
 # primecount-bin; ver docker/Dockerfile, etapa "dev").
 # Pensado para `make test`, pero tambien se puede correr suelto
@@ -171,6 +175,9 @@ check_combo "combo 1h/cache chica/bloque chico" -t 1 -s 2000 --l1-bytes 16384 --
 check_combo "combo 2h/segmento grande/bloque grande" -t 2 -s 5000000 --db-block-size 500000 --zstd-level 1
 check_combo "combo cache forzada grande"       -t "$THREADS" --l1-bytes 1048576 --l2-bytes 8388608 --db-block-size 65536 --zstd-level 9
 check_combo "combo segmento minimo"            -t "$THREADS" -s 64 --db-block-size 100 --zstd-level 1
+check_combo "combo disperso mod 210/sin journal" -t 3 -s 2000 --tune big2310=0 --tune db-journal=off --db-block-size 1000
+check_combo "combo cortes rebajados"           -t "$THREADS" -s 100000 --tune small=1/2 --tune med64=1/8 --tune sparse=1/2
+check_combo "combo sin med64/disperso"         -t 2 -s 2000 --tune med64=0 --zstd-level 3
 
 # --- 4: round-trip texto vs .db, posicion por posicion ---
 NS2=(100000 1000000 10000000)
@@ -220,6 +227,32 @@ for i in "${!NS2[@]}"; do
         fail=1
     fi
 done
+
+
+# --- 5: caminos de N grande y --start, modo conteo, contra primecount ---
+N5=10000000000
+expected_pi_1e10=$("$PRIMECOUNT" "$N5")
+check_count_only "$N5" "$expected_pi_1e10" "disperso forzado (mod 2310)"   -t "$THREADS" -s 100000
+check_count_only "$N5" "$expected_pi_1e10" "disperso forzado (mod 210)"    -t "$THREADS" -s 100000 --tune big2310=0
+check_count_only "$N5" "$expected_pi_1e10" "sin med64, disperso forzado"   -t 5 -s 500000 --tune med64=0
+check_count_only "$N5" "$expected_pi_1e10" "cortes small/med64/sparse"     -t "$THREADS" --tune small=1/8 --tune med64=1/6 --tune sparse=1/4
+
+# --start N0: el recuento es el del tramo [N0, N], pi(N) - pi(N0 - 1).
+check_start() {
+    local n="$1" n0="$2"; shift 2
+    local expected=$(( $("$PRIMECOUNT" "$n") - $("$PRIMECOUNT" $(( n0 - 1 ))) ))
+    check_count_only "$n" "$expected" "--start $n0 (N=$n) $*" --start "$n0" "$@"
+}
+check_start "$N5" 9000000000 -t "$THREADS"
+check_start "$N5" 9999000001 -t 3 -s 100000
+check_start 1000000 2 -t "$THREADS"
+check_start 100000000 7 -t 2 --tune big2310=0 -s 20000
+if "$BIN" 1000000 --start 1000 -o "$WORKDIR/start.txt" >/dev/null 2>&1; then
+    printf "FAIL %-40s deberia rechazarse\n" "--start con -o"
+    fail=1
+else
+    printf "OK   %-40s rechazado\n" "--start con -o"
+fi
 
 if [ "$fail" -eq 0 ]; then
     echo "Todas las pruebas OK."

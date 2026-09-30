@@ -162,14 +162,13 @@ docker:
 # `docker compose run` asigna TTY automaticamente cuando la terminal que
 # invoca es interactiva (ver -T/--no-TTY en `docker compose run --help`),
 # a diferencia de `docker run`, que no lo hace salvo que se le pida -t.
-# -e ERATOSTENES_DEBUG_IDLE forwards that var IF set in the host shell
-# (see run_parallel_chunks in main.cpp) -- `docker compose run` doesn't
-# forward the host environment on its own, has to be told which vars to
-# pass through, same as THREADS below for docker-test/docker-benchmark.
+# Toda la configuracion va en ARGS como flags (ver --help), tambien las de
+# benchmark: --start, --debug-idle y --tune clave=valor.
 # Ejemplo: make run ARGS="1e9 -o /output/primos.txt -t 8"
+# Ejemplo: make run ARGS="1e15 --start 990e12 --debug-idle"
 run:
 	mkdir -p $(OUT_DIR)
-	$(COMPOSE) run --rm -e ERATOSTENES_DEBUG_IDLE eratostenes $(ARGS)
+	$(COMPOSE) run --rm eratostenes $(ARGS)
 
 # PGO image: two-phase profile-guided build (see Makefile's own `pgo`
 # target for the flags/training rationale) baked in at `docker build`
@@ -188,12 +187,11 @@ run:
 docker-pgo:
 	$(COMPOSE) build eratostenes-pgo
 
-# Same calling convention as `run` above, against the PGO image instead,
-# including the ERATOSTENES_DEBUG_IDLE forwarding.
+# Same calling convention as `run` above, against the PGO image instead.
 # Ejemplo: make run-pgo ARGS="1e11 -t 8"
 run-pgo:
 	mkdir -p $(OUT_DIR)
-	$(COMPOSE) run --rm -e ERATOSTENES_DEBUG_IDLE eratostenes-pgo $(ARGS)
+	$(COMPOSE) run --rm eratostenes-pgo $(ARGS)
 
 # Consulta un .db con nth_prime dentro de la imagen (su ENTRYPOINT es
 # eratostenes, de ahi el --entrypoint). Mismo montaje que `run`: el .db

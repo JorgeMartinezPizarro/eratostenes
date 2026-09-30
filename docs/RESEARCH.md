@@ -8,6 +8,18 @@ there. Design rationale for the code as it stands today still lives next to the
 code (see [ALGORITHM.md](ALGORITHM.md)); this file is the "what else was tried and
 why it didn't stick" record.
 
+**Knobs named below:** until 2026-10-01 the A/B switches were `ERATOSTENES_*`
+environment variables. They're gone now: the benchmark ones became flags
+(`ERATOSTENES_START` -> `--start`, `ERATOSTENES_DEBUG_IDLE` -> `--debug-idle`;
+`ERATOSTENES_TAIL_CHUNKS_PER_THREAD` is automatic, 8 chunks per thread with
+`--start`), the still-useful ones became `--tune` keys (`SMALL_NUM/_DEN` ->
+`small=a/b`, `MED64_NUM/_DEN` -> `med64=a/b`, `SPARSE_NUM/_DEN` -> `sparse=a/b`,
+`BIG_2310` -> `big2310=0|1`, `DB_JOURNAL` -> `db-journal=on|off`), and the ones whose
+decision was settled were removed together with the code they switched off
+(`MED64_210` and the mod-30 med64 tier, `MED64_NTA`, `MEDIUM_NTA`'s override,
+`NARROW_EARLY`, `MIN_SEGS_PER_CHUNK`). The entries keep the names they were
+measured with.
+
 Unless noted otherwise, measurements are from the project's dev PC (i5-11400F, 6C/
 12T, no E-cores) using `perf stat cycles:u` (not wall-clock -- see the project's own
 lesson on why cycles:u is trusted over wall-clock on contended machines, referenced
@@ -1728,7 +1740,7 @@ With `journal_mode=WAL` every page is written twice: into the `-wal` file, then 
 back and copied into the `.db` at each checkpoint. After the wheel-index gaps cut
 the server's 1e13 `.db` from 216 to 190 GB with no clear change in time (~930-950s,
 ~200-250 MB/s), that double write became the main suspect. `ERATOSTENES_DB_JOURNAL=off`
-(experimental knob, default unchanged) sets `journal_mode=OFF` + `synchronous=OFF`
+(experimental knob, default unchanged; now `--tune db-journal=off`) sets `journal_mode=OFF` + `synchronous=OFF`
 and skips the final checkpoint; a crash mid-run corrupts the file, but a partial
 `.db` is useless anyway. The knobs measured earlier in this section tuned the WAL;
 none removed it.
