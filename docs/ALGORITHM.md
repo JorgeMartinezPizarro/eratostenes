@@ -41,15 +41,16 @@ comment has the historical measurements).
 
 The wheel that numbers the *bits* (mod 30) is separate from the wheel that steps a
 prime's *multipliers*. Every marking prime is > 163, and the presieve (§3) always
-covers 7, so a multiple `p*m` with `7 | m` is already marked. The medium and sparse
-tiers therefore step `m` only through the 48 residues coprime to 210 instead of the
-8 coprime to 30, skipping ~14% of hits. `wheel210_big.hpp` holds the tables for
-that: `big::TABLE` (sparse tier: mask, byte step and next phase per (class,
-phase)) and the same data packed one word per (class, phase) for the medium tier
-(`PACK210[pr][w] = mask | dm << 8 | corr << 16`: hit = `s[pos] |= mask`, next hit
-`pos += qp*dm + corr`, no division).
-The small and med64 tiers stay on mod-30 multipliers: their unrolled loops depend
-on the 8-hits-per-p-bytes cycle, and both mod-210 versions tried so far lost (see
+covers 7, so a multiple `p*m` with `7 | m` is already marked. The med64, medium
+and sparse tiers therefore step `m` only through the 48 residues coprime to 210
+instead of the 8 coprime to 30, skipping ~14% of hits. `wheel210_big.hpp` holds
+the tables for that: `big::TABLE` (mask, byte step and next phase per (class,
+phase); med64 reads it as compile-time constants, the sparse tier as one packed
+word per row) and the same data packed one word per (class, phase) for the medium
+tier (`PACK210[pr][w] = mask | dm << 8 | corr << 16`: hit = `s[pos] |= mask`, next
+hit `pos += qp*dm + corr`, no division).
+The small tier stays on mod-30 multipliers: its unrolled loop depends on the
+8-hits-per-p-bytes cycle, and the mod-210 version tried lost (see
 [RESEARCH.md](RESEARCH.md#erat_smallhpp)).
 
 ## 3. Presieve (`presieve.hpp`)
@@ -151,16 +152,21 @@ sparse, then extraction.
   `end`. One list per residue class (`small_[8]`) keeps `PR` a template parameter
   instead of a per-prime branch. Pending hits are rebased once, at the segment's
   last sub-block.
-- **med64** (`small_limit <= p < med64_limit`): byte marking with the same
-  constant masks, but over the whole segment in one pass (these primes have
-  too few hits per sub-block to amortize a call per sub-block), with
-  primesieve EratMedium's loop shape (`cross_off_checked<PR>`): one running
-  index and one bounds check per hit, so each call leaves at a single loop
-  exit instead of the small tier's unrolled-cycle exit plus tail exit. Primes are kept in
-  64 lists keyed by (residue class, entry phase), double-buffered (`m64_cur_`/
-  `m64_nxt_`): each segment reads one set and files every prime into the other by
-  its new phase, so every call in one inner loop enters the unrolled cycle at the
-  same phase and that entry switch is predictable. Applying the 64-list idea to
+- **med64** (`small_limit <= p < med64_limit`): byte marking over the whole
+  segment in one pass (these primes have too few hits per sub-block to amortize
+  a call per sub-block), with primesieve EratMedium's loop shape
+  (`cross_off_checked210<PR>`): one running index and one bounds check per hit,
+  so each call leaves at a single loop exit instead of the small tier's
+  unrolled-cycle exit plus tail exit. It steps on the mod-210 multiplier wheel
+  (§2): the step from phase w to w+1 is `qp*dm + corr` with dm in {2,4,6,8,10},
+  so five multiples of `qp` in registers plus per-case compile-time constants
+  cover all 48 phases, with no per-call table (what sank the earlier mod-210
+  attempts). Primes are kept in 384 lists keyed by (residue class, entry phase),
+  double-buffered (`m64_cur_`/`m64_nxt_`): each segment reads one set and files
+  every prime into the other by its new phase, so every call in one inner loop
+  enters the cycle at the same phase and that entry switch is predictable.
+  `ERATOSTENES_MED64_210=0` switches back to the mod-30 version
+  (`cross_off_checked<PR>`, 64 lists). Applying the 64-list idea to
   the *whole* medium tier was tried twice and reverted both times -- the medium
   population keeps growing with N and the footprint of 64 lists eventually costs
   more than it saves; a band next to `small_limit` saturates early and doesn't.
@@ -173,7 +179,9 @@ sparse, then extraction.
   One list per residue class makes the class a template parameter, like the
   small tier. The state is two parallel arrays per class (struct of arrays):
   `(pos << 6) | w`, rewritten every segment, and `qp`, read-only -- so only half
-  of it is ever dirty and written back. Once that state outgrows the per-thread
+  of it is ever dirty and written back. `qp` is stored as a 1-byte delta from
+  the previous prime of the same class (the list is sorted by p; the largest
+  gap below sqrt(1e15) is 52), so each prime streams 5 bytes per segment, not 8. Once that state outgrows the per-thread
   L3 share, it is also read with `prefetchnta` (once per prime), keeping it out
   of L2 so the segment stays there. The unrolled loop, a 4-way interleave,
   per-hit prefetching and the 64-list layout were all measured slower here --

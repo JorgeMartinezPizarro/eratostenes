@@ -30,6 +30,8 @@ throughout below).
   - [`cross_off_medium`: byte positions + doubled tables (kept, 2026-09-27)](#cross_off_medium-byte-positions--doubled-tables-kept-2026-09-27)
   - [med64: EratMedium-style checked loop, `cross_off_checked` (kept, 2026-09-29)](#med64-eratmedium-style-checked-loop-cross_off_checked-kept-2026-09-29)
   - [`cross_off_medium`: struct-of-arrays state + gated `prefetchnta` (kept, 2026-09-29)](#cross_off_medium-struct-of-arrays-state--gated-prefetchnta-kept-2026-09-29)
+  - [`cross_off_medium`: `qp` as 1-byte deltas (kept, 2026-09-30)](#cross_off_medium-qp-as-1-byte-deltas-kept-2026-09-30)
+  - [med64: mod-210 stepping on the checked loop, `cross_off_checked210` (kept, 2026-09-30)](#med64-mod-210-stepping-on-the-checked-loop-cross_off_checked210-kept-2026-09-30)
 - [wheel.hpp](#wheelhpp)
   - [Wheel size: mod 6 vs. mod 30 vs. mod 210 (historical, pre-tiered-marking architecture)](#wheel-size-mod-6-vs-mod-30-vs-mod-210-historical-pre-tiered-marking-architecture)
   - [`ONFLY_CORRECTION`/`GAP_K`: shared table replacing a per-prime `delta[]` (kept)](#onfly_correctiongap_k-shared-table-replacing-a-per-prime-delta-kept)
@@ -436,9 +438,11 @@ already found in a different shape (a load-to-use chain beats fewer
 instructions) -- here confirmed again for a pure-register dependency chain,
 not a memory load.
 
-**Verdict: both reverted, code removed** (not kept behind a flag -- this
-tier's mod-210 stepping is a genuine dead end at the N this project targets,
-not a pending tune). If revisited, the setup-cost-vs-few-hits mismatch is
+**Verdict: both reverted, code removed.** (Superseded 2026-09-30: once med64
+moved to the checked loop, which has no per-call offset table, mod-210 stepping
+won -- see
+[`cross_off_checked210`](#med64-mod-210-stepping-on-the-checked-loop-cross_off_checked210-kept-2026-09-30).
+The original reasoning follows.) If revisited, the setup-cost-vs-few-hits mismatch is
 structural to med64 specifically (by definition, its primes have few hits per
 segment): a fix would need to amortize the offset table across *multiple
 segments*, not just multiple hits within one, which is a materially different
@@ -646,6 +650,124 @@ per tier set: on when medium primes x 8 bytes exceed the per-thread L3 share
 62,601 and 1e13 197,708). The crossover between those two points isn't measured.
 `ERATOSTENES_MEDIUM_NTA=0/1` forces it. Gated binary, 1 rep: 1e12 1205.1G (NTA
 off), 1e13 tail 1726.9G (on). Server A/B pending.
+
+### `cross_off_medium`: `qp` as 1-byte deltas (kept, 2026-09-30)
+
+After the SoA split, each medium prime still streams 4 bytes of read-only `qp`
+per segment on top of its 4-byte `dyn`. At 1e14 on the dev PC (266,008 medium
+primes, sparse cutoff 1/1) that is ~1 MB per thread per segment. It comes from
+L3/DRAM, and the i5-11400F's L3 is inclusive. But the list is sorted by p and never
+reordered, so `qp` only needs the gap to the previous prime of the same class. Brute
+force over every prime < sqrt(1e15): the largest same-class gap is 52 * 30 (39 * 30
+below 4.19M), so a byte always holds it. Change: `medium_qd_[pr]` holds `uint8_t`
+deltas, the first entry is 0 from `medium_qp_base_[pr]`, and `cross_off_medium`
+carries `qp += *qds` from prime to prime (one `movzbl` + `add` per prime, outside
+the hit loop). Activation throws if a delta ever exceeded 255. 5 bytes per prime per
+segment instead of 8. The hit loop's disassembly is unchanged (`nm`: only the
+medium functions, `activate_medium` and `run_medium` changed; the rest is padding).
+
+Correct: `make test`, and identical counts in every run below.
+
+Dev PC, `perf stat`, ABBA against the `c5ec94f` binary:
+
+| | pairs | control | qd | change |
+|---|---:|---:|---:|---:|
+| 1e14, 0.1% tail, cycles:u (mean) | 6 | 250.7G | 239.5G | **-4.5%** |
+| 1e14, 0.1% tail, wall (mean) | 6 | 5.92s | 5.63s | -4.9% |
+| 1e15, 0.1% tail, cycles:u (mean / min) | 2 | 3843 / 3636G | 3502 / 3471G | **-8.9% / -4.5%** |
+| 1e15, 0.1% tail, wall (mean) | 2 | 95.8s | 83.9s | -12% |
+| 1e15, 0.1% tail, `mem_load_retired.l3_miss` | 2 | 0.72G | 0.41G | -44% |
+| 1e13, 10% tail, cycles:u | 2 | 1657G | 1637G | -1.2% |
+| 1e12 full, cycles:u | 2 | 1152G | 1152G | tie |
+
+At 1e14 the qd mean is below the control mean in all 6 ABBA groups; at 1e15 all 4
+qd runs beat all 4 control runs. The control is also far noisier at 1e15
+(3636-3995G vs 3471-3539G), the same pattern as med64 NTA: less memory traffic
+makes the tier less sensitive to a bad memory state. L2 misses and writebacks
+barely move (1e14: 4.69G vs 4.73G misses), so the gain isn't the L2-pollution
+mechanism SoA fixed. It shows up as fewer L3 misses and less time waiting on the
+stream. `MEDIUM_NTA_MIN_PRIMES` still assumes 8 bytes per prime: recomputing it
+at 5 would turn NTA off for the dev PC's 1e13 wide tier set (197,708 primes),
+which is a separate, unmeasured change. Server A/B pending.
+
+### med64: mod-210 stepping on the checked loop, `cross_off_checked210` (kept, 2026-09-30)
+
+The 2026-09-26 mod-210 attempts ([above](#med64-mod-210-stepping-two-variants-tried-both-reverted-2026-09-26-external-review-opus-55))
+lost because they kept `cross_off`'s unrolled shape, which needs a per-call
+offset table -- 48 entries for a 48-phase cycle, built with 47 multiplies or a
+47-add dependency chain, on a tier with few hits per call. Since med64 moved to
+EratMedium's checked loop ([above](#med64-eratmedium-style-checked-loop-cross_off_checked-kept-2026-09-29)),
+that table is gone: each hit only needs the byte step from phase w to w+1,
+`qp*dm + corr` with dm in {2,4,6,8,10}. So `cross_off_checked210<PR>` keeps
+`qp*2/4/6/8/10` in 5 registers and takes `dm`, `corr` and the mask from
+`big::TABLE` as compile-time constants per case: a 48-case switch into a
+`for (;;)`, one bounds check per hit, exactly `cross_off_checked`'s shape.
+The 1/7 of mod-30 hits whose multiplier is a multiple of 7 (always presieved;
+every med64 prime is > 163) are skipped. The lists are keyed by (class, entry
+phase w): 8 x 48 = 384, so the entry switch is still shared by every call in an
+inner loop. `activate_med64_210` is `activate_medium`'s start derivation filed
+under `pr*48 + w`. Cost: `run_med64<*, true>` is ~10.3 KB of code vs ~6.5 KB on
+mod-30. `ERATOSTENES_MED64_210=0` goes back to mod-30 (A/B; the mod-30 path is
+still compiled).
+
+Correct: `make test`, and identical counts in every run below (pi(1e12) exact).
+
+Dev PC (i5-11400F), `perf stat`, same binary with the knob 1/0 plus the
+`11b6c0f` binary as control, order ctl, 1, 0, 0, 1, ctl:
+
+| | control | mod-210 | mod-30 (knob 0) | mod-210 vs mod-30 |
+|---|---:|---:|---:|---:|
+| 1e12 full, cycles:u | 1203.0 / 1204.5G | 1156.5 / 1151.2G | 1198.8 / 1194.3G | **-3.6%** |
+| 1e12 instructions:u | 1285.3G | 1236.2G | 1287.2G | -4.0% |
+| 1e12 stores retired | 284.9G | 272.2G | 285.0G | -4.5% |
+| 1e13 10% tail, cycles:u | 1697.0 / 1775.8G | 1668.1 / 1694.8G | 1715.2 / 1706.4G | **-1.7%** |
+| 1e13 10% tail, instructions:u | 1687.3G | 1627.6G | 1688.2G | -3.6% |
+| 1e14 5% tail, cycles:u | 12700.5G | 12763.5 / 13077.0G | 12732.9 / 12722.0G | inconclusive |
+| 1e14 5% tail, instructions:u | 11656.3G | 11357.3G | 11660.5G | -2.6% |
+
+Branch misses flat (1e12: 8.34G vs 8.33G). At 1e14 the cycles are inside the
+dev PC's known 5-7% tail noise (the 13077G rep ran 342s against ~300s for the
+others); instructions and stores still drop as expected. The second 1e13 control
+rep (1775.8G, 47s wall against ~37s) is an outlier of the same kind.
+
+Full runs, best of N against the previous README best:
+
+| machine | N | before | after | change |
+|---|---|---:|---:|---:|
+| dev PC | 1e13 | 326.03s | 323.34s | -0.8% |
+| server | 1e12 | 23.00s | 21.14s | **-8.1%** |
+| server | 1e13 | 299.80s | 281.98s | **-5.9%** (primesieve 292.554s: 1.02x -> 0.96x) |
+
+The server's 1e10/1e11 also improved (0.14 -> 0.128s, 1.61 -> 1.51s), but the same
+README update also removed `benchmark.sh`'s 5s pause between reps, which cost
+ramp-up at small N. So only 1e12/1e13 should be attributed to this change. The
+server gains ~2-4x more than the dev PC. That fits med64's larger share there
+(~33 of 100 at 1e14, see the segment_sieve.hpp entry on the 1e14 gap), but it
+hasn't been measured directly: there is no same-session server ABBA with the knob.
+Pending: server 1e14 (README 3617.87s predates this change and med64 NTA) and the
+1e15 run in progress.
+
+**Cutoffs re-swept with mod-210 med64 (dev PC, 2026-09-30).** mod-210 makes each
+med64 hit cheaper, so the band might want to grow: either down (lower
+`small_limit`) or up (raise `med64_limit`). `perf stat cycles:u`, `c5ec94f`
+binary, 2 reps round-robin (second pass reversed), counts exact:
+
+| config | small / med64 / medium (1e12) | 1e12 full | 1e13 10% tail |
+|---|---|---:|---:|
+| default (SMALL 1/4, MED64 1/12) | 763 / 15096 / 62601 | 1145.9G | 1655.7G |
+| `MED64_DEN=6` | 763 / 29138 / 48559 | 0.0% | -0.2% |
+| `MED64_DEN=8` | 763 / 22199 / 55498 | -0.1% | 0.0% |
+| `MED64_DEN=16` | 763 / 11450 / 66247 | +1.5% | +0.9% |
+| `SMALL_DEN=6` | 526 / 15333 / 62601 | +0.7% | +0.3% |
+| `SMALL_DEN=8` | 401 / 15458 / 62601 | +2.0% | +2.7% |
+| `SMALL_DEN=8`, `MED64_DEN=8` | 401 / 22561 / 55498 | +1.5% | +2.0% |
+
+Lowering `small_limit` cuts branch misses 10-17% but costs cycles: for primes
+below ~6k the small tier's unrolled mod-30 cycle still beats med64's checked
+mod-210 loop. Raising `med64_limit` saves 4-6% of instructions and ties on
+cycles. Defaults unchanged. Not re-swept on the server, where med64 is a larger
+share at 1e14; the mod-30 `med64_limit` sweep there was flat within its 1%-tail
+noise (see the i5-13500 entry in main.cpp).
 
 ## wheel.hpp
 
@@ -1110,6 +1232,34 @@ work. pi(N) exact in every run. Proxy chosen so blocks are full (~47 per slot),
 like natural E14+, unlike the `-s 500000` N=1e12 proxy's mostly-empty slots.
 Expected to matter most at natural E14/E15 on the server, where the sparse state
 exceeds L3 without forcing -- not yet measured there.
+
+**Follow-up: `prefetchnta` instead of `prefetcht1` (tried, reverted, 2026-09-30).**
+At 1e15 about half of `process_big` stalls on the `s[pos] |= mask` RMW into the
+segment (see the i5-13500 entry in main.cpp below). That is the same signature
+the medium tier had before SoA + NTA (-12% at 1e14): segment misses caused by
+another stream. So this tried pulling the bucket blocks in with the NTA hint
+(`ERATOSTENES_BIG_NTA` knob, a runtime branch once per block). Dev PC, same
+proxy as above (1e13 `-s 1000000`, 204,647 sparse, 10% tail), same binary with
+the knob 0/1, order 0 1 1 0 (plus a `c5ec94f` control), counts exact:
+
+| | NTA=0 | NTA=1 | change |
+|---|---:|---:|---:|
+| cycles:u | 3591.9 / 3612.6G | 3828.1 / 3814.7G | **+6.1%** |
+| `mem_load_retired.l2_miss` | 868 / 883M | 1149 / 1179M | +33% |
+| `mem_load_retired.l3_miss` | 267 / 270M | 383 / 368M | +40% |
+| `l2_lines_out.non_silent` | 11.88 / 11.88G | 10.30 / 10.36G | -13% |
+
+Fewer L2 writebacks, as intended, but many more misses. Drained blocks go back to
+the LIFO free list and are reused right away as the write target of other slots.
+With `prefetcht1` that block is still in L2 when it's rewritten, so the read
+stream turns into the write stream in place. With NTA it's gone, and every
+rewrite pays an RFO from L3/DRAM. That doesn't depend on the machine, so the
+natural 1e14 tail was stopped and the knob removed. Side note: even at NTA=0
+the knob's binary was +3.5% cycles / +1.5% instructions vs the control. The
+second prefetch loop changed register allocation in the hit loop (1-2 more
+instructions per hit): one more reason to keep `process_big`'s block-level code
+minimal. Any future fix for the segment RMW stall should not break the "drained
+block is the next write target, still in L2" property.
 
 ### Sparse tier attempts 7-10 (all tried, reverted)
 

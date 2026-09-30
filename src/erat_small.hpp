@@ -281,13 +281,18 @@ inline void cross_off_class(uint8_t* s, uint64_t end, DenseState* first, DenseSt
 // sieve_chunk on its own when surrounding code changes.
 //
 // State is split in two parallel arrays (struct of arrays): `dyn[i]` =
-// (pos << 6) | w, rewritten every segment, and `qps[i]` = qp, read-only
-// once activated. Rewriting qp along with pos/w every segment made the whole
+// (pos << 6) | w, rewritten every segment, and qp, read-only once
+// activated. Rewriting qp along with pos/w every segment made the whole
 // 8-byte state dirty -- ~1 MB per thread at 1e14, written back through L2
 // and L3 every segment, flushing the segment itself: ~75% of this tier's
 // L2 misses and ~80% of its L3 misses were on s[pos], not on the state.
-// Now 4 of the 8 bytes per prime are clean and just get dropped. pos fits
-// 26 bits (checked by SegmentSieve's constructor).
+// pos fits 26 bits (checked by SegmentSieve's constructor).
+//
+// The read-only qp is stored as a 1-byte delta from the previous prime of
+// the same class (`qds[i]`; the list is sorted by p and never reordered,
+// the first entry's delta is 0 from `qp_base`): consecutive primes of one
+// class mod 30 are at most 52 * 30 apart below sqrt(1e15), so a byte holds
+// it (checked at activation). 5 bytes per prime per segment instead of 8.
 //
 // NTA: prefetchnta both streams MEDIUM_NTA_DIST entries ahead, once per
 // prime (not per hit), so they come into L1 without being allocated in L2
@@ -300,17 +305,18 @@ constexpr uint64_t MEDIUM_POS_LIMIT = uint64_t{1} << 26;
 
 template <int PR, bool NTA>
 __attribute__((noinline)) void cross_off_medium(uint8_t* s, uint64_t end, uint32_t* dyn, uint32_t* dyn_last,
-                                                const uint32_t* qps, uint64_t rebase) {
+                                                const uint8_t* qds, uint64_t qp_base, uint64_t rebase) {
     const uint32_t* pack = big::PACK210[PR].data();
-    for (; dyn != dyn_last; ++dyn, ++qps) {
+    uint64_t qp = qp_base;
+    for (; dyn != dyn_last; ++dyn, ++qds) {
         if constexpr (NTA) {
             __builtin_prefetch(dyn + MEDIUM_NTA_DIST, 0, 0);
-            __builtin_prefetch(qps + MEDIUM_NTA_DIST, 0, 0);
+            __builtin_prefetch(qds + MEDIUM_NTA_DIST * 4, 0, 0);
         }
         uint32_t d = *dyn;
         uint64_t pos = d >> 6;
         uint64_t w = d & 63;
-        uint64_t qp = *qps;
+        qp += *qds;
         while (pos < end) {
             uint32_t t = pack[w]; // mask | dm << 8 | corr << 16
             s[pos] |= static_cast<uint8_t>(t);
