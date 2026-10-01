@@ -693,6 +693,9 @@ int main(int argc, char** argv) {
         uint64_t l3_share = detect_cpu_cache_share(0, 3);
         if (l3_share == 0) l3_share = 1024 * 1024;
         MEDIUM_NTA_MIN_PRIMES = l3_share / 8;
+        // --tune medium_nta=1|0 overrides the gate: under a VM the detected
+        // L3 can be the whole host's (260 MB on a 2-vCPU KVM guest).
+        if (opt.medium_nta >= 0) MEDIUM_NTA_MIN_PRIMES = opt.medium_nta ? 0 : UINT64_MAX;
     }
 
     Presieve presieve = build_presieve(PRESIEVE_GROUPS);
@@ -706,9 +709,14 @@ int main(int argc, char** argv) {
                  WHEEL_PRIMES.size(),
                  small_primes.size(), static_cast<unsigned long long>(SUB_BLOCK_BYTES / 1024),
                  med64_primes.size(), medium_primes.size(), sparse_primes.size());
-    std::fprintf(stderr, "  medium-tier prefetchnta: %s (from %s medium primes)\n",
-                 medium_primes.size() >= MEDIUM_NTA_MIN_PRIMES ? "yes" : "no",
-                 format_thousands(MEDIUM_NTA_MIN_PRIMES).c_str());
+    if (opt.medium_nta >= 0) {
+        std::fprintf(stderr, "  medium-tier prefetchnta: %s (forced, --tune medium_nta=%d)\n",
+                     opt.medium_nta ? "yes" : "no", opt.medium_nta);
+    } else {
+        std::fprintf(stderr, "  medium-tier prefetchnta: %s (from %s medium primes)\n",
+                     medium_primes.size() >= MEDIUM_NTA_MIN_PRIMES ? "yes" : "no",
+                     format_thousands(MEDIUM_NTA_MIN_PRIMES).c_str());
+    }
     if (!BIG_2310 && !sparse_primes.empty()) std::fprintf(stderr, "  sparse tier on the mod-210 wheel (--tune big2310=0)\n");
     if (narrow_early) {
         unsigned narrow_chunks = 0;

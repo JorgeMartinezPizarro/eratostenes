@@ -178,6 +178,7 @@ check_combo "combo segmento minimo"            -t "$THREADS" -s 64 --db-block-si
 check_combo "combo disperso mod 210"           -t 3 -s 2000 --tune big2310=0 --db-block-size 1000
 check_combo "combo cortes rebajados"           -t "$THREADS" -s 100000 --tune small=1/2 --tune med64=1/8 --tune sparse=1/2
 check_combo "combo sin med64/disperso"         -t 2 -s 2000 --tune med64=0 --zstd-level 3
+check_combo "combo NTA medio forzado"          -t "$THREADS" -s 100000 --tune medium_nta=1
 
 # --- 4: round-trip texto vs .db, posicion por posicion ---
 NS2=(100000 1000000 10000000)
@@ -236,6 +237,8 @@ check_count_only "$N5" "$expected_pi_1e10" "disperso forzado (mod 2310)"   -t "$
 check_count_only "$N5" "$expected_pi_1e10" "disperso forzado (mod 210)"    -t "$THREADS" -s 100000 --tune big2310=0
 check_count_only "$N5" "$expected_pi_1e10" "sin med64, disperso forzado"   -t 5 -s 500000 --tune med64=0
 check_count_only "$N5" "$expected_pi_1e10" "cortes small/med64/sparse"     -t "$THREADS" --tune small=1/8 --tune med64=1/6 --tune sparse=1/4
+check_count_only "$N5" "$expected_pi_1e10" "NTA medio forzado on"          -t "$THREADS" --tune medium_nta=1
+check_count_only "$N5" "$expected_pi_1e10" "NTA medio forzado off"         -t "$THREADS" -s 100000 --tune medium_nta=0
 
 # --start N0: el recuento es el del tramo [N0, N], pi(N) - pi(N0 - 1).
 check_start() {

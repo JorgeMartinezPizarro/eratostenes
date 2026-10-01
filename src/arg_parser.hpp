@@ -287,6 +287,7 @@ struct Options {
     Fraction tune_med64;  // med64/medium cutoff, default 1/12 (0 = no med64 tier)
     Fraction tune_sparse; // medium/sparse cutoff, default 1/1 or 1/2 (main.cpp); lowering only
     bool big2310 = true; // sparse tier on the mod-2310 wheel (false: mod-210)
+    int medium_nta = -1; // medium-tier prefetchnta: -1 auto (L3 gate), 1 on, 0 off
 };
 
 // Interprets suffixes: k=1e3 m=1e6 b=1e9 (short scale billion) t=1e12
@@ -361,7 +362,8 @@ inline void parse_tune(Options& opt, const std::string& kv) {
     else if (k == "med64") opt.tune_med64 = parse_fraction(k, v);
     else if (k == "sparse") opt.tune_sparse = parse_fraction(k, v);
     else if (k == "big2310") opt.big2310 = parse_switch(k, v, "1", "0");
-    else throw std::runtime_error("--tune: unknown key '" + k + "' (small, med64, sparse, big2310)");
+    else if (k == "medium_nta") opt.medium_nta = parse_switch(k, v, "1", "0") ? 1 : 0;
+    else throw std::runtime_error("--tune: unknown key '" + k + "' (small, med64, sparse, big2310, medium_nta)");
 }
 
 inline void print_usage(const char* prog) {
@@ -410,6 +412,8 @@ inline void print_usage(const char* prog) {
         "      sparse=a/b         Medium/sparse cutoff, lowering only\n"
         "                         (default 1/1, or 1/2 with >= 512 KiB L2 per thread)\n"
         "      big2310=1|0        Sparse tier on the mod-2310 (default 1) or mod-210 wheel\n"
+        "      medium_nta=1|0     Force medium-tier prefetchnta on/off (default:\n"
+        "                         on once its state outgrows the L3 share)\n"
         "\n"
         "The wheel (which primes are skipped up front) is fixed at compile\n"
         "time in src/wheel.hpp (WHEEL_PRIMES) -- see that file for the\n"
