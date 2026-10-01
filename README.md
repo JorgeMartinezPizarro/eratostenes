@@ -27,8 +27,9 @@ make pgo		# Build with a performance optimizations training.
 make debug      # ASan/UBSan, for debugging
 make test       # checks output against primecount across N and across
                 # several parameter combinations, plus .db vs text output
-make benchmark  # Performance table comparing primesieve against eratostenes
-make benchmark-tails  # Same, on the last 1e11 numbers below 1e15, 1e16 and 1e17
+make benchmark        # Count-only times against primesieve, N = 1e10..1e13
+make benchmark-io     # .db size and write throughput, N = 1e8..1e12
+make benchmark-tails  # Count-only, the last 1e11 numbers below 1e14..1e18
 ```
 
 ## Docker
@@ -118,7 +119,7 @@ What this project is built from, one term each — follow the link for the conce
 | 1e14 | 3392.08s | 3349.907s | 1.01x |
 | 1e15 | 40976.93s | - | - |
 
-Other machines (i5-11400F, i5-1235U, cloud Xeons), top-of-range tails up to 1e17 (`make benchmark-tails`) and the history: [docs/BENCHMARK.md](docs/BENCHMARK.md).
+Other machines (i5-11400F, i5-1235U, cloud Xeons), top-of-range tails up to 1e18 (`make benchmark-tails`) and the history: [docs/BENCHMARK.md](docs/BENCHMARK.md).
 
 ## Validation
 

@@ -5,7 +5,7 @@ Timings of `eratostenes` against [primesieve](https://github.com/kimwalisch/prim
 ## How to measure
 
 ```sh
-REPS=2 make benchmark         # pi(N) for N = 1e10..1e13, plus the .db I/O sweep
+REPS=2 make benchmark         # pi(N) for N = 1e10..1e13 (make benchmark-io: the .db sweep)
 REPS=2 make benchmark-tails   # last 1e11 numbers below 1e14, 1e15, ..., 1e18 (NS=1e19 etc. up to 2^64 - 2^32*16)
 ```
 
@@ -22,14 +22,15 @@ Ratios only; see each machine's section for times, commits and caveats.
 
 Full runs, pi(N):
 
-| machine | threads | 1e10 | 1e11 | 1e12 | 1e13 | 1e14 |
-|---|---:|---:|---:|---:|---:|---:|
-| i5-13500 (server) | 20 | 0.94x | 0.90x | 0.89x | 0.96x | 1.01x |
-| i5-11400F (dev PC) | 12 | 0.86x | 0.84x | 0.86x | 0.85x | 0.72x |
-| i5-1235U (laptop) | 12 | 0.78x | 0.72x | 0.84x | ~0.67x | - |
-| Xeon Emerald Rapids (sandbox, older binary) | 2 | 1.25x | 1.12x | 1.06x | 1.06x | - |
-| Xeon, CPU not recorded (sandbox) | 2 | 1.03x | 1.05x | 0.97x | 0.93x | - |
-| Xeon 32K L1d / 1M L2 (sandbox) | 2 | - | 1.02x | - | - | - |
+| machine | threads | binary | 1e10 | 1e11 | 1e12 | 1e13 | 1e14 |
+|---|---:|---|---:|---:|---:|---:|---:|
+| i5-13500 (server) | 20 | up to 6823278 | 0.94x | 0.90x | 0.89x | 0.96x | 1.01x |
+| i5-11400F (dev PC) | 12 | up to 2026-09-30 | 0.86x | 0.84x | 0.86x | 0.85x | 0.72x |
+| i5-11400F (dev PC) | 12 | 35d6803 | 0.86x | 0.82x | 0.87x | 0.84x | - |
+| i5-1235U (laptop) | 12 | before 81f2918 | 0.78x | 0.72x | 0.84x | ~0.67x | - |
+| Xeon Emerald Rapids (sandbox) | 2 | before 6846baf | 1.25x | 1.12x | 1.06x | 1.06x | - |
+| Xeon, CPU not recorded (sandbox) | 2 | c0e63c8 | 1.03x | 1.05x | 0.97x | 0.93x | - |
+| Xeon 32K L1d / 1M L2 (sandbox) | 2 | fd9f8e5 | - | 1.02x | - | - | - |
 
 Tails, last 1e11 below N:
 
@@ -40,6 +41,7 @@ Tails, last 1e11 below N:
 | i5-13500 (server) | 20 | 0719d5b, 2nd run | 0.99x | 1.08x | 1.09x | 1.09x | 1.07x | - |
 | i5-11400F (dev PC) | 12 | before startup fix | - | 0.83x | 0.91x | 1.13x | 1.76x | - |
 | i5-11400F (dev PC) | 12 | startup fix | 0.77x | 0.89x | 0.87x | 0.89x | 0.96x | - |
+| i5-11400F (dev PC) | 12 | 35d6803 | 0.73x | 0.79x | 0.83x | 0.88x | 0.90x | - |
 | i5-11400F (dev PC) | 2 | before startup fix | - | 1.21x | - | - | - | - |
 | i5-11400F (dev PC) | 2 | 0719d5b | 1.19x | 1.25x | 1.26x | 1.23x | 1.27x | - |
 | i5-11400F (dev PC) | 6 | runs + steals | - | - | - | - | - | 1.05x |
@@ -100,6 +102,35 @@ Single runs; both programs ran 20-30% slower at 1e15 than in the table above. Th
 | 1e12 | 23.54s | 27.283s | 0.86x |
 | 1e13 | 308.59s | 362.103s | 0.85x |
 | 1e14 | 4185.20s | 5804.52s | 0.72x |
+
+With 35d6803 (contiguous runs, the sieve carried across chunks, steals), `make benchmark` and `REPS=2 make benchmark-tails` (the header shows `-dirty`: the benchmark split was in the working tree, the sieve code was 35d6803's):
+
+```
+11th Gen Intel(R) Core(TM) i5-11400F @ 2.60GHz, 12 threads (2 per core); L1d 288 KiB (6 instances); L2 3 MiB (6 instances); L3 12 MiB (1 instance)
+primesieve 12.7; eratostenes 35d6803-dirty; 2026-10-01; eratostenes best of 1, primesieve 1 run
+```
+
+| N | eratostenes | primesieve | ratio |
+|---|---:|---:|---:|
+| 1e10 | 0.16s | 0.186s | 0.86x |
+| 1e11 | 1.89s | 2.312s | 0.82x |
+| 1e12 | 24.12s | 27.679s | 0.87x |
+| 1e13 | 314.66s | 375.047s | 0.84x |
+
+```
+11th Gen Intel(R) Core(TM) i5-11400F @ 2.60GHz, 12 threads (2 per core); L1d 288 KiB (6 instances); L2 3 MiB (6 instances); L3 12 MiB (1 instance)
+primesieve 12.7; eratostenes 35d6803-dirty; 2026-10-01; best of 2
+```
+
+| N | tail | primes | eratostenes | primesieve | ratio |
+|---|---|---:|---:|---:|---:|
+| 1e14 | last 1e11 (0.1%) | 3,102,093,076 | 5.33s | 7.291s | 0.73x |
+| 1e15 | last 1e11 (0.01%) | 2,895,324,362 | 7.93s | 10.013s | 0.79x |
+| 1e16 | last 1e11 (0.001%) | 2,714,317,775 | 10.84s | 13.026s | 0.83x |
+| 1e17 | last 1e11 (0.0001%) | 2,554,661,982 | 14.34s | 16.205s | 0.88x |
+| 1e18 | last 1e11 (1e-05%) | 2,412,705,071 | 19.55s | 21.729s | 0.90x |
+
+Both reps of every tail within 3% of each other, for both programs.
 
 Tails before the startup fix (binary built from 81598ae's code; the header shows the working tree's commit, which already had the fix in source):
 

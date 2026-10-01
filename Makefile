@@ -51,7 +51,8 @@ OUT_DIR := $(CURDIR)/output
 COMPOSE := docker compose -f docker/docker-compose.yml
 
 .PHONY: all portable debug pgo clean fclean re docker run docker-pgo run-pgo nth-prime \
-        test benchmark benchmark-tails docker-dev docker-test docker-benchmark docker-benchmark-tails
+        test benchmark benchmark-io benchmark-tails docker-dev docker-test docker-benchmark \
+        docker-benchmark-io docker-benchmark-tails
 
 # --- release (default) ---
 all: $(BIN) $(NTH_BIN)
@@ -209,19 +210,23 @@ nth-prime:
 test: $(BIN) $(NTH_BIN)
 	./scripts/test.sh
 
-# Dos barridos (ver scripts/benchmark.sh): 1) eratostenes vs primesieve en
-# CPU, N=1e10..1e13 -- la tabla de README.md#benchmarks; 2) E/S real,
-# construye un .db por cada N en 1e8..1e12 y mide tamano/bits-por-primo/
-# throughput/tiempo. THREADS/SEGMENT/REPS/WRITE_PATH/KEEP_DB se pueden
-# pasar como variables de entorno (ver el propio script). WRITE_PATH debe
-# apuntar al filesystem nativo de Linux (no a un /mnt/c... montado, mucho
-# mas lento) -- default: $HOME/eratostenes-io-bench.
+# eratostenes vs primesieve en modo conteo, N=1e10..1e13 (ver
+# scripts/benchmark.sh) -- la tabla de docs/BENCHMARK.md y del README.
+# THREADS/SEGMENT/REPS como variables de entorno.
 benchmark:
 	./scripts/benchmark.sh
 
+# E/S real (ver scripts/benchmark_io.sh): construye un .db por cada N en
+# 1e8..1e12 y mide tamano/bits-por-primo/throughput/tiempo -- la tabla de
+# README.md#database. THREADS/SEGMENT/WRITE_PATH/KEEP_DB como variables de
+# entorno. WRITE_PATH debe apuntar al filesystem nativo de Linux (no a un
+# /mnt/c... montado, mucho mas lento) -- default: $HOME/eratostenes-io-bench.
+benchmark-io:
+	bash scripts/benchmark_io.sh
+
 # Cima del rango frente a primesieve (ver scripts/benchmark_tails.sh): los
-# ultimos 1e11 numeros por debajo de 1e15, 1e16 y 1e17 (0.01%, 0.001%,
-# 0.0001%), mismo numero de hilos en los dos, recuentos cruzados entre si.
+# ultimos 1e11 numeros por debajo de 1e14..1e18 (0.1%..0.00001%), mismo
+# numero de hilos en los dos, recuentos cruzados entre si.
 # THREADS/REPS/NS/WIDTH como variables de entorno.
 # Ejemplo: REPS=2 THREADS=2 make benchmark-tails
 benchmark-tails: $(BIN)
@@ -241,7 +246,10 @@ docker-test: docker-dev
 	$(COMPOSE) run --rm -e THREADS dev make test
 
 docker-benchmark: docker-dev
-	$(COMPOSE) run --rm -e THREADS -e SEGMENT -e REPS -e WRITE_PATH -e KEEP_DB dev make benchmark
+	$(COMPOSE) run --rm -e THREADS -e SEGMENT -e REPS dev make benchmark
+
+docker-benchmark-io: docker-dev
+	$(COMPOSE) run --rm -e THREADS -e SEGMENT -e WRITE_PATH -e KEEP_DB dev make benchmark-io
 
 docker-benchmark-tails: docker-dev
 	$(COMPOSE) run --rm -e THREADS -e REPS -e NS -e WIDTH dev make benchmark-tails

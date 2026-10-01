@@ -2275,6 +2275,50 @@ does the last 1e11 below 1e19 (2,285,738,870, dev PC `-t 6`: 30.93 s vs
 compares by division now: `(s + 1) * (s + 1)` wrapped to 0 for N >=
 (2^32 - 1)^2.
 
+### `-t 2` gap vs primesieve at the 1e15 tail: profile and sparse cutoff by thread count (measured, not adopted, 2026-10-01)
+
+With one thread per core the gap is flat at ~1.25x from 1e14 to 1e18 (dev PC,
+BENCHMARK.md). perf stat, last 1e11 below 1e15, `-t 2`, 2 runs each (within
+1.5%):
+
+| | eratostenes | primesieve |
+|---|---:|---:|
+| cycles:u | 158.8G | 131.5G |
+| instructions:u | 269.3G | 275.2G |
+| IPC | 1.70 | 2.10 |
+| branch-misses:u | 1.318G | 0.992G |
+| L1-dcache-loads / misses | 58.9G / 18.0G | 75.6G / 17.0G |
+
+Fewer instructions than primesieve, 21% more cycles: stalls, not work.
+(WSL's vPMU has no generic LLC events, but `l2_rqsts.*`,
+`mem_load_retired.l2_miss/l3_miss` and `cycle_activity.stalls_l2_miss` work.)
+By symbol (cycles, G): process_big 43.3, medium 56.1, med64 34.9, small 18.7,
+presieve 3.4; primesieve EratBig 62.4, EratMedium 43.0, EratSmall 22.1. Our
+dense tiers below the bucket ring cost 109.7G against primesieve's 65.1G,
+because ours reach p < 4.19M (~1 hit per 512 KiB segment) while primesieve
+sends everything above ~0.8M (~3 hits per 256 KiB sieve) to EratBig: that's
+the medium tier's per-prime loop-exit mispredict again (see the i5-13500
+entry below).
+
+`--tune sparse` at the same tail, cycles:u (2 runs each, ABCDE EDCBA order at
+`-t 2`, ABC CBA at 6/12):
+
+| threads | 1/1 (dev default) | 1/2 | 1/4 | 1/8 |
+|---:|---:|---:|---:|---:|
+| 2 | 159.4G | -6.7% | -7.0% | -3.2% |
+| 6 | 219.3G | +8.0% | +16.7% | |
+| 12 | 350.7G | +13.6% | +29.0% | |
+
+`--l2-bytes 256k` (256 KiB segment) at `-t 2`: +10%. Branch-misses fall with
+the cutoff at every thread count (2 threads: 1.32G -> 0.91G -> 0.65G ->
+0.52G), but from 6 threads up the extra bucket traffic costs more than they
+save. `-t 6` gives every thread its own core and 512 KiB of L2, like `-t 2`,
+and still loses, so it isn't the per-thread L2 (unlike the sub-block): it
+looks like a shared resource, L3 or memory bandwidth (12 MiB of L3 for 2
+threads vs 6), and the i5-13500 won with 1/2 at 20 threads. No thread-count
+rule fits; left at the current gate. A startup calibration of this cutoff
+on the machine at hand is the candidate.
+
 ### i5-13500 server gap vs primesieve: medium-tier call count, sparse cutoff 1/2 gated on per-thread L2 (2026-09-28)
 
 Context: dev PC (i5-11400F, symmetric) is now below primesieve at every N in
