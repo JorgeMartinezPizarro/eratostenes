@@ -66,7 +66,7 @@ outside the container.
 ./eratostenes 1t -o ~/primes_100b.db      # Write to db
 ```
 
-## Compression
+## Database
 
 The `.db` format is a indexed sqlite file (max 256TB size), so it is suitable up to `e16`, around `160TB`. To query for primes you can use the `nth_prime` companion:
 
@@ -100,7 +100,7 @@ What this project is built from, one term each — follow the link for the conce
 - [Bucket sieve](https://en.wikipedia.org/wiki/Bucket_queue)
 - [Memory pool](https://en.wikipedia.org/wiki/Memory_pool)
 - [CPU cache](https://en.wikipedia.org/wiki/CPU_cache)
-- [Load balancing (computing)](https://en.wikipedia.org/wiki/Load_balancing_(computing))
+- [Load balancing](https://en.wikipedia.org/wiki/Load_balancing_(computing))
 - [Random access](https://en.wikipedia.org/wiki/Random_access) 
 - [Delta encoding](https://en.wikipedia.org/wiki/Delta_encoding)
 
@@ -114,7 +114,7 @@ What this project is built from, one term each — follow the link for the conce
 | 1e11 | 1.51s | 1.644s | 0.92x |
 | 1e12 | 21.03s | 23.625s | 0.89x |
 | 1e13 | 280.81s | 292.554s | 0.96x |
-| 1e14 | 3405.58s | 3349.907s | 1.02x |
+| 1e14 | 3392.08s | 3349.907s | 1.01x |
 | 1e15 | 41322.77s | - | - |
 
 The same results on an Intel Core i5-11400F:
