@@ -112,20 +112,21 @@ What this project is built from, one term each — follow the link for the conce
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
-| 1e10 | 0.128s | 0.136s | 0.94x |
-| 1e11 | 1.48s | 1.641s | 0.90x |
-| 1e12 | 21.03s | 23.625s | 0.89x |
-| 1e13 | 280.81s | 292.554s | 0.96x |
+| 1e10 | 0.15s | 0.137s | 1.09x |
+| 1e11 | 1.50s | 1.656s | 0.91x |
+| 1e12 | 22.83s | 24.682s | 0.92x |
+| 1e13 | 285.32s | 292.763s | 0.97x |
 | 1e14 | 3392.08s | 3349.907s | 1.01x |
 | 1e15 | 40976.93s | - | - |
 
 | N | tail | eratostenes | primesieve | ratio |
 |---|---|---:|---:|---:|
-| 1e14 | last 1e11 | 3.17s | 3.215s | 0.99x |
-| 1e15 | last 1e11 | 4.51s | 4.496s | 1.00x |
-| 1e16 | last 1e11 | 5.47s | 5.124s | 1.07x |
-| 1e17 | last 1e11 | 6.41s | 6.097s | 1.05x |
-| 1e18 | last 1e11 | 9.30s | 7.954s | 1.17x |
+| 1e13 | last 1e11 | 2.55s | 2.736s | 0.93x |
+| 1e14 | last 1e11 | 3.43s | 3.794s | 0.90x |
+| 1e15 | last 1e11 | 4.62s | 4.521s | 1.02x |
+| 1e16 | last 1e11 | 5.44s | 5.295s | 1.03x |
+| 1e17 | last 1e11 | 6.52s | 6.175s | 1.06x |
+| 1e18 | last 1e11 | 8.21s | 7.866s | 1.04x |
 
 Other machines (i5-11400F, i5-1235U, cloud Xeons), top-of-range tails up to 1e18 (`make benchmark-tails`) and the history: [docs/BENCHMARK.md](docs/BENCHMARK.md).
 
