@@ -147,10 +147,10 @@ public:
         //
         // med64_'s own lists reserve capacity once, on this SegmentSieve's
         // very first activation (not per chunk -- a vector's capacity
-        // survives clear(), so this only needs to happen once ever), to
-        // avoid growing 384 small vectors one push_back at a time while
-        // hot. Distribution across (class, phase) is expected to be close
-        // to uniform, not exact, hence the margin.
+        // survives clear(), and main.cpp's sieve_chunk reuses one instance
+        // per thread across chunks), to avoid growing 384 small vectors one
+        // push_back at a time while hot. Distribution across (class, phase)
+        // is expected to be close to uniform, not exact, hence the margin.
         if (!med64_reserved_ && !med64_primes.empty()) {
             size_t per_list = med64_primes.size() / 384 * 2 + 16;
             for (auto& v : m64_cur_) v.reserve(per_list);
@@ -309,6 +309,23 @@ public:
             if (const uint64_t rem = count % 64)
                 primes += static_cast<uint64_t>(__builtin_popcountll(~wp[full] & ((uint64_t{1} << rem) - 1)));
             prime_count += primes;
+            return;
+        }
+        // Sinks that take wheel indices (GapBlockSink::write_k): a prime's
+        // index is just k_low + its bit position, no value to rebuild.
+        if constexpr (requires { out.write_k(uint64_t{0}); }) {
+            for (size_t w = 0; w < words_needed; ++w) {
+                uint64_t bits = ~words_[w];
+                uint64_t remaining = count - w * 64ULL; // >= 1 for every w < words_needed
+                if (remaining < 64) bits &= (1ULL << remaining) - 1ULL;
+                const uint64_t k_word = k_low + w * 64ULL;
+                while (bits) {
+                    out.write_k(k_word + static_cast<uint64_t>(__builtin_ctzll(bits)));
+                    ++local_prime_count;
+                    bits &= bits - 1;
+                }
+            }
+            prime_count += local_prime_count;
             return;
         }
         for (size_t w = 0; w < words_needed; ++w) {

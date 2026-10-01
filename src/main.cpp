@@ -178,63 +178,66 @@ static std::vector<ChunkRange> split_ranges(uint64_t limit, unsigned threads, ui
 // Runs a chunk through SegmentSieve, segment by segment, feeding every
 // found prime to 'out'. Shared by every pass (count-only, byte-counting,
 // writing) -- they only differ in which Writer they pass in.
+//
+// One SegmentSieve per thread and tier set, reused across that thread's
+// chunks (begin_chunk() resets every piece of per-chunk state; the segment
+// buffer needs no clearing, the presieve fill overwrites it), instead of
+// one per chunk: each construction allocated the 768 med64 lists and the
+// segment buffer again. Worker threads only live for one pass
+// (run_parallel_chunks), so the cache goes away with them.
 template <typename Writer>
-static void sieve_chunk(ChunkRange range, uint64_t seg_k_width, uint64_t base_prime_max,
-                         const std::vector<uint64_t>& small_primes,
-                         const std::vector<uint64_t>& med64_primes,
-                         const std::vector<uint64_t>& medium_primes,
-                         const std::vector<uint64_t>& sparse_primes,
-                         const Presieve& presieve,
-                         Writer& out, uint64_t& local_count,
+static void sieve_chunk(ChunkRange range, const TierSet& t, uint64_t base_prime_max,
+                         const Presieve& presieve, Writer& out, uint64_t& local_count,
                          std::atomic<uint64_t>& progress) {
-    SegmentSieve sieve(seg_k_width, base_prime_max, presieve, SUB_BLOCK_BYTES, !sparse_primes.empty(),
-                       medium_primes.size() >= MEDIUM_NTA_MIN_PRIMES, BIG_2310);
+    struct Slot {
+        const TierSet* tiers = nullptr;
+        std::unique_ptr<SegmentSieve> sieve;
+    };
+    thread_local Slot slots[2]; // a run has at most two tier sets (narrow, wide)
+    Slot* slot = slots[0].tiers == &t ? &slots[0]
+               : slots[1].tiers == &t ? &slots[1]
+               : slots[0].tiers == nullptr ? &slots[0] : &slots[1];
+    if (slot->tiers != &t) {
+        slot->sieve = std::make_unique<SegmentSieve>(t.width, base_prime_max, presieve, SUB_BLOCK_BYTES,
+                                                     !t.sparse.empty(), t.medium.size() >= MEDIUM_NTA_MIN_PRIMES,
+                                                     BIG_2310);
+        slot->tiers = &t;
+    }
+    SegmentSieve& sieve = *slot->sieve;
     sieve.begin_chunk();
-    for (uint64_t k_low = range.low; k_low < range.high; k_low += seg_k_width) {
-        uint64_t k_high = std::min(k_low + seg_k_width, range.high);
-        sieve.sieve_and_emit(k_low, k_high, small_primes, med64_primes, medium_primes, sparse_primes, out, local_count);
+    for (uint64_t k_low = range.low; k_low < range.high; k_low += t.width) {
+        uint64_t k_high = std::min(k_low + t.width, range.high);
+        sieve.sieve_and_emit(k_low, k_high, t.small, t.med64, t.medium, t.sparse, out, local_count);
         progress.fetch_add(k_high - k_low, std::memory_order_relaxed);
     }
 }
 
 // Count-only pass: no I/O, no byte accounting, just the prime count.
-static void count_only_worker(ChunkRange range, uint64_t seg_k_width, uint64_t base_prime_max,
-                               const std::vector<uint64_t>& small_primes,
-                               const std::vector<uint64_t>& med64_primes,
-                               const std::vector<uint64_t>& medium_primes,
-                               const std::vector<uint64_t>& sparse_primes,
+static void count_only_worker(ChunkRange range, const TierSet& t, uint64_t base_prime_max,
                                const Presieve& presieve,
                                uint64_t& out_count, std::atomic<uint64_t>& progress) {
     NullSink sink;
     uint64_t local_count = 0;
-    sieve_chunk(range, seg_k_width, base_prime_max, small_primes, med64_primes, medium_primes, sparse_primes, presieve, sink, local_count, progress);
+    sieve_chunk(range, t, base_prime_max, presieve, sink, local_count, progress);
     out_count = local_count;
 }
 
 // Byte-counting pass: no disk I/O, just measures how many text bytes each
 // thread's primes will take.
-static void count_worker(ChunkRange range, uint64_t seg_k_width, uint64_t base_prime_max,
-                          const std::vector<uint64_t>& small_primes,
-                          const std::vector<uint64_t>& med64_primes,
-                          const std::vector<uint64_t>& medium_primes,
-                          const std::vector<uint64_t>& sparse_primes,
+static void count_worker(ChunkRange range, const TierSet& t, uint64_t base_prime_max,
                           const Presieve& presieve,
                           uint64_t& out_bytes, uint64_t& out_count,
                           std::atomic<uint64_t>& progress) {
     ByteCounter counter;
     uint64_t local_count = 0;
-    sieve_chunk(range, seg_k_width, base_prime_max, small_primes, med64_primes, medium_primes, sparse_primes, presieve, counter, local_count, progress);
+    sieve_chunk(range, t, base_prime_max, presieve, counter, local_count, progress);
     out_bytes = counter.total_bytes;
     out_count = local_count;
 }
 
 // Write pass: re-sieves the same chunk and writes with pwrite() directly
 // into its (disjoint) region of the final file.
-static void emit_worker(int idx, ChunkRange range, uint64_t seg_k_width, uint64_t base_prime_max,
-                         const std::vector<uint64_t>& small_primes,
-                         const std::vector<uint64_t>& med64_primes,
-                         const std::vector<uint64_t>& medium_primes,
-                         const std::vector<uint64_t>& sparse_primes,
+static void emit_worker(int idx, ChunkRange range, const TierSet& t, uint64_t base_prime_max,
                          const Presieve& presieve,
                          int fd, uint64_t base_offset,
                          std::atomic<uint64_t>& progress) {
@@ -245,7 +248,7 @@ static void emit_worker(int idx, ChunkRange range, uint64_t seg_k_width, uint64_
         out.write_raw(SMALL_PRIMES_TEXT.data(), SMALL_PRIMES_BYTES);
     }
 
-    sieve_chunk(range, seg_k_width, base_prime_max, small_primes, med64_primes, medium_primes, sparse_primes, presieve, out, local_count, progress);
+    sieve_chunk(range, t, base_prime_max, presieve, out, local_count, progress);
     out.flush();
 }
 
@@ -258,11 +261,7 @@ static void emit_worker(int idx, ChunkRange range, uint64_t seg_k_width, uint64_
 // true global offset afterwards, from out_count -- see main()'s
 // is_db_output block), and SQLite doesn't care what order rows are
 // inserted in either way.
-static void emit_db_worker(int idx, ChunkRange range, uint64_t seg_k_width, uint64_t base_prime_max,
-                            const std::vector<uint64_t>& small_primes,
-                            const std::vector<uint64_t>& med64_primes,
-                            const std::vector<uint64_t>& medium_primes,
-                            const std::vector<uint64_t>& sparse_primes,
+static void emit_db_worker(int idx, ChunkRange range, const TierSet& t, uint64_t base_prime_max,
                             const Presieve& presieve,
                             SqlitePrimeStore& store,
                             uint64_t block_size, int zstd_level,
@@ -276,7 +275,7 @@ static void emit_db_worker(int idx, ChunkRange range, uint64_t seg_k_width, uint
         for (uint64_t p : WHEEL_PRIMES) sink.write_uint64(p);
     }
 
-    sieve_chunk(range, seg_k_width, base_prime_max, small_primes, med64_primes, medium_primes, sparse_primes, presieve, sink, local_count, progress);
+    sieve_chunk(range, t, base_prime_max, presieve, sink, local_count, progress);
     sink.flush();
     out_count = local_count;
 }
@@ -471,8 +470,9 @@ int main(int argc, char** argv) {
     // docs/RESEARCH.md#cache-topology-sizing-per-cpu-minimum-step-kept.
     // Skipped when the user already forced a value (-s, --l2-bytes,
     // --l1-bytes) or detection found nothing (non-Linux, sysfs unavailable).
+    // Read once: the sparse cutoff below needs it too.
+    const CpuCacheTopology topo = detect_cpu_cache_topology();
     if ((!opt.segment_width_set && !opt.l2_bytes_override) || !opt.l1_bytes_override) {
-        CpuCacheTopology topo = detect_cpu_cache_topology();
         // Only recompute when some CPU's share is genuinely smaller than
         // cpu0's own -- a uniform machine's minimum trivially equals cpu0's.
         if (!opt.segment_width_set && !opt.l2_bytes_override && !topo.l2_share.empty() && topo.l2_share[0]) {
@@ -557,7 +557,7 @@ int main(int argc, char** argv) {
     // --tune sparse=a/b overrides it (lowering only).
     // Evaluated after the power-of-2 fixup below, like med64_limit.
     uint64_t min_l2_share = 0;
-    for (uint64_t s : detect_cpu_cache_topology().l2_share)
+    for (uint64_t s : topo.l2_share)
         if (s && (min_l2_share == 0 || s < min_l2_share)) min_l2_share = s;
     constexpr uint64_t SPARSE_HALF_MIN_L2_SHARE = 512 * 1024;
     uint64_t sparse_num = 1;
@@ -614,11 +614,14 @@ int main(int argc, char** argv) {
     std::vector<uint64_t> presieve_primes_flat;
     for (const auto& group : PRESIEVE_GROUPS)
         presieve_primes_flat.insert(presieve_primes_flat.end(), group.begin(), group.end());
+    const uint64_t presieve_max = *std::max_element(presieve_primes_flat.begin(), presieve_primes_flat.end());
 
     auto classify = [&](TierSet& t, uint64_t m64_limit, uint64_t sp_limit) {
         for (uint64_t p : base_primes) {
             if (p < FIRST_WHEEL_PRIME) continue;
-            if (std::find(presieve_primes_flat.begin(), presieve_primes_flat.end(), p) != presieve_primes_flat.end()) continue;
+            if (p <= presieve_max &&
+                std::find(presieve_primes_flat.begin(), presieve_primes_flat.end(), p) != presieve_primes_flat.end())
+                continue;
             if (p < sp_limit) {
                 if (p < small_limit) t.small.push_back(p);
                 else if (p < m64_limit) t.med64.push_back(p);
@@ -766,9 +769,7 @@ int main(int argc, char** argv) {
                 ProgressGuard guard{done, prog};
 
                 run_parallel_chunks(actual_threads, num_chunks, [&](unsigned i) {
-                    const TierSet& t = tiers_for(ranges[i]);
-                    count_only_worker(ranges[i], t.width, base_limit, t.small, t.med64,
-                                       t.medium, t.sparse, presieve, prime_counts[i], progress);
+                    count_only_worker(ranges[i], tiers_for(ranges[i]), base_limit, presieve, prime_counts[i], progress);
                 });
             } // guard destructs here: progress thread joined before the summary prints below
 
@@ -820,9 +821,7 @@ int main(int argc, char** argv) {
                 ProgressGuard guard{done, prog};
 
                 run_parallel_chunks(actual_threads, num_chunks, [&](unsigned i) {
-                    const TierSet& t = tiers_for(ranges[i]);
-                    emit_db_worker(static_cast<int>(i), ranges[i], t.width, base_limit,
-                                    t.small, t.med64, t.medium, t.sparse, presieve,
+                    emit_db_worker(static_cast<int>(i), ranges[i], tiers_for(ranges[i]), base_limit, presieve,
                                     store, opt.db_block_size, opt.zstd_level, prime_counts[i], progress);
                 });
             }
@@ -863,9 +862,7 @@ int main(int argc, char** argv) {
             ProgressGuard guard{done, prog};
 
             run_parallel_chunks(actual_threads, num_chunks, [&](unsigned i) {
-                const TierSet& t = tiers_for(ranges[i]);
-                count_worker(ranges[i], t.width, base_limit, t.small, t.med64,
-                             t.medium, t.sparse, presieve, byte_counts[i], prime_counts[i], progress);
+                count_worker(ranges[i], tiers_for(ranges[i]), base_limit, presieve, byte_counts[i], prime_counts[i], progress);
             });
         }
 
@@ -901,9 +898,8 @@ int main(int argc, char** argv) {
 
             try {
                 run_parallel_chunks(actual_threads, num_chunks, [&](unsigned i) {
-                    const TierSet& t = tiers_for(ranges[i]);
-                    emit_worker(static_cast<int>(i), ranges[i], t.width, base_limit,
-                                t.small, t.med64, t.medium, t.sparse, presieve, fd, offsets[i], progress);
+                    emit_worker(static_cast<int>(i), ranges[i], tiers_for(ranges[i]), base_limit, presieve,
+                                fd, offsets[i], progress);
                 });
             } catch (...) {
                 ::close(fd);

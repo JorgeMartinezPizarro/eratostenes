@@ -1,14 +1,14 @@
 #pragma once
 // EratBig-style tables: mod-210 multiplier wheel over the mod-30 byte layout.
 //
-// Sparse-tier primes (p >= seg_k_width, at most ~1 hit/segment) only need
+// The med64, medium and sparse tiers (every prime > 163) only need
 // multipliers coprime to 210 = 2*3*5*7, not the full set coprime to 30:
 // any p*m where m is a multiple of 7 lands on a composite that's ALSO a
-// multiple of 7, which 7's own (small-tier) crossing-off already covers
+// multiple of 7, which the presieve pattern (presieve.hpp) already marks
 // across the whole range -- so those multiplier phases are simply
-// redundant work for this tier specifically, never a correctness gap.
-// 48/210 phases instead of 8/30 is ~14% fewer multiplier candidates per
-// prime (primesieve's own EratBig does the same for the same reason).
+// redundant work, never a correctness gap. 48/210 phases instead of 8/30
+// is ~14% fewer multiplier candidates per prime (primesieve's own EratBig
+// does the same for the same reason).
 #include <array>
 #include <cstdint>
 namespace big {

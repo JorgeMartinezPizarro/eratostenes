@@ -240,13 +240,10 @@ struct Options {
     // get pi(N). Set via -o/--output; ".db" switches to the compact SQLite
     // format, anything else is plain text.
     std::string output;
-    // Numeric width per segment (must be even). 0 means "auto": sized from
-    // N once it's known (see parse_args) so that no base prime ever
-    // falls below the dense/sparse cutoff into the (bucketed, costlier)
-    // sparse tier -- below that point, a *smaller* segment is strictly
-    // better (its bit array fits L1/L2 more easily), so the auto default
-    // is the smallest width that still keeps every base prime dense. An
-    // explicit -s overrides this and is used as given, no adjustment.
+    // Numeric width per segment (must be even). 0 means "auto": half the
+    // detected L2 (see parse_args), adjusted in main.cpp (smallest per-CPU
+    // L2 share on hybrids, doubled once the sparse tier exists, power of 2
+    // in bytes for the sparse ring). An explicit -s is used as given.
     uint64_t segment_width = 0;
     bool segment_width_set = false;      // true once -s/--segment-width is parsed
     bool show_help = false;
@@ -297,43 +294,79 @@ struct Options {
 };
 
 // Interprets suffixes: k=1e3 m=1e6 b=1e9 (short scale billion) t=1e12
-// Also accepts scientific notation (1e11) and plain numbers (100000000000)
+// Also accepts scientific notation (1e11, 2.5e15) and plain numbers
+// (100000000000). Parsed exactly, in integers: going through a double
+// rounded every odd integer above 2^53 (~9.007e15, below the 1e16 target)
+// to a neighbour, and llround overflowed past 2^63. The result must be a
+// whole number (1.5k is fine, 2.5 is an error) that fits in 64 bits.
 inline uint64_t parse_size(const std::string& raw) {
+    const auto invalid = [&] { return std::runtime_error("invalid size value: " + raw); };
+    const auto out_of_range = [&] { return std::runtime_error("size out of range: " + raw); };
     if (raw.empty()) throw std::runtime_error("empty size value");
     std::string s = raw;
-    char suffix = 0;
+    int exp10 = 0;
     char last = s.back();
     if (std::isalpha(static_cast<unsigned char>(last))) {
-        suffix = static_cast<char>(std::tolower(static_cast<unsigned char>(last)));
+        switch (std::tolower(static_cast<unsigned char>(last))) {
+            case 'k': exp10 = 3; break;
+            case 'm': exp10 = 6; break;
+            case 'b': exp10 = 9; break;    // short scale billion (10^9)
+            case 'g': exp10 = 9; break;    // giga, alias for b
+            case 't': exp10 = 12; break;
+            default: throw std::runtime_error("unknown size suffix: " + raw);
+        }
         s.pop_back();
     }
-    if (s.empty()) throw std::runtime_error("invalid size value: " + raw);
 
-    double value;
-    try {
-        size_t pos = 0;
-        value = std::stod(s, &pos);
-        if (pos != s.size()) throw std::runtime_error("invalid size value: " + raw);
-    } catch (const std::exception&) {
-        throw std::runtime_error("invalid size value: " + raw);
+    // mantissa digits (integer and fractional part) as one integer
+    using u128 = unsigned __int128;
+    constexpr u128 MANT_CAP = u128{1} << 120;
+    u128 mant = 0;
+    bool any_digit = false;
+    size_t i = 0;
+    for (bool frac = false; i < s.size(); ++i) {
+        char c = s[i];
+        if (c == '.' && !frac) { frac = true; continue; }
+        if (!std::isdigit(static_cast<unsigned char>(c))) break;
+        if (mant >= MANT_CAP) throw out_of_range();
+        mant = mant * 10 + static_cast<unsigned>(c - '0');
+        any_digit = true;
+        if (frac) --exp10;
     }
+    if (!any_digit) throw invalid();
+    if (i < s.size() && (s[i] == 'e' || s[i] == 'E')) {
+        ++i;
+        bool neg = false;
+        if (i < s.size() && (s[i] == '+' || s[i] == '-')) neg = s[i++] == '-';
+        int e = 0;
+        size_t first = i;
+        for (; i < s.size() && std::isdigit(static_cast<unsigned char>(s[i])); ++i) {
+            if (e > 1000) throw out_of_range();
+            e = e * 10 + (s[i] - '0');
+        }
+        if (i == first) throw invalid();
+        exp10 += neg ? -e : e;
+    }
+    if (i != s.size()) throw invalid();
 
-    double mult = 1.0;
-    switch (suffix) {
-        case 0:   mult = 1.0; break;
-        case 'k': mult = 1e3; break;
-        case 'm': mult = 1e6; break;
-        case 'b': mult = 1e9; break;   // short scale billion (10^9)
-        case 'g': mult = 1e9; break;   // giga, alias for b
-        case 't': mult = 1e12; break;
-        default:
-            throw std::runtime_error("unknown size suffix: " + raw);
+    for (; exp10 < 0; ++exp10) {
+        if (mant % 10 != 0) throw std::runtime_error("size is not a whole number: " + raw);
+        mant /= 10;
     }
-    double result = value * mult;
-    if (result < 0 || result > 1.8e19) {
-        throw std::runtime_error("size out of range: " + raw);
+    for (; exp10 > 0; --exp10) {
+        if (mant > UINT64_MAX) throw out_of_range();
+        mant *= 10;
     }
-    return static_cast<uint64_t>(std::llround(result));
+    if (mant > UINT64_MAX) throw out_of_range();
+    return static_cast<uint64_t>(mant);
+}
+
+// Strict unsigned count for -t: std::stoul accepts "-1" and wraps it to
+// ULONG_MAX threads.
+inline unsigned parse_threads(const std::string& v) {
+    if (v.empty() || v.size() > 6 || !std::all_of(v.begin(), v.end(), [](char c) { return std::isdigit(static_cast<unsigned char>(c)); }))
+        throw std::runtime_error("invalid thread count: " + v);
+    return static_cast<unsigned>(std::stoul(v));
 }
 
 // "a/b" or "a" (= a/1), for --tune's cutoff fractions.
@@ -449,7 +482,7 @@ inline Options parse_args(int argc, char** argv) {
         } else if (a == "-o" || a == "--output") {
             opt.output = need_value(i, a.c_str());
         } else if (a == "-t" || a == "--threads") {
-            opt.threads = static_cast<unsigned>(std::stoul(need_value(i, a.c_str())));
+            opt.threads = parse_threads(need_value(i, a.c_str()));
         } else if (a == "-s" || a == "--segment-width") {
             opt.segment_width = parse_size(need_value(i, a.c_str()));
             opt.segment_width_set = true;

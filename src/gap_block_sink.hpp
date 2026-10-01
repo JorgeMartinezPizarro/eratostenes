@@ -63,9 +63,31 @@ public:
         if (count_in_block_ == 0) {
             block_start_prime_ = p;
         } else {
-            encode_gap(last_, p, raw_);
+            encode_gap(last_value(), p, raw_);
         }
         last_ = p;
+        last_on_wheel_ = on_wheel(p);
+        if (last_on_wheel_) last_k_ = wheel_index(p);
+        if (++count_in_block_ == block_size_) flush_block();
+    }
+
+    // Same encoding, fed the prime's wheel index instead of its value
+    // (SegmentSieve::sieve_and_emit uses this when the sink has it): the
+    // wheel gap is just k - last_k_. Through write_uint64 every prime went
+    // wheel index -> value in the extraction loop and back to wheel index
+    // (twice: this prime and the previous one) in encode_gap, about half
+    // of all CPU time in .db mode at 1e10. The value is only rebuilt for a
+    // block's first prime and for the rare escape.
+    void write_k(uint64_t k) {
+        if (count_in_block_ == 0) {
+            block_start_prime_ = wheel_number(k);
+        } else if (last_on_wheel_ && k - last_k_ <= 255) {
+            raw_.push_back(static_cast<uint8_t>(k - last_k_));
+        } else {
+            encode_gap(last_value(), wheel_number(k), raw_);
+        }
+        last_k_ = k;
+        last_on_wheel_ = true;
         if (++count_in_block_ == block_size_) flush_block();
     }
 
@@ -76,6 +98,10 @@ public:
     }
 
 private:
+    // The previous prime's value: kept as a wheel index when it's on the
+    // wheel (write_k never computes the value), as the value otherwise.
+    uint64_t last_value() const { return last_on_wheel_ ? wheel_number(last_k_) : last_; }
+
     void flush_block() {
         size_t csize = ZSTD_compress(cbuf_.data(), cbuf_.size(), raw_.data(), raw_.size(), zstd_level_);
         if (ZSTD_isError(csize)) throw std::runtime_error("zstd compression failed");
@@ -103,5 +129,7 @@ private:
     std::vector<uint8_t> cbuf_;
     uint64_t count_in_block_ = 0;
     uint64_t block_start_prime_ = 0;
-    uint64_t last_ = 0;
+    uint64_t last_ = 0;          // previous prime's value, valid when !last_on_wheel_
+    uint64_t last_k_ = 0;        // previous prime's wheel index, valid when last_on_wheel_
+    bool last_on_wheel_ = false;
 };

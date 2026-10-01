@@ -31,7 +31,7 @@ inline std::vector<uint64_t> sieve_base_primes(uint64_t limit) {
     for (uint64_t i = 0; i < count; ++i) {
         if (is_composite[i]) continue;
         uint64_t p = 2 * i + 3;
-        if (p * p > limit) continue;
+        if (p * p > limit) break; // every later p is larger: nothing left to mark
         // first odd multiple of p to mark: p*p (already odd since p is)
         for (uint64_t n = p * p; n <= limit; n += 2 * p) {
             is_composite[(n - 3) / 2] = true;

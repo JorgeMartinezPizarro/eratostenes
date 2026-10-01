@@ -70,6 +70,7 @@ throughout below).
   - [Sparse tier: mod-2310 multiplier wheel (kept, 2026-09-30)](#sparse-tier-mod-2310-multiplier-wheel-kept-2026-09-30)
 - [gap_encoding.hpp](#gap_encodinghpp)
   - [Gap encoding: wheel-index deltas](#gap-encoding-wheel-index-deltas)
+  - [`.db` extraction in wheel indices: `GapBlockSink::write_k` (kept, 2026-10-01)](#db-extraction-in-wheel-indices-gapblocksinkwrite_k-kept-2026-10-01)
 - [sqlite_prime_store.hpp](#sqlite_prime_storehpp)
   - [`journal_mode=OFF` for the bulk load (tried, reverted, 2026-10-01)](#journal_modeoff-for-the-bulk-load-tried-reverted-2026-10-01)
   - [Write-pipeline knobs: `BATCH`, `--db-block-size`, `wal_autocheckpoint` (all measured, kept at their defaults)](#write-pipeline-knobs-batch---db-block-size-wal_autocheckpoint-all-measured-kept-at-their-defaults)
@@ -1757,6 +1758,26 @@ delta, used when prev is off the wheel (2, 3, 5) and for wheel gaps over 255
 `format_version`, since decoding a v1 block as v2 would silently return wrong
 primes.
 
+### `.db` extraction in wheel indices: `GapBlockSink::write_k` (kept, 2026-10-01)
+
+Profiling 1e10 `-o x.db -t 12` put 51% of all cycles in
+`sieve_chunk<GapBlockSink>`, i.e. extraction plus gap encoding, more than the
+whole sieve. The sieve knows each prime's wheel index k (k_low + bit
+position), but the extraction loop turned it into a value (`q * 30 + R[r]`)
+and `encode_gap` turned that value, and the previous prime's, back into wheel
+indices (division by 30, modulo, `WHEEL_POS` lookup) only to subtract them.
+`sieve_and_emit` now hands k straight to sinks that have `write_k` (checked
+with a `requires` expression); the gap is `k - last_k_`, and the value is only
+rebuilt for a block's first prime and for escapes. Same bytes on disk: `-t 1`
+`.db` files at 1e9, 1e8 with 1000-prime blocks and 1e5 with 7-prime blocks are
+byte-identical to the old binary's.
+
+Dev PC, 3 interleaved reps: 1e10 `-t 12` instructions:u 41.10G -> 30.14G
+(-26.7%), cycles:u 23.54G -> 19.35G (-17.8%). Wall-clock on the WSL disk didn't
+move (1.1-1.6 s both, I/O-bound there); writing to tmpfs it did: `-t 12`
+0.70 -> 0.63 s (-10%), `-t 2` 1.67 -> 1.34 s (-20%). So the win shows wherever
+the CPU, not the disk, is the limit (few cores, fast storage).
+
 ## sqlite_prime_store.hpp
 
 ### `journal_mode=OFF` for the bulk load (tried, reverted, 2026-10-01)
@@ -1959,6 +1980,28 @@ cost, on this codebase's target allocator (glibc). A different allocator
 (jemalloc, tcmalloc, or a `--static` musl build) could plausibly behave
 differently here; that would be a new, from-scratch measurement, not a
 re-run of this one.
+
+**Follow-up (2026-10-01): kept.** The per-chunk construction grew since:
+med64's 768 lists are reserved on every new instance, and the sparse tier's
+block arenas start empty. Profiling 1e10 `-t 12` showed `malloc`/`free`/
+`memset` at ~1% and a tiny-tail startup at 6.7 ms vs primesieve's 2.3 ms.
+Reimplemented without threading a slot index through `run_parallel_chunks`:
+`sieve_chunk` keeps a `thread_local` cache of up to two instances, keyed by
+the `TierSet` (a run has a narrow and a wide one); worker threads only live
+for one pass, so the cache goes with them. Dev PC, `perf stat`, 3 interleaved
+reps (2 for the tail), identical counts:
+
+| | per chunk | per thread | delta |
+|---|---:|---:|---:|
+| 1e10 `-t 12` cycles:u | 7.626G | 7.502G | -1.6% |
+| 1e11 `-t 12` cycles:u | 92.66G | 92.10G | -0.6% |
+| 1e13 last 0.1% `-t 12` cycles:u | 18.03G | 17.50G | -2.9% |
+| tiny 1e10 tail `-t 12`, wall | 6.67 ms | 6.12 ms | -0.55 ms |
+
+Instructions drop too (-1.7% at 1e10, -0.9% at 1e11), so this isn't the
+frequency drift that sank the first measurement; the gain is largest where
+chunks are short (small N, `--start` tails). At 1e12+ full runs it stays
+small, as the first entry found.
 
 ### `run_parallel_chunks`: chunk-granularity idle-time investigation (2026-09-25, external review, Opus 5.5)
 

@@ -18,7 +18,8 @@
 #   5. Modo conteo en N=1e10 contra primecount con los caminos que solo
 #      aparecen con N grande o -s pequeño (tier disperso forzado, en rueda
 #      mod 2310 y mod 210; sin med64; cortes rebajados, combinados), y
-#      --start sobre varios tramos (el recuento es pi(N) - pi(N0 - 1)).
+#      --start sobre varios tramos (el recuento es pi(N) - pi(N0 - 1)),
+#      uno de ellos por encima de 2^53 (parseo exacto de N).
 # Los valores esperados en 1, 2, 3 y 5 salen de primecount, no de constantes
 # hardcodeadas -- necesita estar instalado (Debian/Ubuntu: paquete
 # primecount-bin; ver docker/Dockerfile, etapa "dev").
@@ -250,6 +251,9 @@ check_start "$N5" 9000000000 -t "$THREADS"
 check_start "$N5" 9999000001 -t 3 -s 100000
 check_start 1000000 2 -t "$THREADS"
 check_start 100000000 7 -t 2 --tune big2310=0 -s 20000
+# Por encima de 2^53 (~9.007e15): 9007199254740997 es primo y = 1 mod 4, asi
+# que leerlo via double lo redondeaba a ...996 y el tramo perdia ese primo.
+check_start 9007199254740997 9007199254739761 -t "$THREADS"
 if "$BIN" 1000000 --start 1000 -o "$WORKDIR/start.txt" >/dev/null 2>&1; then
     printf "FAIL %-40s deberia rechazarse\n" "--start con -o"
     fail=1
