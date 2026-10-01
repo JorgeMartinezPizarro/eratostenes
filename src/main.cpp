@@ -617,6 +617,9 @@ int main(int argc, char** argv) {
     const uint64_t presieve_max = *std::max_element(presieve_primes_flat.begin(), presieve_primes_flat.end());
 
     auto classify = [&](TierSet& t, uint64_t m64_limit, uint64_t sp_limit) {
+        // base_primes is sorted: the sparse tier is its tail (50M primes at 1e18).
+        t.sparse.reserve(static_cast<size_t>(base_primes.end() -
+                                             std::lower_bound(base_primes.begin(), base_primes.end(), sp_limit)));
         for (uint64_t p : base_primes) {
             if (p < FIRST_WHEEL_PRIME) continue;
             if (p <= presieve_max &&
@@ -651,8 +654,12 @@ int main(int argc, char** argv) {
     uint64_t narrow_k_end = 0; // chunks with high <= this use `narrow`
     bool narrow_early = !opt.segment_width_set && sparse_regime && narrow.width >= 64 && narrow.width % 64 == 0;
     if (narrow_early) {
-        classify(narrow, narrow.width * med64_num / med64_den, narrow.width);
         narrow_k_end = wheel_count_upto(std::min(opt.limit, narrow.width * narrow.width));
+        // A --start tail beginning past narrow^2 (split_ranges' first k) has
+        // no narrow chunk: skip a second pass over every base prime.
+        uint64_t first_k = opt.start < opt.limit ? wheel_count_upto(opt.start) / 64 * 64 : 0;
+        if (first_k < narrow_k_end) classify(narrow, narrow.width * med64_num / med64_den, narrow.width);
+        else narrow_k_end = 0;
     }
     auto tiers_for = [&](const ChunkRange& r) -> const TierSet& {
         return r.high <= narrow_k_end ? narrow : wide;
@@ -698,11 +705,23 @@ int main(int argc, char** argv) {
         // and cores idle in the last round (~20%), which skews wall-clock and,
         // on HT cores, cycles:u too. 8/thread: 3.6% idle on a 1e15 1% tail
         // (i5-13500, 20 threads); per-chunk setup is ~0.15% there.
+        //
+        // Fewer per thread (never under one) when that setup stops being
+        // small: at the top of N every chunk activates all ~sqrt(N)/ln base
+        // primes, ~1.3s per chunk and thread at 1e18 (dev PC, 12 threads; one
+        // activation costs about as much as sieving 2.6 wheel indices). A
+        // chunk spans at least K_PER_BASE_PRIME indices per base prime, so
+        // activation stays around 2% of its work: 8/thread in the last 1e11
+        // below 1e15, 3 below 1e16, 1 below 1e17 and 1e18 (12 threads).
         constexpr uint64_t TAIL_CHUNKS_PER_THREAD = 8;
+        constexpr uint64_t K_PER_BASE_PRIME = 128;
         uint64_t span_k = wheel_count_upto(opt.limit) - wheel_count_upto(range_start);
         double frac = static_cast<double>(span_k) / static_cast<double>(wheel_count_upto(opt.limit));
         uint64_t scaled = static_cast<uint64_t>(target_chunks * frac + 0.5);
-        uint64_t floor_chunks = std::min<uint64_t>(uint64_t{opt.threads} * TAIL_CHUNKS_PER_THREAD,
+        uint64_t per_thread = std::clamp<uint64_t>(
+            span_k / (K_PER_BASE_PRIME * uint64_t{opt.threads} * std::max<uint64_t>(1, base_primes.size())),
+            1, TAIL_CHUNKS_PER_THREAD);
+        uint64_t floor_chunks = std::min<uint64_t>(uint64_t{opt.threads} * per_thread,
                                                    span_k / (MIN_SEGS_PER_CHUNK * seg_k_width));
         target_chunks = static_cast<unsigned>(std::max<uint64_t>({uint64_t{1}, scaled, floor_chunks}));
     }

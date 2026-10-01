@@ -2158,6 +2158,60 @@ restores the old behavior exactly. Measured with that env var on one binary
 effect at large N, where chunks span thousands of segments. Should matter
 more on the server; not yet measured there.
 
+### Top-of-range tails: startup costs that grow with sqrt(N) (kept, 2026-10-01)
+
+`make benchmark-tails` (the last 1e11 numbers below N, see
+[BENCHMARK.md](BENCHMARK.md)) lost more the higher the window: server
+0.95/1.17/1.49/1.92x at 1e15/1e16/1e17/1e18, dev PC 0.83/0.91/1.13/1.76x. Sieving
+a 1e11 window costs about the same at every height; what grows is pi(sqrt N):
+1.95M base primes at 1e15, 50.8M at 1e18. Fitting T(W) = F + c*W over two
+window widths (dev PC, 12 threads) gave a fixed part F of ~4-5 s at 1e17 and
+~23 s at 1e18, against primesieve's 0.1-0.5 s and 1.3 s, with similar slopes
+c. Startup with timestamped log lines, 1e18, 1e10 window: base-prime sieve
+7.8 s on one thread, `classify` 1.4 s, worker threads 13.2 s, of which ~2.5 s
+was sieving and the rest eight activations per thread of 50.5M sparse primes
+(~1.3 s each; all 12 threads write their bucket rings at once, so it is
+memory-bound).
+
+Three changes, none of them in the per-segment loop:
+
+- `sieve_base_primes` (base_sieve.hpp): segmented, 32 KiB windows of odd
+  numbers (a byte each), each sieving prime carrying its next multiple between
+  windows, instead of one 62 MB `vector<bool>`; the result is reserved from
+  Dusart's bound on pi(x) (within 0.05% at 1e9), so it is never reallocated.
+  sqrt(1e17): 1.44 s -> 0.26 s; sqrt(1e18) = 1e9: 7.8 s -> 0.86 s. Same output
+  as the old sieve for every limit up to 70000 and at sqrt(1e10..1e18).
+- `--start` tails: fewer chunks per thread than `TAIL_CHUNKS_PER_THREAD` (8)
+  once activation would weigh: a chunk spans at least `K_PER_BASE_PRIME` =
+  128 wheel indices per base prime (one activation costs about as much as
+  sieving 2.6 indices, so ~2%), never under one chunk per thread. 12 threads,
+  last 1e11: 8 per thread below 1e14 and 1e15 (unchanged), 3 below 1e16, 1
+  below 1e17 and 1e18, i.e. primesieve's one setup per thread. Full runs don't
+  take this path; their chunks span ~1e13 numbers at 1e16.
+- `classify`: the narrow tier set is skipped when a tail starts past narrow^2
+  (no chunk can use it: one pass over the base primes instead of two), and
+  the sparse vector is reserved.
+
+Dev PC, 12 threads, `REPS=2 make benchmark-tails`, best of 2 (primesieve
+12.7):
+
+| last 1e11 below | before | after | primesieve | ratio before -> after |
+|---|---:|---:|---:|---:|
+| 1e15 | 8.25 s | 8.95 s | 10.01 s | 0.83x -> 0.89x |
+| 1e16 | 11.64 s | 11.12 s | 12.79 s | 0.91x -> 0.87x |
+| 1e17 | 18.48 s | 14.80 s | 16.70 s | 1.13x -> 0.89x |
+| 1e18 | 37.01 s | 20.60 s | 21.43 s | 1.76x -> 0.96x |
+
+1e14 and 1e15 keep their chunking, so they only gain the (small) base-sieve
+saving there. An interleaved A/B of both binaries (same flags, ABBA, 6 runs
+each) ties: 1e14 mean 5.43 s vs 5.43 s, 1e15 median 8.10 s vs 8.09 s, with
+one ~+15% outlier on each side, like this table's 8.95 s. All `make test`
+cases pass.
+
+Not measured yet: the server after the change. One chunk per thread at 1e17
+and above gives up the queue's balancing between P- and E-cores there, as
+primesieve's even split does.
+
 ### i5-13500 server gap vs primesieve: medium-tier call count, sparse cutoff 1/2 gated on per-thread L2 (2026-09-28)
 
 Context: dev PC (i5-11400F, symmetric) is now below primesieve at every N in
