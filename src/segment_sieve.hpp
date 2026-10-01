@@ -125,19 +125,17 @@ public:
                 free_.push_back(reinterpret_cast<Blk*>(c.get() + i * BLK_BYTES));
     }
 
-    template <typename Writer>
-    void sieve_and_emit(uint64_t k_low, uint64_t k_high,
-                         const std::vector<uint64_t>& small_primes,
-                         const std::vector<uint64_t>& med64_primes,
-                         const std::vector<uint64_t>& medium_primes,
-                         std::span<const uint64_t> sparse_primes,
-                         Writer& out, uint64_t& prime_count) {
-        uint64_t count = (k_high > k_low) ? (k_high - k_low) : 0;
-        if (count == 0) return;
-
-        size_t words_needed = (count + 63) / 64;
-        uint64_t bytes_needed = (count + 7) / 8;
-
+    // Activates every base prime that becomes relevant in [k_low, k_high)
+    // (p*p below its end) and returns how many: run by sieve_and_emit on
+    // every segment, and by main.cpp's sieve_chunk on its own (timed) at the
+    // start of a chunk that doesn't carry on from the previous one, where it
+    // activates every base prime up to sqrt(k_high's number) at once.
+    size_t activate(uint64_t k_low, uint64_t k_high,
+                    const std::vector<uint64_t>& small_primes,
+                    const std::vector<uint64_t>& med64_primes,
+                    const std::vector<uint64_t>& medium_primes,
+                    std::span<const uint64_t> sparse_primes) {
+        const size_t before = next_small_idx_ + next_med64_idx_ + next_medium_idx_ + next_sparse_idx_;
         uint64_t high_n = wheel_number(k_high); // exclusive numeric bound, valid for the p*p cutoff
         uint64_t low_n = wheel_number(k_low);
 
@@ -214,6 +212,23 @@ public:
             push_sparse_entry(static_cast<uint32_t>((cur_segment_ + ahead) & (num_buckets_ - 1)), e);
             ++next_sparse_idx_;
         }
+        return next_small_idx_ + next_med64_idx_ + next_medium_idx_ + next_sparse_idx_ - before;
+    }
+
+    template <typename Writer>
+    void sieve_and_emit(uint64_t k_low, uint64_t k_high,
+                         const std::vector<uint64_t>& small_primes,
+                         const std::vector<uint64_t>& med64_primes,
+                         const std::vector<uint64_t>& medium_primes,
+                         std::span<const uint64_t> sparse_primes,
+                         Writer& out, uint64_t& prime_count) {
+        uint64_t count = (k_high > k_low) ? (k_high - k_low) : 0;
+        if (count == 0) return;
+
+        size_t words_needed = (count + 63) / 64;
+        uint64_t bytes_needed = (count + 7) / 8;
+
+        activate(k_low, k_high, small_primes, med64_primes, medium_primes, sparse_primes);
 
         // Small tier, one L1-sized sub-block at a time: presieve fill,
         // then every small prime crossed off inside that sub-block while

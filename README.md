@@ -123,12 +123,12 @@ The last 1e11 numbers below N (`make benchmark-tails`):
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
-| 1e13 | 2.55s | 2.736s | 0.93x |
-| 1e14 | 3.43s | 3.794s | 0.90x |
-| 1e15 | 4.62s | 4.521s | 1.02x |
-| 1e16 | 5.44s | 5.295s | 1.03x |
-| 1e17 | 6.52s | 6.175s | 1.06x |
-| 1e18 | 8.21s | 7.866s | 1.04x |
+| 1e13 | 2.53s | 2.815s | 0.90x |
+| 1e14 | 3.77s | 3.898s | 0.97x |
+| 1e15 | 4.55s | 4.447s | 1.02x |
+| 1e16 | 5.51s | 5.056s | 1.09x |
+| 1e17 | 6.47s | 6.146s | 1.05x |
+| 1e18 | 8.22s | 7.944s | 1.03x |
 
 The same two tables (`make benchmark`, `make benchmark-tails`) on other machines: [docs/BENCHMARK.md](docs/BENCHMARK.md).
 

@@ -134,9 +134,20 @@ static bool BIG_2310 = true;
 static bool DEBUG_IDLE = false;
 
 // Smallest piece (wheel indices) a worker steals from another's run in
-// run_parallel_chunks: the thief pays one activation of every base prime for
-// it, so the piece must take longer to sieve than that; set in main().
+// run_parallel_chunks before the run has measured anything: the thief pays
+// one activation of every base prime for it, so the piece must take longer
+// to sieve than that; set in main().
 static uint64_t STEAL_MIN_K = 0;
+
+// What sieve_chunk measured on its last chunk, for run_parallel_chunks'
+// steal decisions (read back on the same thread right after the chunk).
+struct ChunkStats {
+    double activate_s = 0;  // fresh start: time to activate the base primes
+    uint64_t activated = 0; // how many it activated (0: carried on, nothing timed)
+    double sieve_s = 0;     // the rest of the chunk
+    uint64_t k = 0;         // wheel indices in the chunk
+};
+static thread_local ChunkStats t_chunk_stats;
 
 struct ChunkRange {
     uint64_t low;   // first wheel index of the chunk (inclusive)
@@ -224,13 +235,27 @@ static void sieve_chunk(ChunkRange range, const TierSet& t, uint64_t base_prime_
         slot->next_k = UINT64_MAX;
     }
     SegmentSieve& sieve = *slot->sieve;
-    if (slot->next_k != range.low) sieve.begin_chunk();
+    ChunkStats& st = t_chunk_stats;
+    st = {};
+    auto t0 = std::chrono::steady_clock::now();
+    if (slot->next_k != range.low) {
+        // Fresh start: activate up front (the first sieve_and_emit would do
+        // it anyway) so it can be timed apart from the sieving.
+        sieve.begin_chunk();
+        st.activated = sieve.activate(range.low, std::min(range.low + t.width, range.high),
+                                      t.small, t.med64, t.medium, t.sparse);
+        const auto t1 = std::chrono::steady_clock::now();
+        st.activate_s = std::chrono::duration<double>(t1 - t0).count();
+        t0 = t1;
+    }
     slot->next_k = UINT64_MAX; // until this chunk is done (an exception leaves it unusable)
     for (uint64_t k_low = range.low; k_low < range.high; k_low += t.width) {
         uint64_t k_high = std::min(k_low + t.width, range.high);
         sieve.sieve_and_emit(k_low, k_high, t.small, t.med64, t.medium, t.sparse, out, local_count);
         progress.fetch_add(k_high - k_low, std::memory_order_relaxed);
     }
+    st.sieve_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    st.k = range.high - range.low;
     if ((range.high - range.low) % t.width == 0) slot->next_k = range.high;
 }
 
@@ -353,15 +378,27 @@ struct ProgressGuard {
 // Each worker starts on its own contiguous run of chunks (an equal share of
 // the indices) and walks it in order, so sieve_chunk carries its sieve from
 // one chunk into the next instead of activating every base prime per chunk.
-// A worker whose run is empty takes the back half of the run with the most
-// chunks left -- one activation for the whole stolen piece -- if that piece
-// spans at least STEAL_MIN_K indices; otherwise it stops. Many more chunks
-// than workers keep the steals fine-grained: chunks aren't equal-work (see
-// ALGORITHM.md §4) and neither are cores (P/E, SMT siblings). See
+// A worker whose run is empty steals the back of another run, paying one
+// activation for the whole piece. Many more chunks than workers keep the
+// steals fine-grained: chunks aren't equal-work (see ALGORITHM.md §4) and
+// neither are cores (P/E, SMT siblings). See
 // docs/RESEARCH.md#run_parallel_chunks-chunk-granularity-idle-time-investigation-2026-09-25-external-review-opus-55
 // for CHUNKS_PER_THREAD=150 (tuned with a plain shared-counter queue).
+//
+// Steals are priced with what the run itself has measured (sieve_chunk's
+// ChunkStats, no extra work): each worker's sieving rate (wheel indices per
+// second) and the time to activate one base prime, pooled over every fresh
+// start so far. The victim is the run whose own worker would take the
+// longest to finish it; the thief takes the back piece, in whole chunks,
+// that has both finish together -- activation + piece / thief's rate =
+// (left - piece) / victim's rate -- so a fast core takes more than half
+// from a slow one, and nothing when the piece doesn't pay its activation.
+// fresh_primes[i]: how many base primes a fresh start at chunk i activates.
+// Until a worker has finished a chunk, the fallback is the back half of the
+// longest run if it spans STEAL_MIN_K indices.
 template <typename Fn>
-static void run_parallel_chunks(unsigned workers, const std::vector<ChunkRange>& ranges, Fn&& fn) {
+static void run_parallel_chunks(unsigned workers, const std::vector<ChunkRange>& ranges,
+                                const std::vector<uint64_t>& fresh_primes, Fn&& fn) {
     const unsigned num_chunks = static_cast<unsigned>(ranges.size());
     struct Run { unsigned next, end; };
     std::vector<Run> runs(workers);
@@ -370,17 +407,49 @@ static void run_parallel_chunks(unsigned workers, const std::vector<ChunkRange>&
                    static_cast<unsigned>(uint64_t{num_chunks} * (w + 1) / workers)};
     std::mutex runs_mu; // one lock per chunk taken: chunks take milliseconds at least
     unsigned steals = 0;
-    // Next chunk index for worker w, or num_chunks when it should stop.
-    auto take = [&](unsigned w) -> unsigned {
+    std::vector<double> sieve_s(workers, 0.0); // measured so far, under runs_mu
+    std::vector<uint64_t> sieved_k(workers, 0);
+    double activate_s = 0;
+    uint64_t activated = 0;
+    auto rate = [&](unsigned v) { return sieve_s[v] > 0 ? static_cast<double>(sieved_k[v]) / sieve_s[v] : 0.0; };
+    auto left_k = [&](const Run& r) { return static_cast<double>(ranges[r.end - 1].high - ranges[r.next].low); };
+    // Next chunk index for worker w (done: what its last chunk measured), or
+    // num_chunks when it should stop.
+    auto take = [&](unsigned w, const ChunkStats* done) -> unsigned {
         std::lock_guard<std::mutex> lk(runs_mu);
+        if (done) {
+            sieve_s[w] += done->sieve_s;
+            sieved_k[w] += done->k;
+            activate_s += done->activate_s;
+            activated += done->activated;
+        }
         Run& own = runs[w];
         if (own.next == own.end) {
-            unsigned victim = workers, left = 1;
-            for (unsigned v = 0; v < workers; ++v)
-                if (runs[v].end - runs[v].next > left) { victim = v; left = runs[v].end - runs[v].next; }
-            if (victim == workers) return num_chunks; // no run with 2+ chunks left
-            unsigned mid = runs[victim].end - left / 2;
-            if (ranges[runs[victim].end - 1].high - ranges[mid].low < STEAL_MIN_K) return num_chunks;
+            unsigned victim = workers, mid = 0;
+            const double r_t = rate(w);
+            if (r_t > 0 && activated > 0) {
+                double longest = 0;
+                for (unsigned v = 0; v < workers; ++v) {
+                    if (runs[v].end - runs[v].next < 2) continue; // its owner keeps the next chunk
+                    const double t_v = left_k(runs[v]) / (rate(v) > 0 ? rate(v) : r_t);
+                    if (t_v > longest) { longest = t_v; victim = v; }
+                }
+                if (victim == workers) return num_chunks;
+                const Run& vr = runs[victim];
+                const double r_v = rate(victim) > 0 ? rate(victim) : r_t;
+                const double act = activate_s / static_cast<double>(activated) * static_cast<double>(fresh_primes[vr.end - 1]);
+                const double piece = (left_k(vr) / r_v - act) / (1 / r_t + 1 / r_v);
+                mid = vr.end;
+                while (mid - 1 > vr.next && static_cast<double>(ranges[vr.end - 1].high - ranges[mid - 1].low) <= piece) --mid;
+                if (mid == vr.end) return num_chunks; // not even one chunk pays its activation
+            } else {
+                unsigned left = 1;
+                for (unsigned v = 0; v < workers; ++v)
+                    if (runs[v].end - runs[v].next > left) { victim = v; left = runs[v].end - runs[v].next; }
+                if (victim == workers) return num_chunks; // no run with 2+ chunks left
+                mid = runs[victim].end - left / 2;
+                if (ranges[runs[victim].end - 1].high - ranges[mid].low < STEAL_MIN_K) return num_chunks;
+            }
             own = {mid, runs[victim].end};
             runs[victim].end = mid;
             ++steals;
@@ -398,11 +467,8 @@ static void run_parallel_chunks(unsigned workers, const std::vector<ChunkRange>&
     for (unsigned w = 0; w < workers; ++w) {
         pool.emplace_back([&fn, &errors, &take, num_chunks, w, debug_idle, &finish, t0]() {
             try {
-                for (;;) {
-                    unsigned idx = take(w);
-                    if (idx >= num_chunks) break;
+                for (unsigned idx = take(w, nullptr); idx < num_chunks; idx = take(w, &t_chunk_stats))
                     fn(idx);
-                }
                 if (debug_idle) {
                     finish[w] = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
                 }
@@ -417,8 +483,16 @@ static void run_parallel_chunks(unsigned workers, const std::vector<ChunkRange>&
         double lo = finish[0], hi = finish[0], idle_sum = 0;
         for (double f : finish) { lo = std::min(lo, f); hi = std::max(hi, f); }
         for (double f : finish) idle_sum += (hi - f);
-        std::fprintf(stderr, "[idle] chunks=%u workers=%u steals=%u min=%.3fs max=%.3fs idle=%.1f%%\n",
-                     num_chunks, workers, steals, lo, hi, 100.0 * idle_sum / (workers * hi));
+        double r_lo = 0, r_hi = 0;
+        for (unsigned v = 0; v < workers; ++v) {
+            const double r = rate(v) / 1e6;
+            if (r > 0 && (r_lo == 0 || r < r_lo)) r_lo = r;
+            r_hi = std::max(r_hi, r);
+        }
+        std::fprintf(stderr, "[idle] chunks=%u workers=%u steals=%u activation=%.1f ns/prime "
+                     "rate=%.0f-%.0f Mk/s min=%.3fs max=%.3fs idle=%.1f%%\n",
+                     num_chunks, workers, steals, activated ? 1e9 * activate_s / static_cast<double>(activated) : 0.0,
+                     r_lo, r_hi, lo, hi, 100.0 * idle_sum / (workers * hi));
     }
 }
 
@@ -794,13 +868,23 @@ int main(int argc, char** argv) {
     unsigned num_chunks = static_cast<unsigned>(ranges.size());
     unsigned actual_threads = std::min<unsigned>(opt.threads, num_chunks);
 
-    // A steal (run_parallel_chunks) activates every base prime once for the
-    // stolen piece; at the top of N that is all ~sqrt(N)/ln of them, about
-    // as much as sieving 2.6 wheel indices each (dev PC, 1e18, 12 threads
-    // activating at once). Stealing pays when the piece takes longer than
-    // that: at least 4 indices per base prime, ~1.5x margin.
+    // Steal threshold until the run has measured its own activation cost and
+    // rates (run_parallel_chunks): a steal activates every base prime once
+    // for the stolen piece; at the top of N that is all ~sqrt(N)/ln of them,
+    // about as much as sieving 2.6 wheel indices each (dev PC, 1e18, 12
+    // threads activating at once). At least 4 indices per base prime.
     constexpr uint64_t STEAL_K_PER_BASE_PRIME = 4;
     STEAL_MIN_K = STEAL_K_PER_BASE_PRIME * base_primes.size();
+
+    // How many base primes a fresh start at each chunk activates (p*p below
+    // its first segment's end), for run_parallel_chunks to price a steal.
+    std::vector<uint64_t> fresh_primes(num_chunks);
+    for (unsigned i = 0; i < num_chunks; ++i) {
+        const ChunkRange& r = ranges[i];
+        const uint64_t root = isqrt(wheel_number(std::min(r.low + tiers_for(r).width, r.high)));
+        fresh_primes[i] = static_cast<uint64_t>(std::upper_bound(base_primes.begin(), base_primes.end(), root) -
+                                                base_primes.begin());
+    }
 
     // Whole-L1d sub-block (see the topology block above) when the threads
     // that actually run fit one per core with the largest L1d -- after the
@@ -876,7 +960,7 @@ int main(int argc, char** argv) {
                 std::thread prog(print_progress, std::cref(C), "counting", std::ref(progress), total_span, std::ref(done));
                 ProgressGuard guard{done, prog};
 
-                run_parallel_chunks(actual_threads, ranges, [&](unsigned i) {
+                run_parallel_chunks(actual_threads, ranges, fresh_primes, [&](unsigned i) {
                     count_only_worker(ranges[i], tiers_for(ranges[i]), base_limit, presieve, prime_counts[i], progress);
                 });
             } // guard destructs here: progress thread joined before the summary prints below
@@ -928,7 +1012,7 @@ int main(int argc, char** argv) {
                 std::thread prog(print_progress, std::cref(C), "writing", std::ref(progress), total_span, std::ref(done));
                 ProgressGuard guard{done, prog};
 
-                run_parallel_chunks(actual_threads, ranges, [&](unsigned i) {
+                run_parallel_chunks(actual_threads, ranges, fresh_primes, [&](unsigned i) {
                     emit_db_worker(static_cast<int>(i), ranges[i], tiers_for(ranges[i]), base_limit, presieve,
                                     store, opt.db_block_size, opt.zstd_level, prime_counts[i], progress);
                 });
@@ -969,7 +1053,7 @@ int main(int argc, char** argv) {
             std::thread prog(print_progress, std::cref(C), "counting", std::ref(progress), total_span, std::ref(done));
             ProgressGuard guard{done, prog};
 
-            run_parallel_chunks(actual_threads, ranges, [&](unsigned i) {
+            run_parallel_chunks(actual_threads, ranges, fresh_primes, [&](unsigned i) {
                 count_worker(ranges[i], tiers_for(ranges[i]), base_limit, presieve, byte_counts[i], prime_counts[i], progress);
             });
         }
@@ -1005,7 +1089,7 @@ int main(int argc, char** argv) {
             ProgressGuard guard{done, prog};
 
             try {
-                run_parallel_chunks(actual_threads, ranges, [&](unsigned i) {
+                run_parallel_chunks(actual_threads, ranges, fresh_primes, [&](unsigned i) {
                     emit_worker(static_cast<int>(i), ranges[i], tiers_for(ranges[i]), base_limit, presieve,
                                 fd, offsets[i], progress);
                 });
