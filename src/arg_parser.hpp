@@ -185,9 +185,9 @@ inline uint64_t detect_cpu_cache_share(int cpu_id, int target_level) {
 // same, already-validated philosophy per CPU instead of inventing a new
 // one, only splitting by CPU to catch a P-core/E-core L1d size difference
 // if there is one, not to model HT sharing a second, different way.
-// l1_sharers is used for one thing only: telling a machine with no SMT at
-// all (every L1d has a single logical CPU) apart, where main.cpp gives the
-// sub-block the whole L1d instead of half.
+// l1_sharers is used for one thing only: counting physical cores (SMT
+// siblings share one L1d), so main.cpp can give the sub-block the whole
+// L1d instead of half when there are no more threads than cores.
 struct CpuCacheTopology {
     std::vector<uint64_t> l1_raw;   // index = logical CPU id, 0 = undetected
     std::vector<int> l1_sharers;    // logical CPUs on that L1d, 0 = undetected

@@ -89,7 +89,7 @@ throughout below).
 - [arg_parser.hpp](#arg_parserhpp)
   - [`--zstd-level` default: 1 (kept, 2026-09-28)](#--zstd-level-default-1-kept-2026-09-28)
   - [Sub-block size: half the L1d, not all of it (kept, 2026-09-27)](#sub-block-size-half-the-l1d-not-all-of-it-kept-2026-09-27)
-  - [Sub-block: the whole L1d when no CPU has an SMT sibling (kept, 2026-10-01)](#sub-block-the-whole-l1d-when-no-cpu-has-an-smt-sibling-kept-2026-10-01)
+  - [Sub-block: the whole L1d when each thread has a core to itself (kept, 2026-10-01)](#sub-block-the-whole-l1d-when-each-thread-has-a-core-to-itself-kept-2026-10-01)
   - [Auto segment width: dropping the `isqrt(limit)` cap (kept)](#auto-segment-width-dropping-the-isqrtlimit-cap-kept)
   - [Segment width doubled once the sparse tier exists (kept, 2026-09-27)](#segment-width-doubled-once-the-sparse-tier-exists-kept-2026-09-27)
   - [Narrow segment for the chunks below narrow² (kept, 2026-09-28)](#narrow-segment-for-the-chunks-below-narrow-kept-2026-09-28)
@@ -2608,7 +2608,7 @@ re-swept: `small_limit`'s own divisor and med64's fraction were tuned at the old
 optimum. Not yet measured on the server (L1d 48KiB P / 32KiB E -> 16KiB
 sub-block, which measured -5.1% here).
 
-### Sub-block: the whole L1d when no CPU has an SMT sibling (kept, 2026-10-01)
+### Sub-block: the whole L1d when each thread has a core to itself (kept, 2026-10-01)
 
 The half-L1d entry above was measured with every hardware thread busy, where two
 SMT siblings share each L1d: half of it IS each thread's whole share. With one
@@ -2643,18 +2643,36 @@ each, 36 runs, counts OK): -4.9..-5.6% in all four N/thread combinations, 1e11
 the dev PC is **+16.5%** cycles, so it can't be the default where SMT siblings
 share the L1d.
 
-Rule kept: when every CPU's L1d has exactly one logical CPU (sysfs
-`shared_cpu_list`, i.e. no SMT anywhere: such VMs, or HT off) and all L1d
-sizes are equal, the sub-block is the whole L1d; `small_limit` keeps the
-half-L1d value. Unequal L1d sizes are excluded (hybrid with HT off: the
-P-core L1d would overflow the E-cores'). `--l1-bytes` still means "the L1d
-size" and skips this rule. The rule is inactive on the dev PC and the server
-(both SMT), so nothing changes there; `make test` passes both as built and
-with the rule forced on. The startup log prints
-`sub-block: whole L1d (no SMT sibling on any CPU)` when it fires. Pending: confirm
-the real detection path on the Xeon; and the open case `-t` <= physical cores on
-an SMT machine (one thread per core in practice), which can't be measured under
-WSL2 (Hyper-V doesn't honour sibling pairs for `taskset`) -- native Linux server.
+First version (6846baf): whole L1d only when every CPU's L1d has exactly one
+logical CPU (sysfs `shared_cpu_list`: no SMT anywhere) and all L1d sizes are
+equal. On the Xeon, real build, `-t 2`, interleaved vs 078f780 and primesieve
+12.0 (counts OK): 1e10 1.16x -> 1.06x, 1e11 1.09x -> 1.04x, 1e12 1.04x ->
+**0.97x**, 1e13 last 1% 0.98x -> **0.93x** (new vs old -4..-8%).
+
+That rule looks at the hardware, not at how many threads run. The i5-13500
+server (native Linux, P-core siblings (0,1)..(10,11)), 1e11 `-t 6`, cpu_core
+cycles:u, 3 reps (<1% spread), whole L1d forced via the flags above:
+
+| placement | 24KiB | 48KiB | delta |
+|---|---:|---:|---:|
+| `taskset 0,2,4,6,8,10` (6 P-cores, 1 thread each) | 51.54G | 48.39G | **-6.1%** |
+| `taskset 0-5` (3 P-cores, 2 SMT threads each) | 94.56G | 119.54G | **+26.4%** |
+| unpinned `-t 6` | 51.55G | 48.47G | **-6.0%** |
+| unpinned `-t 4` | 51.30G | 48.04G | **-6.4%** |
+
+Unpinned runs match the one-per-core placement exactly, with <0.5% of the
+threads' time on E-cores: the scheduler spreads threads one per core, P-cores
+first. Generalized rule kept: the sub-block is the whole L1d when `-t` <= the
+number of physical cores with the largest L1d (each CPU sharing an L1d
+instance counts 1/sharers of a core); otherwise half. It subsumes the first
+version (no SMT, uniform L1d: cores = CPUs) and keeps E-cores out (hybrid
+with HT off: only the P-cores count). Defaults are unchanged on SMT machines
+at full thread count (dev PC 12 > 6, server 20 > 6); `-t` <= 6 on either now
+gets 48KiB. `small_limit` keeps the half-L1d value; `--l1-bytes` still means
+"the L1d size" and skips this rule. The startup log prints
+`sub-block: whole L1d (T threads <= C cores with the largest L1d)` when it
+fires. (`-t 6` on the dev PC under WSL2 was inconclusive: Hyper-V doesn't
+honour sibling pairs, so in-guest `taskset` can't place one thread per core.)
 
 Also checked from primesieve's sizing: its small-N segment (sqrt(N)*2 bytes, a
 multiple of the L1 chunk: 192KiB at 1e10) is -2..-3% vs our 256KiB at 1e10
