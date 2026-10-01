@@ -229,6 +229,29 @@ the cache-pressure argument above for that tier, not a hard rejection.
 64-bit word now, and a 32-bit row makes the table 15 KiB) -- implemented and kept, see
 [Sparse tier: mod-2310 multiplier wheel](#sparse-tier-mod-2310-multiplier-wheel-kept-2026-09-30).
 
+**Update 2026-10-01: the medium half, tried, reverted.** Profiling dev PC tails put the
+medium tier at 40% of cycles at 1e13, 37% at 1e14 and 27% at 1e15, the largest tier
+there, so -9.1% medium hits looked like up to ~3.5%. Implemented without a table of
+its own: `cross_off_medium<PR, NTA, true>` stepped through the sparse tier's
+`big::TABLE2310` (one hot 15 KiB table shared by both tiers), w counted 0..479 in a
+register with an in-place wrap, state packed `(pos << 9) | w` (pos checked against
+2^23, wider segments stayed on mod-210), activation on `M2310`/`NEXT_W2310`, behind
+`--tune medium2310`. Counts identical at 1e10 (plain, `med64=0`, `-s 100000`), 1e11
+and a 1e12 tail. Same binary, knob 1 vs 0, `-t 12`:
+
+| | mod-2310 | mod-210 | cycles | instructions |
+|---|---:|---:|---:|---:|
+| 1e13 last 0.1% (3 reps) | 17.33G | 17.44G | -0.6% | -1.4% |
+| 1e14 last 0.05% (2 reps) | 127.5G | 126.1G | +1.1% | -1.3% |
+| 1e12 full (2 reps) | 1123.8G | 1112.4G | +1.0% | -0.9% |
+
+A tier at 40% of the cycles losing 9% of its hits moved cycles by noise: this tier
+is bound by the loop-exit mispredict of each prime (2-10 hits per segment, a trip
+count that varies prime to prime), not by its hits -- the same finding as the
+2026-09-28 server TopdownL1 (bad speculation, medium-tier call count). The bigger
+table is a small net cost where medium is small (1e12). Don't retry the medium
+half for hit count alone; only something that removes per-prime exits would move it.
+
 ### `cross_off_medium`: 4-way interleaved stepping (tried, reverted)
 
 Each prime's own chain (k -> next k) is a serial dependency, but four DIFFERENT
@@ -788,6 +811,55 @@ mod-210 loop. Raising `med64_limit` saves 4-6% of instructions and ties on
 cycles. Defaults unchanged. Not re-swept on the server, where med64 is a larger
 share at 1e14; the mod-30 `med64_limit` sweep there was flat within its 1%-tail
 noise (see the i5-13500 entry in main.cpp).
+
+**Follow-up (2026-10-01): skipping presieved multiples of 11, tried, reverted.**
+At a 1e13 tail med64 takes 31% of cycles and 60% of all L1-dcache load misses
+(medium: 38% / 25%), and `--tune med64=0` (its primes on the table-driven medium
+loop) costs +76% instructions but only +21% cycles at 1e11 -- so it looked bound
+by its segment misses, where a mod-2310 tier should pay. Instead of a 480-case
+switch with 3840 lists, kept the 48-case loop and the 384 lists and carried
+`t11 = (m / 210) % 11` in the state (`qw = qp << 10 | t11 << 6 | w`, updated once
+per 48-phase cycle); a hit with `(t11 + M210[w]) % 11 == 0` (the multiplier is a
+multiple of 11, presieved) stored to an L1-resident scratch byte instead of the
+segment. Counts identical (1e8-1e12 incl. forced sparse). Same binary, knob 1/0,
+3 reps (2 at 1e12):
+
+| | cycles | instructions | L1 misses |
+|---|---:|---:|---:|
+| 1e11 `-t 1` | **+11.3%** | +19.5% | -4.6% |
+| 1e11 `-t 12` | +2.6% | +17.3% | -8.8% |
+| 1e13 last 0.1% `-t 12` | +3.9% | +10.3% | -6.0% |
+| 1e12 full `-t 12` | +4.7% | +13.3% | -7.5% |
+
+The misses dropped as intended, but ~2 extra instructions per hit (GCC emitted
+the select as a branch, not a cmov; a cmov version would still add a compare and
+a select) cost far more than they saved: med64's ~4 instructions per hit are not
+free behind its misses. Together with the medium mod-2310 result above: neither
+tier pays for removing hits with per-hit work; a mod-2310 med64 would have to be
+the 480-case switch (no extra work per hit) to have a chance.
+
+**Follow-up 2 (2026-10-01): the 480-case switch, tried, reverted.**
+`cross_off_checked2310<PR>`: `cross_off_checked210`'s shape over the mod-2310
+multiplier wheel -- 480 cases generated with nested macros, dm in {2,...,14}
+from 7 multiples of qp, mask/dm/corr compile-time constants from
+`big::TABLE2310`; state `(qp << 9) | w` filed under 8 x 480 = 3840
+(class, phase) lists; same 4 instructions per hit. Counts identical (1e7-1e12,
+forced sparse, `med64=1/6`, `small=1/16`). Same binary, `--tune med64w2310`
+1 vs 0, 3 reps (2 at 1e12/1e14):
+
+| | cycles | instructions | branch misses |
+|---|---:|---:|---:|
+| 1e11 `-t 1` | +5.8% | -1.7% | +18% |
+| 1e11 `-t 12` | **+18.4%** | -1.3% | +18% |
+| 1e13 last 0.1% | +10.7% | -1.0% | +4% |
+| 1e14 last 0.05% | +13.0% | -0.9% | +3% |
+| 1e12 full | **+17.5%** | -1.1% | +10% |
+
+Instructions barely dropped (the 9% fewer hits are offset by 10x the lists:
+more inner loops, more list switches for the entry jump) and cycles blew up,
+worst with both SMT threads busy: ~8 x 17 KB of switch code, with the exit
+stubs, doesn't fit the frontend the two siblings share, where the 48-case
+version did. Closed: med64 stays on mod 210.
 
 ## wheel.hpp
 
