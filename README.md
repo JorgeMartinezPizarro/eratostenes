@@ -119,6 +119,14 @@ What this project is built from, one term each — follow the link for the conce
 | 1e14 | 3392.08s | 3349.907s | 1.01x |
 | 1e15 | 40976.93s | - | - |
 
+| N | tail | eratostenes | primesieve | ratio |
+|---|---|---:|---:|---:|
+| 1e14 | last 1e11 | 3.17s | 3.215s | 0.99x |
+| 1e15 | last 1e11 | 4.51s | 4.496s | 1.00x |
+| 1e16 | last 1e11 | 5.47s | 5.124s | 1.07x |
+| 1e17 | last 1e11 | 6.41s | 6.097s | 1.05x |
+| 1e18 | last 1e11 | 9.30s | 7.954s | 1.17x |
+
 Other machines (i5-11400F, i5-1235U, cloud Xeons), top-of-range tails up to 1e18 (`make benchmark-tails`) and the history: [docs/BENCHMARK.md](docs/BENCHMARK.md).
 
 ## Validation

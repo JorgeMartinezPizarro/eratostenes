@@ -33,7 +33,7 @@ cd "$(dirname "$0")/.."
 BIN=./eratostenes
 THREADS="${THREADS:-$(nproc)}"
 REPS="${REPS:-1}"
-NS="${NS:-1e14 1e15 1e16 1e17 1e18}"
+NS="${NS:-1e13 1e14 1e15 1e16 1e17 1e18}"
 WIDTH="${WIDTH:-1e11}"
 
 if ! command -v primesieve >/dev/null 2>&1; then
@@ -140,14 +140,12 @@ done
 echo
 bash scripts/machine_info.sh "$THREADS" "best of $REPS"
 echo
-echo "| N | tail | primes | eratostenes | primesieve | ratio |"
-echo "|---|---|---:|---:|---:|---:|"
+# Same layout as README.md's tail table; the counts (checked above) stay in
+# the progress lines.
+echo "| N | tail | eratostenes | primesieve | ratio |"
+echo "|---|---|---:|---:|---:|"
 for n in $NS; do
     [ -n "${COUNT[$n]:-}" ] || continue # skipped for memory
-    stop=$(to_dec "$n")
-    pct=$(awk -v w="$width" -v s="$stop" 'BEGIN{printf "%g%%", 100 * w / s}')
     ratio=$(awk -v a="${BEST_E[$n]}" -v b="${BEST_P[$n]}" 'BEGIN{printf "%.2f", a / b}')
-    primes=$(printf '%d' "${COUNT[$n]}" | sed -E ':a; s/([0-9])([0-9]{3})(,|$)/\1,\2\3/; ta')
-    printf "| %s | last %s (%s) | %s | %ss | %ss | %sx |\n" \
-        "$n" "$WIDTH" "$pct" "$primes" "${BEST_E[$n]}" "${BEST_P[$n]}" "$ratio"
+    printf "| %s | last %s | %ss | %ss | %sx |\n" "$n" "$WIDTH" "${BEST_E[$n]}" "${BEST_P[$n]}" "$ratio"
 done
