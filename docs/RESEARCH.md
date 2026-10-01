@@ -2187,7 +2187,8 @@ Three changes, none of them in the per-segment loop:
   sieving 2.6 indices, so ~2%), never under one chunk per thread. 12 threads,
   last 1e11: 8 per thread below 1e14 and 1e15 (unchanged), 3 below 1e16, 1
   below 1e17 and 1e18, i.e. primesieve's one setup per thread. Full runs don't
-  take this path; their chunks span ~1e13 numbers at 1e16.
+  take this path; their chunks span ~1e13 numbers at 1e16. (Replaced the same
+  day by carrying the sieve across chunks, see the next entry.)
 - `classify`: the narrow tier set is skipped when a tail starts past narrow^2
   (no chunk can use it: one pass over the base primes instead of two), and
   the sparse vector is reserved.
@@ -2211,6 +2212,68 @@ cases pass.
 Not measured yet: the server after the change. One chunk per thread at 1e17
 and above gives up the queue's balancing between P- and E-cores there, as
 primesieve's even split does.
+
+### `run_parallel_chunks`: contiguous runs, the sieve carried across chunks, steals (kept, 2026-10-01)
+
+The entry above traded balance for activations: one chunk per thread from
+1e16 up left threads idle, `--debug-idle` 12.6% at the 1e18 tail on the dev PC
+(12 threads, uniform cores), 10.9% (1e18) and 13.5% (1e16) on the i5-13500
+server (20 threads, P- and E-cores). With the shared-counter queue every
+chunk paid a full activation, because consecutive chunks went to different
+threads.
+
+- `run_parallel_chunks` gives each worker a contiguous run of chunk indices
+  (an equal share) walked in order. A worker whose run is empty takes the back
+  half of the run with the most chunks left, if that piece spans at least
+  `STEAL_MIN_K` = 4 wheel indices per base prime (a steal activates every
+  base prime once, ~2.6 indices' worth of sieving each when all threads
+  activate at once; stealing pays when the piece takes longer than that);
+  otherwise it stops. One mutex, taken once per chunk.
+- `sieve_chunk` remembers, per thread and tier set, the k where its
+  `SegmentSieve` stopped; a chunk starting there skips `begin_chunk()` and
+  goes on as if both were one chunk. `split_ranges` makes every chunk but the
+  last a whole number of segments, since the sparse ring counts whole
+  segments.
+- Tails go back to many chunks, `TAIL_CHUNKS_PER_THREAD` = 32 (only the steal
+  granularity depends on it now); the `K_PER_BASE_PRIME` rule is gone.
+- Also: `sieve_base_primes` splits its range over the threads (1e9: 0.87 s ->
+  0.41 s with 12, the rest is concatenating 406 MB on one thread), and the
+  sparse tier is a `std::span` over the tail of `base_primes` instead of a
+  copy: every prime from 7 to 163 is pre-sieved, so the sparse tier is exactly
+  the primes from max(sparse_limit, 164) up (`classify` throws if that ever
+  stops being true).
+
+`--debug-idle`, dev PC, 12 threads, last 1e11: 374 chunks, 2-9 steals; idle
+1e15 3.8% -> 1.5%, 1e16 6.1% -> 1.0%, 1e18 12.6% -> 2.0-4.1%. Interleaved A/B
+against 0719d5b (same flags, ABBA):
+
+| case | runs | before | after | |
+|---|---:|---:|---:|---:|
+| full 1e11 | 4 + 4 | 1.995 s | 1.92 s | -3.8% (all 4 below) |
+| full 1e12 | 4 + 4 | 24.51 s | 24.52 s | tie |
+| tail 1e15 | 4 + 4 | 8.61 s | 8.05 s | -6.5% |
+| tail 1e16 | 4 + 4 | 11.91 s | 11.52 s | -3.3% |
+| tail 1e18 | 10 + 10 | median 21.33 s | median 20.39 s | -4.4% |
+
+At 1e18 two back-to-back runs of the new binary took 25.8 and 28.3 s in the
+first A/B (interference: the same binary ran 19.6-21.7 s in the other eight).
+Full 1e11 gains from no longer re-activating ~27k base primes in each of its
+~1800 chunks.
+
+The largest N is now 2^64 - 2^32 * 16; `parse_args` rejects anything above it.
+Activation computes `p * m` up to start + 14p (the sparse tier's mod-2310
+multiplier moves up to 13 past ceil(start / p), 14 being the largest gap
+between residues coprime to 2310) with p up to 2^32, so primesieve's own
+ceiling, 2^64 - 2^32 * 10, isn't enough here: the last 1e9 below it threw
+"bucket sieve: a sparse prime's step exceeds the bucket ring's margin" (a
+wrapped `p * m`, caught by that check rather than miscounted). The last 1e9
+below the new ceiling matches primesieve (22,546,380 primes, `-t 2`), and so
+does the last 1e11 below 1e19 (2,285,738,870, dev PC `-t 6`: 30.93 s vs
+29.33 s). primesieve doesn't check its expression parser: `primesieve
+999999999e11 1e20` wraps both bounds modulo 2^64 and counts the window below
+~7.77e18 (2,299,052,535 primes, more than the window below 1e19). `isqrt`
+compares by division now: `(s + 1) * (s + 1)` wrapped to 0 for N >=
+(2^32 - 1)^2.
 
 ### i5-13500 server gap vs primesieve: medium-tier call count, sparse cutoff 1/2 gated on per-thread L2 (2026-09-28)
 

@@ -22,7 +22,10 @@
 #   REPS     runs per program and N, alternating which one goes first
 #            (era/ps, ps/era, ...); the table keeps each one's fastest
 #            (default: 1)
-#   NS       space-separated N list, integers or 1eX (default: "1e15 1e16 1e17")
+#   NS       space-separated N list, integers or 1eX, up to 2^64 - 1 (~1.8e19)
+#            (default: "1e14 1e15 1e16 1e17 1e18"). Memory grows with
+#            pi(sqrt N) in both programs, per thread: ~1.2 GB each at 1e19
+#            (152M base primes), ~0.4 GB at 1e18.
 #   WIDTH    window width, integer or 1eX (default: 1e11)
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -30,7 +33,7 @@ cd "$(dirname "$0")/.."
 BIN=./eratostenes
 THREADS="${THREADS:-$(nproc)}"
 REPS="${REPS:-1}"
-NS="${NS:-1e14 1e15 1e16 1e17 1e18 1e19 1e20}"
+NS="${NS:-1e14 1e15 1e16 1e17 1e18}"
 WIDTH="${WIDTH:-1e11}"
 
 if ! command -v primesieve >/dev/null 2>&1; then
@@ -42,19 +45,44 @@ if [ ! -x "$BIN" ]; then
     exit 1
 fi
 
-# "1e15" / "100000" -> exact 64-bit integer (bash arithmetic, no doubles).
-to_int() {
+# Numbers stay decimal strings: N goes up to 2^64 - 1, and bash arithmetic
+# stops at 2^63 - 1 (1e19 overflowed it).
+to_dec() { # "1e19" / "100000" -> plain digits
+    local d
     if [[ "$1" =~ ^([0-9]+)[eE]([0-9]+)$ ]]; then
-        echo $(( BASH_REMATCH[1] * 10 ** BASH_REMATCH[2] ))
+        d=${BASH_REMATCH[1]}$(printf '%*s' "${BASH_REMATCH[2]}" '' | tr ' ' 0)
     elif [[ "$1" =~ ^[0-9]+$ ]]; then
-        echo "$1"
+        d=$1
     else
         echo "valor no valido: $1 (usa un entero o 1eX)" >&2
-        exit 1
+        return 1
     fi
+    d=$(echo "$d" | sed 's/^0*//')
+    echo "${d:-0}"
+}
+dec_sub() { # a - b, in 9-digit limbs; fails when b > a
+    local a=$1 b=$2 len i x y borrow=0 out="" limb
+    len=$(( ${#a} > ${#b} ? ${#a} : ${#b} ))
+    len=$(( (len + 8) / 9 * 9 ))
+    a=$(printf "%${len}s" "$a" | tr ' ' 0)
+    b=$(printf "%${len}s" "$b" | tr ' ' 0)
+    for (( i = len - 9; i >= 0; i -= 9 )); do
+        x=$(( 10#${a:i:9} )); y=$(( 10#${b:i:9} + borrow ))
+        if (( x < y )); then x=$(( x + 1000000000 )); borrow=1; else borrow=0; fi
+        printf -v limb '%09d' $(( x - y ))
+        out=$limb$out
+    done
+    (( borrow == 0 )) || return 1
+    out=$(echo "$out" | sed 's/^0*//')
+    echo "${out:-0}"
+}
+dec_mod() { # a mod m, m small
+    local a=$1 m=$2 r=0 i
+    for (( i = 0; i < ${#a}; i++ )); do r=$(( (r * 10 + ${a:i:1}) % m )); done
+    echo "$r"
 }
 
-width=$(to_int "$WIDTH")
+width=$(to_dec "$WIDTH")
 
 run_era() { # stop start -> sets t_e, c_e
     local out
@@ -72,8 +100,17 @@ faster() { awk -v a="$1" -v b="$2" 'BEGIN{exit !(b == "" || a < b)}'; }
 
 declare -A BEST_E BEST_P COUNT
 for n in $NS; do
-    stop=$(to_int "$n")
-    if [ "$width" -ge "$stop" ]; then
+    stop=$(to_dec "$n")
+    # Both programs keep every base prime in each thread's bucket ring (8
+    # bytes each), eratostenes its own list too: skip an N that doesn't fit in
+    # memory instead of swapping (or the OOM killer).
+    need_kb=$(awk -v n="$stop" -v t="$THREADS" 'BEGIN{r = sqrt(n); printf "%d", (t + 1) * 8 * 1.15 * r / log(r) / 1024}')
+    avail_kb=$(sed -nE 's/^MemAvailable: *([0-9]+) kB$/\1/p' /proc/meminfo 2>/dev/null || true)
+    if [ -n "$avail_kb" ] && [ "$need_kb" -gt "$avail_kb" ]; then
+        echo "  N=$n: saltado, necesita ~$(( need_kb / 1048576 )) GB con $THREADS hilos y hay $(( avail_kb / 1048576 )) GB libres (prueba con menos THREADS)" >&2
+        continue
+    fi
+    if ! diff=$(dec_sub "$stop" "$width") || [ "$diff" = 0 ]; then
         echo "WIDTH=$WIDTH no cabe por debajo de N=$n" >&2
         exit 1
     fi
@@ -81,7 +118,7 @@ for n in $NS; do
     # numbers, src/main.cpp split_ranges), so primesieve gets that same start
     # or the counts differ by the few primes in between. The default windows
     # (N - 1e11) are already multiples of 240.
-    start=$(( (stop - width) / 240 * 240 ))
+    start=$(dec_sub "$diff" "$(dec_mod "$diff" 240)")
     best_e="" best_p="" count=""
     for ((r = 1; r <= REPS; r++)); do
         if (( r % 2 )); then run_era "$stop" "$start"; run_ps "$stop" "$start"
@@ -106,7 +143,8 @@ echo
 echo "| N | tail | primes | eratostenes | primesieve | ratio |"
 echo "|---|---|---:|---:|---:|---:|"
 for n in $NS; do
-    stop=$(to_int "$n")
+    [ -n "${COUNT[$n]:-}" ] || continue # skipped for memory
+    stop=$(to_dec "$n")
     pct=$(awk -v w="$width" -v s="$stop" 'BEGIN{printf "%g%%", 100 * w / s}')
     ratio=$(awk -v a="${BEST_E[$n]}" -v b="${BEST_P[$n]}" 'BEGIN{printf "%.2f", a / b}')
     primes=$(printf '%d' "${COUNT[$n]}" | sed -E ':a; s/([0-9])([0-9]{3})(,|$)/\1,\2\3/; ta')

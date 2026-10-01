@@ -58,6 +58,8 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <memory>
+#include <span>
 #include <stdexcept>
 #include <fcntl.h>
 #include <unistd.h>
@@ -131,23 +133,32 @@ static bool BIG_2310 = true;
 // --debug-idle: run_parallel_chunks prints how far apart the threads finished.
 static bool DEBUG_IDLE = false;
 
+// Smallest piece (wheel indices) a worker steals from another's run in
+// run_parallel_chunks: the thief pays one activation of every base prime for
+// it, so the piece must take longer to sieve than that; set in main().
+static uint64_t STEAL_MIN_K = 0;
+
 struct ChunkRange {
     uint64_t low;   // first wheel index of the chunk (inclusive)
     uint64_t high;  // upper bound in wheel index (exclusive)
 };
 
 // Segment width plus the base primes split into tiers for it (see main()).
-// A run has one, or two when its early chunks use a narrower segment.
+// A run has one, or two when its early chunks use a narrower segment. The
+// sparse tier is a view of base_primes' tail, not a copy (see classify).
 struct TierSet {
     uint64_t width;
-    std::vector<uint64_t> small, med64, medium, sparse;
+    std::vector<uint64_t> small, med64, medium;
+    std::span<const uint64_t> sparse;
 };
 
-// Splits the wheel indices into 'threads' chunks as evenly as possible.
+// Splits the wheel indices into 'threads' chunks as evenly as possible, each
+// (but the last) a whole number of `align` indices -- the segment width, so a
+// worker can carry its sieve from one chunk into the next (sieve_chunk).
 // k=0 is the number 1 (not prime; SegmentSieve clears it itself);
 // k_end_exclusive is wheel_count_upto(limit), the first index whose number
 // exceeds limit.
-static std::vector<ChunkRange> split_ranges(uint64_t limit, unsigned threads, uint64_t start = 0) {
+static std::vector<ChunkRange> split_ranges(uint64_t limit, unsigned threads, uint64_t start, uint64_t align) {
     std::vector<ChunkRange> ranges;
     // Starts at k=0 (the number 1, cleared by SegmentSieve itself) rather
     // than k=1, and every chunk boundary is a multiple of 64: the
@@ -160,7 +171,7 @@ static std::vector<ChunkRange> split_ranges(uint64_t limit, unsigned threads, ui
 
     uint64_t total = k_end - k_start;
     uint64_t per_thread = (total + threads - 1) / threads;
-    per_thread = (per_thread + 63) / 64 * 64;
+    per_thread = (per_thread + align - 1) / align * align; // align: a multiple of 64
 
     uint64_t cursor = k_start;
     uint64_t remaining = total;
@@ -185,6 +196,13 @@ static std::vector<ChunkRange> split_ranges(uint64_t limit, unsigned threads, ui
 // one per chunk: each construction allocated the 768 med64 lists and the
 // segment buffer again. Worker threads only live for one pass
 // (run_parallel_chunks), so the cache goes away with them.
+//
+// A chunk that starts where the thread's previous one on the same tiers
+// ended (run_parallel_chunks hands out contiguous runs) carries on from that
+// sieve state as if both were one chunk: no begin_chunk(), no activation of
+// every base prime again -- at the top of 1e18 that is 50M primes, ~1.3s per
+// thread. Only valid after a chunk of whole segments (split_ranges aligns all
+// but the last), since the sparse ring counts in whole segments.
 template <typename Writer>
 static void sieve_chunk(ChunkRange range, const TierSet& t, uint64_t base_prime_max,
                          const Presieve& presieve, Writer& out, uint64_t& local_count,
@@ -192,6 +210,7 @@ static void sieve_chunk(ChunkRange range, const TierSet& t, uint64_t base_prime_
     struct Slot {
         const TierSet* tiers = nullptr;
         std::unique_ptr<SegmentSieve> sieve;
+        uint64_t next_k = UINT64_MAX; // where the sieve's state stands, if a chunk can go on from it
     };
     thread_local Slot slots[2]; // a run has at most two tier sets (narrow, wide)
     Slot* slot = slots[0].tiers == &t ? &slots[0]
@@ -202,14 +221,17 @@ static void sieve_chunk(ChunkRange range, const TierSet& t, uint64_t base_prime_
                                                      !t.sparse.empty(), t.medium.size() >= MEDIUM_NTA_MIN_PRIMES,
                                                      BIG_2310);
         slot->tiers = &t;
+        slot->next_k = UINT64_MAX;
     }
     SegmentSieve& sieve = *slot->sieve;
-    sieve.begin_chunk();
+    if (slot->next_k != range.low) sieve.begin_chunk();
+    slot->next_k = UINT64_MAX; // until this chunk is done (an exception leaves it unusable)
     for (uint64_t k_low = range.low; k_low < range.high; k_low += t.width) {
         uint64_t k_high = std::min(k_low + t.width, range.high);
         sieve.sieve_and_emit(k_low, k_high, t.small, t.med64, t.medium, t.sparse, out, local_count);
         progress.fetch_add(k_high - k_low, std::memory_order_relaxed);
     }
+    if ((range.high - range.low) % t.width == 0) slot->next_k = range.high;
 }
 
 // Count-only pass: no I/O, no byte accounting, just the prime count.
@@ -324,30 +346,60 @@ struct ProgressGuard {
     }
 };
 
-// Spawns 'workers' OS threads that dynamically pull chunk indices in
-// [0, num_chunks) from a shared atomic counter and call fn(chunk_idx) for
-// each, then joins them all and rethrows the first exception any of them
-// raised (plain std::thread can't propagate one on its own). num_chunks >
-// workers on purpose -- see ALGORITHM.md §4 for why (chunks aren't
-// equal-work) and
+// Spawns 'workers' OS threads over the chunks in `ranges`, calls fn(i) once
+// for every chunk index, then joins them all and rethrows the first exception
+// any of them raised (plain std::thread can't propagate one on its own).
+//
+// Each worker starts on its own contiguous run of chunks (an equal share of
+// the indices) and walks it in order, so sieve_chunk carries its sieve from
+// one chunk into the next instead of activating every base prime per chunk.
+// A worker whose run is empty takes the back half of the run with the most
+// chunks left -- one activation for the whole stolen piece -- if that piece
+// spans at least STEAL_MIN_K indices; otherwise it stops. Many more chunks
+// than workers keep the steals fine-grained: chunks aren't equal-work (see
+// ALGORITHM.md §4) and neither are cores (P/E, SMT siblings). See
 // docs/RESEARCH.md#run_parallel_chunks-chunk-granularity-idle-time-investigation-2026-09-25-external-review-opus-55
-// for why CHUNKS_PER_THREAD=150.
+// for CHUNKS_PER_THREAD=150 (tuned with a plain shared-counter queue).
 template <typename Fn>
-static void run_parallel_chunks(unsigned workers, unsigned num_chunks, Fn&& fn) {
-    std::atomic<unsigned> next_chunk{0};
+static void run_parallel_chunks(unsigned workers, const std::vector<ChunkRange>& ranges, Fn&& fn) {
+    const unsigned num_chunks = static_cast<unsigned>(ranges.size());
+    struct Run { unsigned next, end; };
+    std::vector<Run> runs(workers);
+    for (unsigned w = 0; w < workers; ++w)
+        runs[w] = {static_cast<unsigned>(uint64_t{num_chunks} * w / workers),
+                   static_cast<unsigned>(uint64_t{num_chunks} * (w + 1) / workers)};
+    std::mutex runs_mu; // one lock per chunk taken: chunks take milliseconds at least
+    unsigned steals = 0;
+    // Next chunk index for worker w, or num_chunks when it should stop.
+    auto take = [&](unsigned w) -> unsigned {
+        std::lock_guard<std::mutex> lk(runs_mu);
+        Run& own = runs[w];
+        if (own.next == own.end) {
+            unsigned victim = workers, left = 1;
+            for (unsigned v = 0; v < workers; ++v)
+                if (runs[v].end - runs[v].next > left) { victim = v; left = runs[v].end - runs[v].next; }
+            if (victim == workers) return num_chunks; // no run with 2+ chunks left
+            unsigned mid = runs[victim].end - left / 2;
+            if (ranges[runs[victim].end - 1].high - ranges[mid].low < STEAL_MIN_K) return num_chunks;
+            own = {mid, runs[victim].end};
+            runs[victim].end = mid;
+            ++steals;
+        }
+        return own.next++;
+    };
     std::vector<std::exception_ptr> errors(workers);
     std::vector<std::thread> pool;
     pool.reserve(workers);
-    // --debug-idle: per-thread finish timestamp, to check the shared-counter
-    // queue keeps every thread busy. See docs/RESEARCH.md (link above).
+    // --debug-idle: per-thread finish timestamp, to check the runs and steals
+    // keep every thread busy. See docs/RESEARCH.md (link above).
     const bool debug_idle = DEBUG_IDLE;
     auto t0 = std::chrono::steady_clock::now();
     std::vector<double> finish(debug_idle ? workers : 0);
     for (unsigned w = 0; w < workers; ++w) {
-        pool.emplace_back([&fn, &errors, &next_chunk, num_chunks, w, debug_idle, &finish, t0]() {
+        pool.emplace_back([&fn, &errors, &take, num_chunks, w, debug_idle, &finish, t0]() {
             try {
                 for (;;) {
-                    unsigned idx = next_chunk.fetch_add(1, std::memory_order_relaxed);
+                    unsigned idx = take(w);
                     if (idx >= num_chunks) break;
                     fn(idx);
                 }
@@ -365,8 +417,8 @@ static void run_parallel_chunks(unsigned workers, unsigned num_chunks, Fn&& fn) 
         double lo = finish[0], hi = finish[0], idle_sum = 0;
         for (double f : finish) { lo = std::min(lo, f); hi = std::max(hi, f); }
         for (double f : finish) idle_sum += (hi - f);
-        std::fprintf(stderr, "[idle] chunks=%u workers=%u min=%.3fs max=%.3fs idle=%.1f%%\n",
-                     num_chunks, workers, lo, hi, 100.0 * idle_sum / (workers * hi));
+        std::fprintf(stderr, "[idle] chunks=%u workers=%u steals=%u min=%.3fs max=%.3fs idle=%.1f%%\n",
+                     num_chunks, workers, steals, lo, hi, 100.0 * idle_sum / (workers * hi));
     }
 }
 
@@ -433,7 +485,7 @@ int main(int argc, char** argv) {
     uint64_t base_limit = isqrt(opt.limit);
     std::fprintf(stderr, "Computing base primes up to %llu...\n",
                  static_cast<unsigned long long>(base_limit));
-    std::vector<uint64_t> base_primes = sieve_base_primes(base_limit);
+    std::vector<uint64_t> base_primes = sieve_base_primes(base_limit, opt.threads);
     std::fprintf(stderr, "  %zu base primes found.\n", base_primes.size());
 
     // --segment-width is a numeric width (so the option keeps meaning the
@@ -616,22 +668,25 @@ int main(int argc, char** argv) {
         presieve_primes_flat.insert(presieve_primes_flat.end(), group.begin(), group.end());
     const uint64_t presieve_max = *std::max_element(presieve_primes_flat.begin(), presieve_primes_flat.end());
 
+    // base_primes is sorted and every prime from FIRST_WHEEL_PRIME up to
+    // presieve_max is pre-sieved (checked below), so the sparse tier is
+    // exactly the tail from max(sp_limit, presieve_max + 1): a view, not a
+    // copy -- 50M primes (406 MB) at 1e18 -- and only the head is walked.
     auto classify = [&](TierSet& t, uint64_t m64_limit, uint64_t sp_limit) {
-        // base_primes is sorted: the sparse tier is its tail (50M primes at 1e18).
-        t.sparse.reserve(static_cast<size_t>(base_primes.end() -
-                                             std::lower_bound(base_primes.begin(), base_primes.end(), sp_limit)));
-        for (uint64_t p : base_primes) {
+        auto sparse_begin = std::lower_bound(base_primes.begin(), base_primes.end(),
+                                             std::max(sp_limit, presieve_max + 1));
+        t.sparse = std::span<const uint64_t>(sparse_begin, base_primes.end());
+        for (auto it = base_primes.begin(); it != sparse_begin; ++it) {
+            const uint64_t p = *it;
             if (p < FIRST_WHEEL_PRIME) continue;
             if (p <= presieve_max &&
                 std::find(presieve_primes_flat.begin(), presieve_primes_flat.end(), p) != presieve_primes_flat.end())
                 continue;
-            if (p < sp_limit) {
-                if (p < small_limit) t.small.push_back(p);
-                else if (p < m64_limit) t.med64.push_back(p);
-                else t.medium.push_back(p);
-            } else {
-                t.sparse.push_back(p);
-            }
+            if (p >= sp_limit)
+                throw std::logic_error("classify: a prime below the largest pre-sieve prime isn't pre-sieved");
+            if (p < small_limit) t.small.push_back(p);
+            else if (p < m64_limit) t.med64.push_back(p);
+            else t.medium.push_back(p);
         }
     };
     TierSet wide{seg_k_width, {}, {}, {}, {}};
@@ -639,7 +694,7 @@ int main(int argc, char** argv) {
     const std::vector<uint64_t>& small_primes = wide.small;
     const std::vector<uint64_t>& med64_primes = wide.med64;
     const std::vector<uint64_t>& medium_primes = wide.medium;
-    const std::vector<uint64_t>& sparse_primes = wide.sparse;
+    const std::span<const uint64_t> sparse_primes = wide.sparse;
 
     // Narrow segment for the chunks below narrow^2. The doubled segment
     // (see sparse_regime above) only pays off where sparse primes are
@@ -698,36 +753,34 @@ int main(int argc, char** argv) {
                      static_cast<unsigned long long>(range_start), static_cast<unsigned long long>(range_start),
                      static_cast<unsigned long long>(opt.limit));
         // Same chunk width as the full run where that still leaves every
-        // thread TAIL_CHUNKS_PER_THREAD chunks, so per-chunk setup (activating
-        // every base prime) weighs what it does there. Short tails get more,
-        // narrower chunks instead (never under MIN_SEGS_PER_CHUNK segments):
-        // the full run's width would leave ~1.5 chunks per thread in a 1% tail
-        // and cores idle in the last round (~20%), which skews wall-clock and,
-        // on HT cores, cycles:u too. 8/thread: 3.6% idle on a 1e15 1% tail
-        // (i5-13500, 20 threads); per-chunk setup is ~0.15% there.
-        //
-        // Fewer per thread (never under one) when that setup stops being
-        // small: at the top of N every chunk activates all ~sqrt(N)/ln base
-        // primes, ~1.3s per chunk and thread at 1e18 (dev PC, 12 threads; one
-        // activation costs about as much as sieving 2.6 wheel indices). A
-        // chunk spans at least K_PER_BASE_PRIME indices per base prime, so
-        // activation stays around 2% of its work: 8/thread in the last 1e11
-        // below 1e15, 3 below 1e16, 1 below 1e17 and 1e18 (12 threads).
-        constexpr uint64_t TAIL_CHUNKS_PER_THREAD = 8;
-        constexpr uint64_t K_PER_BASE_PRIME = 128;
+        // thread TAIL_CHUNKS_PER_THREAD chunks. Short tails get more, narrower
+        // chunks instead (never under MIN_SEGS_PER_CHUNK segments): the full
+        // run's width would leave ~1.5 chunks per thread in a 1% tail and
+        // cores idle in the last round (~20%), which skews wall-clock and, on
+        // HT cores, cycles:u too. Chunks are cheap now that a worker carries
+        // its sieve through its run (sieve_chunk): only the steal granularity
+        // depends on them, so 32/thread (8 measured 3.6% idle on a 1e15 1%
+        // tail, i5-13500, 20 threads, back when each chunk re-activated every
+        // base prime).
+        constexpr uint64_t TAIL_CHUNKS_PER_THREAD = 32;
         uint64_t span_k = wheel_count_upto(opt.limit) - wheel_count_upto(range_start);
         double frac = static_cast<double>(span_k) / static_cast<double>(wheel_count_upto(opt.limit));
         uint64_t scaled = static_cast<uint64_t>(target_chunks * frac + 0.5);
-        uint64_t per_thread = std::clamp<uint64_t>(
-            span_k / (K_PER_BASE_PRIME * uint64_t{opt.threads} * std::max<uint64_t>(1, base_primes.size())),
-            1, TAIL_CHUNKS_PER_THREAD);
-        uint64_t floor_chunks = std::min<uint64_t>(uint64_t{opt.threads} * per_thread,
+        uint64_t floor_chunks = std::min<uint64_t>(uint64_t{opt.threads} * TAIL_CHUNKS_PER_THREAD,
                                                    span_k / (MIN_SEGS_PER_CHUNK * seg_k_width));
         target_chunks = static_cast<unsigned>(std::max<uint64_t>({uint64_t{1}, scaled, floor_chunks}));
     }
-    auto ranges = split_ranges(opt.limit, target_chunks, range_start);
+    auto ranges = split_ranges(opt.limit, target_chunks, range_start, seg_k_width);
     unsigned num_chunks = static_cast<unsigned>(ranges.size());
     unsigned actual_threads = std::min<unsigned>(opt.threads, num_chunks);
+
+    // A steal (run_parallel_chunks) activates every base prime once for the
+    // stolen piece; at the top of N that is all ~sqrt(N)/ln of them, about
+    // as much as sieving 2.6 wheel indices each (dev PC, 1e18, 12 threads
+    // activating at once). Stealing pays when the piece takes longer than
+    // that: at least 4 indices per base prime, ~1.5x margin.
+    constexpr uint64_t STEAL_K_PER_BASE_PRIME = 4;
+    STEAL_MIN_K = STEAL_K_PER_BASE_PRIME * base_primes.size();
 
     // Whole-L1d sub-block (see the topology block above) when the threads
     // that actually run fit one per core with the largest L1d -- after the
@@ -799,7 +852,7 @@ int main(int argc, char** argv) {
                 std::thread prog(print_progress, std::cref(C), "counting", std::ref(progress), total_span, std::ref(done));
                 ProgressGuard guard{done, prog};
 
-                run_parallel_chunks(actual_threads, num_chunks, [&](unsigned i) {
+                run_parallel_chunks(actual_threads, ranges, [&](unsigned i) {
                     count_only_worker(ranges[i], tiers_for(ranges[i]), base_limit, presieve, prime_counts[i], progress);
                 });
             } // guard destructs here: progress thread joined before the summary prints below
@@ -851,7 +904,7 @@ int main(int argc, char** argv) {
                 std::thread prog(print_progress, std::cref(C), "writing", std::ref(progress), total_span, std::ref(done));
                 ProgressGuard guard{done, prog};
 
-                run_parallel_chunks(actual_threads, num_chunks, [&](unsigned i) {
+                run_parallel_chunks(actual_threads, ranges, [&](unsigned i) {
                     emit_db_worker(static_cast<int>(i), ranges[i], tiers_for(ranges[i]), base_limit, presieve,
                                     store, opt.db_block_size, opt.zstd_level, prime_counts[i], progress);
                 });
@@ -892,7 +945,7 @@ int main(int argc, char** argv) {
             std::thread prog(print_progress, std::cref(C), "counting", std::ref(progress), total_span, std::ref(done));
             ProgressGuard guard{done, prog};
 
-            run_parallel_chunks(actual_threads, num_chunks, [&](unsigned i) {
+            run_parallel_chunks(actual_threads, ranges, [&](unsigned i) {
                 count_worker(ranges[i], tiers_for(ranges[i]), base_limit, presieve, byte_counts[i], prime_counts[i], progress);
             });
         }
@@ -928,7 +981,7 @@ int main(int argc, char** argv) {
             ProgressGuard guard{done, prog};
 
             try {
-                run_parallel_chunks(actual_threads, num_chunks, [&](unsigned i) {
+                run_parallel_chunks(actual_threads, ranges, [&](unsigned i) {
                     emit_worker(static_cast<int>(i), ranges[i], tiers_for(ranges[i]), base_limit, presieve,
                                 fd, offsets[i], progress);
                 });

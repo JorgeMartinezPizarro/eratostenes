@@ -517,6 +517,16 @@ inline Options parse_args(int argc, char** argv) {
     if (opt.show_help) return opt;
 
     if (!has_limit) throw std::runtime_error("missing N (upper limit)");
+    // Activation computes p * m up to start + 14p (the sparse tier's mod-2310
+    // multiplier moves up to 13 past ceil(start / p): the largest gap between
+    // residues coprime to 2310 is 14), with p up to sqrt(N) < 2^32 and start
+    // up to N + 30, so N needs 2^32 * 14 + 30 of headroom below 2^64.
+    // primesieve's own ceiling, 2^64 - 2^32 * 10, isn't enough: a window just
+    // below it threw "bucket sieve: a sparse prime's step exceeds the bucket
+    // ring's margin" from a wrapped p * m.
+    constexpr uint64_t MAX_LIMIT = UINT64_MAX - 16 * (uint64_t{1} << 32);
+    if (opt.limit > MAX_LIMIT)
+        throw std::runtime_error("N too large: at most " + std::to_string(MAX_LIMIT) + " (2^64 - 2^32 * 16)");
     if (opt.threads == 0) {
         opt.threads = std::max(1u, std::thread::hardware_concurrency());
     }

@@ -6,13 +6,13 @@ Timings of `eratostenes` against [primesieve](https://github.com/kimwalisch/prim
 
 ```sh
 REPS=2 make benchmark         # pi(N) for N = 1e10..1e13, plus the .db I/O sweep
-REPS=2 make benchmark-tails   # last 1e11 numbers below 1e14, 1e15, ..., 1e18
+REPS=2 make benchmark-tails   # last 1e11 numbers below 1e14, 1e15, ..., 1e18 (NS=1e19 etc. up to 2^64 - 2^32*16)
 ```
 
 Both print the machine's identity above the table (`scripts/machine_info.sh`: CPU, threads per core, caches, primesieve version, commit, date). Paste the output as is under the machine's section and add a row to the summary.
 
 - **Same thread count** for both programs (`THREADS`, default `nproc`), and nothing else running on the machine.
-- **Tails** (`benchmark-tails`): `eratostenes N --start N-1e11` vs `primesieve N-1e11 N -c`. Every window is 1e11 wide, so a run costs about the same at every height; what changes is how many base primes are active and in which tier. The two counts are checked against each other. A tail is not a full run: fixed costs (the base-prime sieve up to sqrt(N), activating every base prime once per chunk) weigh more in a 1e11 window than across a full range. Tails measured before the 2026-10-01 startup fix ([RESEARCH.md](RESEARCH.md#top-of-range-tails-startup-costs-that-grow-with-sqrtn-kept-2026-10-01)) lose time to them from 1e16 up: 1.76x -> 0.96x at 1e18 on the dev PC.
+- **Tails** (`benchmark-tails`): `eratostenes N --start N-1e11` vs `primesieve N-1e11 N -c`. Every window is 1e11 wide, so a run costs about the same at every height; what changes is how many base primes are active and in which tier. The two counts are checked against each other. A tail is not a full run: fixed costs (the base-prime sieve up to sqrt(N), activating every base prime once per thread and steal) weigh more in a 1e11 window than across a full range. Tails measured before the 2026-10-01 startup fix ([RESEARCH.md](RESEARCH.md#top-of-range-tails-startup-costs-that-grow-with-sqrtn-kept-2026-10-01)) lose time to them from 1e16 up: 1.76x -> 0.96x at 1e18 on the dev PC.
 - **Cloud VMs change CPU between sessions**: the claude.ai sandbox below was an Emerald Rapids one day and a 32 KiB-L1d / 1 MiB-L2 Xeon the next. Only compare rows with the same CPU line.
 - **primesieve versions differ** (12.7 on the dev PC, 12.0 from Ubuntu on the sandbox); the version is part of the header.
 
@@ -33,15 +33,17 @@ Full runs, pi(N):
 
 Tails, last 1e11 below N:
 
-| machine | threads | binary | 1e14 | 1e15 | 1e16 | 1e17 | 1e18 |
-|---|---:|---|---:|---:|---:|---:|---:|
-| i5-13500 (server) | 20 | before startup fix | - | 0.95x | 1.17x | 1.49x | 1.92x |
-| i5-13500 (server) | 20 | 0719d5b | 0.95x | 1.03x | 1.06x | 1.02x | 1.13x |
-| i5-11400F (dev PC) | 12 | before startup fix | - | 0.83x | 0.91x | 1.13x | 1.76x |
-| i5-11400F (dev PC) | 12 | startup fix | 0.77x | 0.89x | 0.87x | 0.89x | 0.96x |
-| i5-11400F (dev PC) | 2 | before startup fix | - | 1.21x | - | - | - |
-| i5-11400F (dev PC) | 2 | 0719d5b | 1.19x | 1.25x | 1.26x | 1.23x | 1.27x |
-| Xeon 32K L1d / 1M L2 (sandbox) | 2 | fd9f8e5 | - | 1.06x | - | - | - |
+| machine | threads | binary | 1e14 | 1e15 | 1e16 | 1e17 | 1e18 | 1e19 |
+|---|---:|---|---:|---:|---:|---:|---:|---:|
+| i5-13500 (server) | 20 | before startup fix | - | 0.95x | 1.17x | 1.49x | 1.92x | - |
+| i5-13500 (server) | 20 | 0719d5b | 0.95x | 1.03x | 1.06x | 1.02x | 1.13x | - |
+| i5-13500 (server) | 20 | 0719d5b, 2nd run | 0.99x | 1.08x | 1.09x | 1.09x | 1.07x | - |
+| i5-11400F (dev PC) | 12 | before startup fix | - | 0.83x | 0.91x | 1.13x | 1.76x | - |
+| i5-11400F (dev PC) | 12 | startup fix | 0.77x | 0.89x | 0.87x | 0.89x | 0.96x | - |
+| i5-11400F (dev PC) | 2 | before startup fix | - | 1.21x | - | - | - | - |
+| i5-11400F (dev PC) | 2 | 0719d5b | 1.19x | 1.25x | 1.26x | 1.23x | 1.27x | - |
+| i5-11400F (dev PC) | 6 | runs + steals | - | - | - | - | - | 1.05x |
+| Xeon 32K L1d / 1M L2 (sandbox) | 2 | fd9f8e5 | - | 1.06x | - | - | - | - |
 
 ## Intel Core i5-13500 (server)
 
@@ -85,7 +87,7 @@ primesieve 11.0; eratostenes ?; 2026-10-01; best of 1
 | 1e17 | last 1e11 (0.0001%) | 2,554,661,982 | 7.43s | 7.294s | 1.02x |
 | 1e18 | last 1e11 (1e-05%) | 2,412,705,071 | 10.78s | 9.548s | 1.13x |
 
-Single runs; both programs ran 20-30% slower at 1e15 than in the table above. The fix leaves the server 5 chunks per thread below 1e15 (was 8) and 1 from 1e16 up, where the queue no longer balances P- and E-cores.
+Single runs; both programs ran 20-30% slower at 1e15 than in the table above. The fix leaves the server 5 chunks per thread below 1e15 (was 8) and 1 from 1e16 up, where the queue no longer balances P- and E-cores: `--debug-idle` shows 10.9% idle at the 1e18 tail and 13.5% at 1e16 (20 chunks, 20 threads). A second run of the same code (`make docker-benchmark-tails`, best of 1): 1e14 3.22s vs 3.259s (0.99x), 1e15 4.75s vs 4.409s (1.08x), 1e16 5.82s vs 5.334s (1.09x), 1e17 6.81s vs 6.269s (1.09x), 1e18 8.63s vs 8.037s (1.07x). The next change (contiguous runs per thread, the sieve carried across chunks, steals) is aimed at that idle; server numbers pending.
 
 ## Intel Core i5-11400F (dev PC)
 
@@ -146,6 +148,17 @@ primesieve 12.7; eratostenes 0719d5b; 2026-10-01; best of 2
 | 1e18 | last 1e11 (1e-05%) | 2,412,705,071 | 33.67s | 26.473s | 1.27x |
 
 Flat at ~1.25x from 1e14 to 1e18: with the startup fixed, what is left with one thread per core is sieving speed per thread, the same at every height.
+
+1e19 (152M base primes, ~1.2 GB per thread in each program, so 6 threads to fit in WSL's 12 GB), with contiguous runs and steals (uncommitted at the time):
+
+```
+11th Gen Intel(R) Core(TM) i5-11400F @ 2.60GHz, 6 threads (2 per core); L1d 288 KiB (6 instances); L2 3 MiB (6 instances); L3 12 MiB (1 instance)
+primesieve 12.7; eratostenes 5b2e3c3-dirty; 2026-10-01; best of 1
+```
+
+| N | tail | primes | eratostenes | primesieve | ratio |
+|---|---|---:|---:|---:|---:|
+| 1e19 | last 1e11 (1e-06%) | 2,285,738,870 | 30.93s | 29.328s | 1.05x |
 
 The 1e15 tail by thread count (2026-10-01, before the startup fix, which doesn't change this window's chunking; best of 2, run order era/ps/ps/era):
 

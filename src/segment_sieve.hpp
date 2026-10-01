@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <vector>
 #include <memory>
+#include <span>
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
@@ -129,7 +130,7 @@ public:
                          const std::vector<uint64_t>& small_primes,
                          const std::vector<uint64_t>& med64_primes,
                          const std::vector<uint64_t>& medium_primes,
-                         const std::vector<uint64_t>& sparse_primes,
+                         std::span<const uint64_t> sparse_primes,
                          Writer& out, uint64_t& prime_count) {
         uint64_t count = (k_high > k_low) ? (k_high - k_low) : 0;
         if (count == 0) return;
