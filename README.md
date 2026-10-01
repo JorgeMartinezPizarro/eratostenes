@@ -119,14 +119,16 @@ What this project is built from, one term each — follow the link for the conce
 | 1e14 | 3392.08s | 3349.907s | 1.01x |
 | 1e15 | 40976.93s | - | - |
 
-| N | tail | eratostenes | primesieve | ratio |
-|---|---|---:|---:|---:|
-| 1e13 | last 1e11 | 2.55s | 2.736s | 0.93x |
-| 1e14 | last 1e11 | 3.43s | 3.794s | 0.90x |
-| 1e15 | last 1e11 | 4.62s | 4.521s | 1.02x |
-| 1e16 | last 1e11 | 5.44s | 5.295s | 1.03x |
-| 1e17 | last 1e11 | 6.52s | 6.175s | 1.06x |
-| 1e18 | last 1e11 | 8.21s | 7.866s | 1.04x |
+The last 1e11 numbers below N (`make benchmark-tails`):
+
+| N | eratostenes | primesieve | ratio |
+|---|---:|---:|---:|
+| 1e13 | 2.55s | 2.736s | 0.93x |
+| 1e14 | 3.43s | 3.794s | 0.90x |
+| 1e15 | 4.62s | 4.521s | 1.02x |
+| 1e16 | 5.44s | 5.295s | 1.03x |
+| 1e17 | 6.52s | 6.175s | 1.06x |
+| 1e18 | 8.21s | 7.866s | 1.04x |
 
 The same two tables (`make benchmark`, `make benchmark-tails`) on other machines: [docs/BENCHMARK.md](docs/BENCHMARK.md).
 

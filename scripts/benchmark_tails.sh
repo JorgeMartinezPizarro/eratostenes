@@ -138,14 +138,14 @@ for n in $NS; do
 done
 
 echo
-bash scripts/machine_info.sh "$THREADS" "best of $REPS"
+bash scripts/machine_info.sh "$THREADS" "last $WIDTH below N, best of $REPS"
 echo
-# Same layout as README.md's tail table; the counts (checked above) stay in
-# the progress lines.
-echo "| N | tail | eratostenes | primesieve | ratio |"
-echo "|---|---|---:|---:|---:|"
+# Same layout as README.md's tail table: the window width goes in the header
+# line above, the counts (checked above) stay in the progress lines.
+echo "| N | eratostenes | primesieve | ratio |"
+echo "|---|---:|---:|---:|"
 for n in $NS; do
     [ -n "${COUNT[$n]:-}" ] || continue # skipped for memory
     ratio=$(awk -v a="${BEST_E[$n]}" -v b="${BEST_P[$n]}" 'BEGIN{printf "%.2f", a / b}')
-    printf "| %s | last %s | %ss | %ss | %sx |\n" "$n" "$WIDTH" "${BEST_E[$n]}" "${BEST_P[$n]}" "$ratio"
+    printf "| %s | %ss | %ss | %sx |\n" "$n" "${BEST_E[$n]}" "${BEST_P[$n]}" "$ratio"
 done

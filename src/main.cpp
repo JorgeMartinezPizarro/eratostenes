@@ -511,6 +511,7 @@ int main(int argc, char** argv) {
     uint64_t small_limit = SUB_BLOCK_BYTES * small_num / small_den;
     bool sub_block_whole_l1d = false;  // set once the thread count is known, see below
     unsigned l1_big_cores = 0;         // physical cores with the largest L1d (0: unknown)
+    uint64_t l1_max = l1_bytes ? l1_bytes : 32 * 1024; // largest per-core L1d (segment ceiling below)
 
     // Hybrid P-core/E-core correction: detect_l2_cache_bytes()/
     // detect_l1d_cache_bytes() above always read cpu0, so a P-core cpu0
@@ -541,6 +542,7 @@ int main(int argc, char** argv) {
         if (!opt.l1_bytes_override && !topo.l1_raw.empty() && topo.l1_raw[0]) {
             uint64_t max_l1_raw = topo.l1_raw[0];
             for (uint64_t s : topo.l1_raw) if (s > max_l1_raw) max_l1_raw = s;
+            l1_max = max_l1_raw;
             if (max_l1_raw > topo.l1_raw[0]) {
                 SUB_BLOCK_BYTES = sub_block_from_l1_bytes(max_l1_raw);
                 small_limit = SUB_BLOCK_BYTES * small_num / small_den;
@@ -580,6 +582,24 @@ int main(int argc, char** argv) {
     if (!opt.segment_width_set && sparse_regime) {
         seg_k_width *= 2;
         opt.segment_width = seg_k_width * WHEEL_MOD / WHEEL_SIZE; // keep the startup log's "segment=" accurate
+    }
+
+    // Ceiling on the automatic segment, primesieve's own rule (api.cpp's
+    // get_sieve_size: at most 16 x L1d, below the L2 per thread): on a CPU
+    // with a large L2 per core, the doubling above takes the segment to the
+    // whole L2, far past what pays. 2-vCPU Xeon Emerald Rapids (48 KiB L1d,
+    // 2 MiB L2), last 1e11 below N, -s 512 KiB instead of the doubled 2 MiB:
+    // -2.7% at 1e15, -7.4% at 1e16, -9.2% at 1e18. 16 x 48 KiB = 768 KiB
+    // leaves the dev PC and the i5-13500 (512 KiB) as they were; the power-
+    // of-2 fixup below takes 768 KiB down to 512 KiB. Auto width only.
+    uint64_t seg_uncapped_k = 0; // startup log: the width before the ceiling, 0 if it didn't apply
+    if (!opt.segment_width_set) {
+        const uint64_t cap_k = 16 * l1_max * 8; // bytes -> wheel indices (one bit each)
+        if (seg_k_width > cap_k) {
+            seg_uncapped_k = seg_k_width;
+            seg_k_width = cap_k;
+            opt.segment_width = seg_k_width * WHEEL_MOD / WHEEL_SIZE; // keep the startup log's "segment=" accurate
+        }
     }
 
     // The sparse tier's EratBig-style rewrite (segment_sieve.hpp) needs
@@ -818,6 +838,10 @@ int main(int argc, char** argv) {
     if (sub_block_whole_l1d)
         std::fprintf(stderr, "  sub-block: whole L1d (%u threads <= %u cores with the largest L1d)\n",
                      actual_threads, l1_big_cores);
+    if (seg_uncapped_k)
+        std::fprintf(stderr, "  segment: %llu KiB instead of %llu KiB (at most 16 x L1d)\n",
+                     static_cast<unsigned long long>(seg_k_width / 8 / 1024),
+                     static_cast<unsigned long long>(seg_uncapped_k / 8 / 1024));
     if (opt.medium_nta >= 0) {
         std::fprintf(stderr, "  medium-tier prefetchnta: %s (forced, --tune medium_nta=%d)\n",
                      opt.medium_nta ? "yes" : "no", opt.medium_nta);
