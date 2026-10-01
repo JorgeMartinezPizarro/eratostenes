@@ -457,8 +457,8 @@ int main(int argc, char** argv) {
     uint64_t l1_bytes = opt.l1_bytes_override ? opt.l1_bytes_override : detect_l1d_cache_bytes();
     SUB_BLOCK_BYTES = sub_block_from_l1_bytes(l1_bytes);
     uint64_t small_limit = SUB_BLOCK_BYTES * small_num / small_den;
-    bool sub_block_whole_l1d = false;  // set below when each thread has a core to itself
-    unsigned l1_big_cores = 0;         // physical cores with the largest L1d (startup log)
+    bool sub_block_whole_l1d = false;  // set once the thread count is known, see below
+    unsigned l1_big_cores = 0;         // physical cores with the largest L1d (0: unknown)
 
     // Hybrid P-core/E-core correction: detect_l2_cache_bytes()/
     // detect_l1d_cache_bytes() above always read cpu0, so a P-core cpu0
@@ -509,7 +509,7 @@ int main(int argc, char** argv) {
             for (size_t c = 0; c < topo.l1_raw.size(); ++c)
                 if (topo.l1_raw[c] == max_l1_raw && topo.l1_sharers[c] > 0) big_cores += 1.0 / topo.l1_sharers[c];
             l1_big_cores = static_cast<unsigned>(big_cores + 0.5);
-            if (opt.threads <= l1_big_cores) { SUB_BLOCK_BYTES *= 2; sub_block_whole_l1d = true; }
+            // Applied below, against the threads that actually run.
         }
     }
 
@@ -671,7 +671,14 @@ int main(int argc, char** argv) {
     constexpr unsigned CHUNKS_PER_THREAD = 150;
     constexpr uint64_t MIN_SEGS_PER_CHUNK = 4;
     uint64_t width_cap = wheel_count_upto(opt.limit) / (MIN_SEGS_PER_CHUNK * seg_k_width);
-    unsigned target_chunks = static_cast<unsigned>(std::max<uint64_t>(opt.threads,
+    // No floor of one chunk per thread either: a range under threads *
+    // MIN_SEGS_PER_CHUNK segments runs on fewer threads (actual_threads
+    // below), each with at least that much work, instead of every thread
+    // paying its own setup (SegmentSieve, activating every base prime) for a
+    // sliver of a segment -- primesieve also drops to fewer threads for small
+    // ranges. Only small N and short --start tails are affected (1e9 already
+    // has 31 chunks of 4 segments).
+    unsigned target_chunks = static_cast<unsigned>(std::max<uint64_t>(1,
         std::min<uint64_t>(uint64_t{opt.threads} * CHUNKS_PER_THREAD, width_cap)));
     // --start N0 (benchmarking only): sieve just [N0, N] instead of [0, N].
     // Every base prime is still activated for that range, so a tail of a
@@ -697,11 +704,16 @@ int main(int argc, char** argv) {
         uint64_t scaled = static_cast<uint64_t>(target_chunks * frac + 0.5);
         uint64_t floor_chunks = std::min<uint64_t>(uint64_t{opt.threads} * TAIL_CHUNKS_PER_THREAD,
                                                    span_k / (MIN_SEGS_PER_CHUNK * seg_k_width));
-        target_chunks = static_cast<unsigned>(std::max<uint64_t>({uint64_t{opt.threads}, scaled, floor_chunks}));
+        target_chunks = static_cast<unsigned>(std::max<uint64_t>({uint64_t{1}, scaled, floor_chunks}));
     }
     auto ranges = split_ranges(opt.limit, target_chunks, range_start);
     unsigned num_chunks = static_cast<unsigned>(ranges.size());
     unsigned actual_threads = std::min<unsigned>(opt.threads, num_chunks);
+
+    // Whole-L1d sub-block (see the topology block above) when the threads
+    // that actually run fit one per core with the largest L1d -- after the
+    // chunking, since a small range can leave fewer threads than -t.
+    if (l1_big_cores && actual_threads <= l1_big_cores) { SUB_BLOCK_BYTES *= 2; sub_block_whole_l1d = true; }
 
     uint64_t total_span = ranges.back().high - ranges.front().low;
 
@@ -733,7 +745,7 @@ int main(int argc, char** argv) {
                  med64_primes.size(), medium_primes.size(), sparse_primes.size());
     if (sub_block_whole_l1d)
         std::fprintf(stderr, "  sub-block: whole L1d (%u threads <= %u cores with the largest L1d)\n",
-                     opt.threads, l1_big_cores);
+                     actual_threads, l1_big_cores);
     if (opt.medium_nta >= 0) {
         std::fprintf(stderr, "  medium-tier prefetchnta: %s (forced, --tune medium_nta=%d)\n",
                      opt.medium_nta ? "yes" : "no", opt.medium_nta);

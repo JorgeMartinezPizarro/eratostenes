@@ -147,6 +147,8 @@ for i in "${!NS[@]}"; do
 done
 
 echo >&2
+bash scripts/machine_info.sh "$THREADS" "eratostenes best of $REPS, primesieve 1 run"
+echo
 echo "| N | eratostenes | primesieve | ratio |"
 printf "|---|---:|---:|---:|\n"
 for n in "${NS[@]}"; do

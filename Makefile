@@ -51,7 +51,7 @@ OUT_DIR := $(CURDIR)/output
 COMPOSE := docker compose -f docker/docker-compose.yml
 
 .PHONY: all portable debug pgo clean fclean re docker run docker-pgo run-pgo nth-prime \
-        test benchmark docker-dev docker-test docker-benchmark
+        test benchmark benchmark-tails docker-dev docker-test docker-benchmark docker-benchmark-tails
 
 # --- release (default) ---
 all: $(BIN) $(NTH_BIN)
@@ -219,6 +219,14 @@ test: $(BIN) $(NTH_BIN)
 benchmark:
 	./scripts/benchmark.sh
 
+# Cima del rango frente a primesieve (ver scripts/benchmark_tails.sh): los
+# ultimos 1e11 numeros por debajo de 1e15, 1e16 y 1e17 (0.01%, 0.001%,
+# 0.0001%), mismo numero de hilos en los dos, recuentos cruzados entre si.
+# THREADS/REPS/NS/WIDTH como variables de entorno.
+# Ejemplo: REPS=2 THREADS=2 make benchmark-tails
+benchmark-tails: $(BIN)
+	bash scripts/benchmark_tails.sh
+
 # --- run the same targets inside Docker (see docker/Dockerfile's `dev`
 # stage: gcc + libsqlite3-dev + libzstd-dev + primesieve). Each rebuilds
 # eratostenes/nth_prime with the container's own gcc against the
@@ -234,3 +242,6 @@ docker-test: docker-dev
 
 docker-benchmark: docker-dev
 	$(COMPOSE) run --rm -e THREADS -e SEGMENT -e REPS -e WRITE_PATH -e KEEP_DB dev make benchmark
+
+docker-benchmark-tails: docker-dev
+	$(COMPOSE) run --rm -e THREADS -e REPS -e NS -e WIDTH dev make benchmark-tails

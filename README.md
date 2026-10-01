@@ -28,6 +28,7 @@ make debug      # ASan/UBSan, for debugging
 make test       # checks output against primecount across N and across
                 # several parameter combinations, plus .db vs text output
 make benchmark  # Performance table comparing primesieve against eratostenes
+make benchmark-tails  # Same, on the last 1e11 numbers below 1e15, 1e16 and 1e17
 ```
 
 ## Docker
@@ -117,15 +118,7 @@ What this project is built from, one term each — follow the link for the conce
 | 1e14 | 3392.08s | 3349.907s | 1.01x |
 | 1e15 | 40976.93s | - | - |
 
-The same results on an Intel Core i5-11400F:
-
-| N | eratostenes | primesieve | ratio |
-|---|---:|---:|---:|
-| 1e10 | 0.16s | 0.187s | 0.86x |
-| 1e11 | 1.93s | 2.306s | 0.84x |
-| 1e12 | 23.54s | 27.283s | 0.86x |
-| 1e13 | 308.59s | 362.103s | 0.85x |
-| 1e14 | 4185.20s | 5804.52s | 0.72x |
+Other machines (i5-11400F, i5-1235U, cloud Xeons), top-of-range tails up to 1e17 (`make benchmark-tails`) and the history: [docs/BENCHMARK.md](docs/BENCHMARK.md).
 
 ## Validation
 
