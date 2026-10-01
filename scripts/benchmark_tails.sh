@@ -30,7 +30,7 @@ cd "$(dirname "$0")/.."
 BIN=./eratostenes
 THREADS="${THREADS:-$(nproc)}"
 REPS="${REPS:-1}"
-NS="${NS:-1e14 1e15 1e16 1e17 1e18}"
+NS="${NS:-1e14 1e15 1e16 1e17 1e18 1e19 1e20}"
 WIDTH="${WIDTH:-1e11}"
 
 if ! command -v primesieve >/dev/null 2>&1; then

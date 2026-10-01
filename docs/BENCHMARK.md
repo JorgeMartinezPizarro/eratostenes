@@ -36,9 +36,11 @@ Tails, last 1e11 below N:
 | machine | threads | binary | 1e14 | 1e15 | 1e16 | 1e17 | 1e18 |
 |---|---:|---|---:|---:|---:|---:|---:|
 | i5-13500 (server) | 20 | before startup fix | - | 0.95x | 1.17x | 1.49x | 1.92x |
+| i5-13500 (server) | 20 | 0719d5b | 0.95x | 1.03x | 1.06x | 1.02x | 1.13x |
 | i5-11400F (dev PC) | 12 | before startup fix | - | 0.83x | 0.91x | 1.13x | 1.76x |
 | i5-11400F (dev PC) | 12 | startup fix | 0.77x | 0.89x | 0.87x | 0.89x | 0.96x |
 | i5-11400F (dev PC) | 2 | before startup fix | - | 1.21x | - | - | - |
+| i5-11400F (dev PC) | 2 | 0719d5b | 1.19x | 1.25x | 1.26x | 1.23x | 1.27x |
 | Xeon 32K L1d / 1M L2 (sandbox) | 2 | fd9f8e5 | - | 1.06x | - | - | - |
 
 ## Intel Core i5-13500 (server)
@@ -68,7 +70,22 @@ primesieve 11.0; eratostenes ?; 2026-10-01; best of 1
 | 1e17 | last 1e11 (0.0001%) | 2,554,661,982 | 9.06s | 6.085s | 1.49x |
 | 1e18 | last 1e11 (1e-05%) | 2,412,705,071 | 15.22s | 7.937s | 1.92x |
 
-After the startup fix: pending.
+After the startup fix (0719d5b, same image setup):
+
+```
+13th Gen Intel(R) Core(TM) i5-13500, 20 threads (2 per core); L1d 544 KiB (14 instances); L2 11.5 MiB (8 instances); L3 24 MiB (1 instance)
+primesieve 11.0; eratostenes ?; 2026-10-01; best of 1
+```
+
+| N | tail | primes | eratostenes | primesieve | ratio |
+|---|---|---:|---:|---:|---:|
+| 1e14 | last 1e11 (0.1%) | 3,102,093,076 | 3.34s | 3.508s | 0.95x |
+| 1e15 | last 1e11 (0.01%) | 2,895,324,362 | 5.06s | 4.912s | 1.03x |
+| 1e16 | last 1e11 (0.001%) | 2,714,317,775 | 6.24s | 5.884s | 1.06x |
+| 1e17 | last 1e11 (0.0001%) | 2,554,661,982 | 7.43s | 7.294s | 1.02x |
+| 1e18 | last 1e11 (1e-05%) | 2,412,705,071 | 10.78s | 9.548s | 1.13x |
+
+Single runs; both programs ran 20-30% slower at 1e15 than in the table above. The fix leaves the server 5 chunks per thread below 1e15 (was 8) and 1 from 1e16 up, where the queue no longer balances P- and E-cores.
 
 ## Intel Core i5-11400F (dev PC)
 
@@ -112,6 +129,23 @@ primesieve 12.7; eratostenes 82fb442-dirty; 2026-10-01; best of 2
 | 1e18 | last 1e11 (1e-05%) | 2,412,705,071 | 20.60s | 21.433s | 0.96x |
 
 The 1e15 tail swings ~15% from run to run here with either binary: an interleaved A/B of the two (6 runs each) gives medians of 8.10s and 8.09s, so this table's 8.95s is one of those swings, not a regression.
+
+The same tails with 2 threads (one per core, the regime of the 2-vCPU sandbox):
+
+```
+11th Gen Intel(R) Core(TM) i5-11400F @ 2.60GHz, 2 threads (2 per core); L1d 288 KiB (6 instances); L2 3 MiB (6 instances); L3 12 MiB (1 instance)
+primesieve 12.7; eratostenes 0719d5b; 2026-10-01; best of 2
+```
+
+| N | tail | primes | eratostenes | primesieve | ratio |
+|---|---|---:|---:|---:|---:|
+| 1e14 | last 1e11 (0.1%) | 3,102,093,076 | 15.15s | 12.716s | 1.19x |
+| 1e15 | last 1e11 (0.01%) | 2,895,324,362 | 18.65s | 14.919s | 1.25x |
+| 1e16 | last 1e11 (0.001%) | 2,714,317,775 | 21.90s | 17.363s | 1.26x |
+| 1e17 | last 1e11 (0.0001%) | 2,554,661,982 | 26.84s | 21.796s | 1.23x |
+| 1e18 | last 1e11 (1e-05%) | 2,412,705,071 | 33.67s | 26.473s | 1.27x |
+
+Flat at ~1.25x from 1e14 to 1e18: with the startup fixed, what is left with one thread per core is sieving speed per thread, the same at every height.
 
 The 1e15 tail by thread count (2026-10-01, before the startup fix, which doesn't change this window's chunking; best of 2, run order era/ps/ps/era):
 
