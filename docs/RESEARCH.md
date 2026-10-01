@@ -1554,6 +1554,29 @@ re-file. Reverted. Not tried on the server, where med64 is a bigger share (~33 o
 100 at 1e14) and the E-cores have 2 load ports; if revisited, that's the one
 place it could still show.
 
+Follow-up (2026-10-01, on `cross_off_checked210`, tried twice, both reverted).
+Context: at `-t 1` eratostenes ran +8.8% instructions vs primesieve 12.7 in the
+small+medium tiers at 1e11 (78.3G vs 71.6G total). The hit loop is already 4
+instructions per hit like `EratMedium`; the excess is per call (~40 instructions:
+state decode, q2..q10, the switch's range check, a per-phase stub loading W into
+3 registers, then one shared tail that recomputes the list address from W, the
+`push_back` and a `bytes_needed` reload) vs ~10-20 in `EratMedium`.
+1. Exit through a per-phase callback (`exit.template operator()<W>(i)`, W a
+   compile-time constant) with `std::vector::push_back`: GCC outlined
+   `emplace_back` into a real call per exit (48 copies were too big to inline):
+   +2.4% instructions, +3.7% cycles:u at 1e11 `-t 1`, +1.3% on the 1e12 10% tail.
+2. Same exit with raw begin/end/capacity pointer arrays (inline pointer bump at
+   a constant offset, growth out of line) and `__builtin_unreachable()` for the
+   switch range: instructions -1.0..-1.7% as predicted (~7 per call), cycles:u
+   1e10 `-t 1` -1.3%, 1e11 `-t 1` +0.1%, 1e11 `-t 12` -0.2%, 1e12 10% tail -0.45%
+   (3/3/2 interleaved reps), for `process_med64<PR>` growing 630 -> 2241 asm lines
+   each.
+
+Same conclusion as above: the per-call bookkeeping runs in the shadow of the
+store-bound hit loop. The instruction gap vs primesieve is mostly free: at 1e11
+`-t 1` it costs ~1.5% in cycles (46.2G vs 45.5G), so what's left there has to
+come from fewer stores or mispredicts, not fewer bookkeeping instructions.
+
 ### med64: `prefetchnta` on the state stream (kept, 2026-09-29)
 
 Idea: after the medium tier's SoA + NTA win, med64's double-buffered state is the
