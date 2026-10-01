@@ -23,7 +23,7 @@
 #            (era/ps, ps/era, ...); the table keeps each one's fastest
 #            (default: 1)
 #   NS       space-separated N list, integers or 1eX, up to 2^64 - 1 (~1.8e19)
-#            (default: "1e14 1e15 1e16 1e17 1e18"). Memory grows with
+#            (default: "1e13 1e14 1e15 1e16 1e17 1e18"). Memory grows with
 #            pi(sqrt N) in both programs, per thread: ~1.2 GB each at 1e19
 #            (152M base primes), ~0.4 GB at 1e18.
 #   WIDTH    window width, integer or 1eX (default: 1e11)

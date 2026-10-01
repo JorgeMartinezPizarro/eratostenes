@@ -86,7 +86,7 @@ inline void sieve_odd_range(uint64_t lo, uint64_t hi, const std::vector<uint64_t
 // (none for small limits: fewer than 16 windows per part) and concatenated.
 // limit is isqrt(N): 1e9 at N = 1e18, where the one-shot vector<bool> sieve
 // this replaces took 7.8s on one thread (dev PC) before any worker started;
-// it dominated the top-of-range tails (BENCHMARK.md).
+// it dominated the top-of-range tails (docs/RESEARCH.md).
 inline std::vector<uint64_t> sieve_base_primes(uint64_t limit, unsigned threads = 1) {
     std::vector<uint64_t> primes;
     if (limit < 2) return primes;

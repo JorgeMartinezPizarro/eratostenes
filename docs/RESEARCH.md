@@ -2277,9 +2277,10 @@ compares by division now: `(s + 1) * (s + 1)` wrapped to 0 for N >=
 
 ### `-t 2` gap vs primesieve at the 1e15 tail: profile and sparse cutoff by thread count (measured, not adopted, 2026-10-01)
 
-With one thread per core the gap is flat at ~1.25x from 1e14 to 1e18 (dev PC,
-BENCHMARK.md). perf stat, last 1e11 below 1e15, `-t 2`, 2 runs each (within
-1.5%):
+With one thread per core the gap is flat from 1e14 to 1e18: dev PC, `THREADS=2
+REPS=2 make benchmark-tails` at 0719d5b, 1.19/1.25/1.26/1.23/1.27x (15.15 vs
+12.72 s at 1e14, 33.67 vs 26.47 s at 1e18). perf stat, last 1e11 below 1e15,
+`-t 2`, 2 runs each (within 1.5%):
 
 | | eratostenes | primesieve |
 |---|---:|---:|

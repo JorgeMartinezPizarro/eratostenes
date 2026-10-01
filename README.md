@@ -128,7 +128,7 @@ What this project is built from, one term each — follow the link for the conce
 | 1e17 | last 1e11 | 6.52s | 6.175s | 1.06x |
 | 1e18 | last 1e11 | 8.21s | 7.866s | 1.04x |
 
-Other machines (i5-11400F, i5-1235U, cloud Xeons), top-of-range tails up to 1e18 (`make benchmark-tails`) and the history: [docs/BENCHMARK.md](docs/BENCHMARK.md).
+The same two tables (`make benchmark`, `make benchmark-tails`) on other machines: [docs/BENCHMARK.md](docs/BENCHMARK.md).
 
 ## Validation
 
