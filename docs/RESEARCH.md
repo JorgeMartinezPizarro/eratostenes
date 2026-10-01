@@ -89,6 +89,7 @@ throughout below).
 - [arg_parser.hpp](#arg_parserhpp)
   - [`--zstd-level` default: 1 (kept, 2026-09-28)](#--zstd-level-default-1-kept-2026-09-28)
   - [Sub-block size: half the L1d, not all of it (kept, 2026-09-27)](#sub-block-size-half-the-l1d-not-all-of-it-kept-2026-09-27)
+  - [Sub-block: the whole L1d when no CPU has an SMT sibling (kept, 2026-10-01)](#sub-block-the-whole-l1d-when-no-cpu-has-an-smt-sibling-kept-2026-10-01)
   - [Auto segment width: dropping the `isqrt(limit)` cap (kept)](#auto-segment-width-dropping-the-isqrtlimit-cap-kept)
   - [Segment width doubled once the sparse tier exists (kept, 2026-09-27)](#segment-width-doubled-once-the-sparse-tier-exists-kept-2026-09-27)
   - [Narrow segment for the chunks below narrow² (kept, 2026-09-28)](#narrow-segment-for-the-chunks-below-narrow-kept-2026-09-28)
@@ -2606,6 +2607,59 @@ re-swept: `small_limit`'s own divisor and med64's fraction were tuned at the old
 48KiB sub-block -- a joint re-sweep at 24KiB may find a slightly different
 optimum. Not yet measured on the server (L1d 48KiB P / 32KiB E -> 16KiB
 sub-block, which measured -5.1% here).
+
+### Sub-block: the whole L1d when no CPU has an SMT sibling (kept, 2026-10-01)
+
+The half-L1d entry above was measured with every hardware thread busy, where two
+SMT siblings share each L1d: half of it IS each thread's whole share. With one
+thread per core that rule leaves half the L1d unused. Found from the 2-vCPU Xeon
+KVM sandbox (Emerald Rapids, 48KiB L1d, `Thread(s) per core: 1`), which lost
+1.16x/1.08x to primesieve at 1e10/1e11 with `-t 1`, while the dev PC wins at
+`-t 12`. Dev PC thread sweep (era/primesieve wall, mean of 3): 1e11 -t 1 1.11x,
+-t 6 1.02x, -t 12 0.84x. perf at 1e11: primesieve's L1d misses grow 2.17x from
+-t 1 to -t 12 (eratostenes 1.31x) -- primesieve sizes its L1 chunk for a whole
+core (`Erat.cpp`: EratSmall chunk = full L1d, never halved for SMT), which wins
+alone on a core and loses under SMT; ours did the opposite.
+
+Dev PC, `-t 1` (a single thread owns its core), cycles:u, 2-3 reps (<1% spread),
+via `--l1-bytes` (sub-block = half of it) and `--tune small=a/b`:
+
+| sub-block | `small_limit` | 1e10 | 1e11 |
+|---:|---:|---:|---:|
+| 24KiB (default) | 6KiB | -- | -- |
+| 32KiB | 8KiB | -5% | -4% |
+| 40KiB | 10KiB | -6% | -5% |
+| 48KiB | 12KiB | -6% | -5% |
+| 56KiB / 64KiB | 14 / 16KiB | +3% / +8% | +3% / +7% |
+| 48KiB | 6KiB (`small=1/8`) | **-9.4%** | **-7.0%** |
+
+`small=1/6..1/12` at 48KiB are all within ~1% of each other; letting
+`small_limit` grow with the sub-block is what loses. Tails at `-t 1`: 1e12
+(last 2%) -3.2%, 1e13 (last 0.2%) -4.5%, counts identical. Wall-clock vs
+primesieve at `-t 1`: 1e10 1.25x -> 1.09x, 1e11 1.105x -> 1.03-1.04x (cycles
+46.5G vs primesieve's 46.4G). Same flags on the Xeon (`-t 1` and `-t 2`, 3 reps
+each, 36 runs, counts OK): -4.9..-5.6% in all four N/thread combinations, 1e11
+-t 1 ties primesieve (15.02s vs 14.98s). The same 48KiB sub-block at `-t 12` on
+the dev PC is **+16.5%** cycles, so it can't be the default where SMT siblings
+share the L1d.
+
+Rule kept: when every CPU's L1d has exactly one logical CPU (sysfs
+`shared_cpu_list`, i.e. no SMT anywhere: such VMs, or HT off) and all L1d
+sizes are equal, the sub-block is the whole L1d; `small_limit` keeps the
+half-L1d value. Unequal L1d sizes are excluded (hybrid with HT off: the
+P-core L1d would overflow the E-cores'). `--l1-bytes` still means "the L1d
+size" and skips this rule. The rule is inactive on the dev PC and the server
+(both SMT), so nothing changes there; `make test` passes both as built and
+with the rule forced on. The startup log prints
+`sub-block: whole L1d (no SMT sibling on any CPU)` when it fires. Pending: confirm
+the real detection path on the Xeon; and the open case `-t` <= physical cores on
+an SMT machine (one thread per core in practice), which can't be measured under
+WSL2 (Hyper-V doesn't honour sibling pairs for `taskset`) -- native Linux server.
+
+Also checked from primesieve's sizing: its small-N segment (sqrt(N)*2 bytes, a
+multiple of the L1 chunk: 192KiB at 1e10) is -2..-3% vs our 256KiB at 1e10
+`-t 1`, near noise and only for N <= ~1e10 (from ~2e10 up both reach the
+L2-derived cap) -- not pursued.
 
 ### Auto segment width: dropping the `isqrt(limit)` cap (kept)
 

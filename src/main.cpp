@@ -458,6 +458,7 @@ int main(int argc, char** argv) {
     uint64_t l1_bytes = opt.l1_bytes_override ? opt.l1_bytes_override : detect_l1d_cache_bytes();
     SUB_BLOCK_BYTES = sub_block_from_l1_bytes(l1_bytes);
     uint64_t small_limit = SUB_BLOCK_BYTES * small_num / small_den;
+    bool sub_block_whole_l1d = false;  // set below on machines without SMT
 
     // Hybrid P-core/E-core correction: detect_l2_cache_bytes()/
     // detect_l1d_cache_bytes() above always read cpu0, so a P-core cpu0
@@ -491,6 +492,18 @@ int main(int argc, char** argv) {
                 SUB_BLOCK_BYTES = sub_block_from_l1_bytes(max_l1_raw);
                 small_limit = SUB_BLOCK_BYTES * small_num / small_den;
             }
+            // No SMT anywhere (every L1d has exactly one logical CPU, e.g.
+            // a VM without HT, or HT off): half the L1d is the per-thread
+            // share of an HT pair, which no thread here has to give up, so
+            // the sub-block takes the whole L1d. small_limit stays at the
+            // half-L1d value -- letting it grow with the sub-block measured
+            // worse. Uniform L1d only: on a hybrid CPU with HT off, the
+            // whole P-core L1d would overflow the E-cores' smaller one. See
+            // docs/RESEARCH.md#sub-block-the-whole-l1d-when-no-cpu-has-an-smt-sibling-kept-2026-10-01.
+            bool no_smt = true;
+            for (size_t c = 0; c < topo.l1_raw.size(); ++c)
+                if (topo.l1_sharers[c] != 1 || topo.l1_raw[c] != max_l1_raw) { no_smt = false; break; }
+            if (no_smt) { SUB_BLOCK_BYTES *= 2; sub_block_whole_l1d = true; }
         }
     }
 
@@ -709,6 +722,7 @@ int main(int argc, char** argv) {
                  WHEEL_PRIMES.size(),
                  small_primes.size(), static_cast<unsigned long long>(SUB_BLOCK_BYTES / 1024),
                  med64_primes.size(), medium_primes.size(), sparse_primes.size());
+    if (sub_block_whole_l1d) std::fprintf(stderr, "  sub-block: whole L1d (no SMT sibling on any CPU)\n");
     if (opt.medium_nta >= 0) {
         std::fprintf(stderr, "  medium-tier prefetchnta: %s (forced, --tune medium_nta=%d)\n",
                      opt.medium_nta ? "yes" : "no", opt.medium_nta);
