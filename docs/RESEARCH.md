@@ -2512,8 +2512,12 @@ sparse cutoff 1/2:
 | total | 147.6G | IPC 1.83 | | 128.9G, IPC 2.13 |
 
 Below 2.1M the two are even; the `-t 2` gap on the dev PC is the sparse
-tier (+15G: the same instructions per hit as EratBig at a lower IPC) and
-the presieve (+3G, 16 tables x 4 passes per sub-block). On the i5-13500
+tier (+15G: the same instructions per hit as EratBig at a lower IPC). The
+presieve line is not a gap: primesieve's shows as 0.5G only because its
+AVX-512 pre-sieve kernels have no symbol and land in "other" (the September
+1e11 profile put them at ~4.5%, i.e. ~6G here), so the two pre-sieves cost
+about the same; ours vectorizes too (AVX2 `vporq`, checked in the asm) and
+is load-bound (16 tables that don't fit L1). On the i5-13500
 (native perf, P-cores 0,2, same tail): 119.1G vs 108.8G, we execute 7%
 fewer instructions (266.8G vs 286.0G) at IPC 2.24 vs 2.63, L2 misses only
 +20% (1.25 MiB L2), nothing reaches memory; process_big 38.3G against
@@ -2538,8 +2542,39 @@ primesieve's buckets are 8 KiB. `-DERA_BLK_BYTES`, ABAB x4, cycles:u:
 4 KiB kept as the default (`ERA_BLK_BYTES` stays overridable): fewer
 block boundaries per chain (the next-block prefetch, the pool push/pop)
 at a pool footprint that still fits beside the segment, where 8 KiB
-didn't. The server at 20 threads and the 1e16-1e18 tails are not measured
-yet.
+didn't. Confirmed where it matters most:
+
+- Dev PC, `REPS=2 make benchmark-tails` (wall, best of 2): 1e15 7.59 ->
+  7.09 s, 1e16 10.80 -> 9.65 s, 1e17 14.13 -> 12.84 s, 1e18 19.21 -> 18.28 s
+  (-5..-11%) with primesieve within 1% of its previous times from 1e15 up;
+  1e13/1e14 -4..-5% with primesieve also -3..-4% (host). Ratios 0.80 / 0.73 /
+  0.74 / 0.77 / 0.81 / 0.86x.
+- Emerald Rapids sandbox (2 vCPU, 1 MiB segment), f512e44 vs bfcf8d1
+  interleaved on the same host, 2 runs each: 1e13 -1%, 1e14 -1% (noise),
+  1e15 -2%, 1e16 -6%, 1e17 -6%, 1e18 -8%, every new run below every old one
+  from 1e16 up. Ratios there 0.93 / 0.99 / 0.93 / 1.04 / 1.03 / 1.01x.
+
+The i5-13500 at 20 threads is still unmeasured (its 1e14 full run of
+2026-10-02, 3442 s against 3392 s, was the binary before this change).
+
+### Two more `-t 2` probes on the sparse tier and the presieve (both tried, neither kept, 2026-10-02)
+
+- Sparse wheel at `-t 2`: `--tune big2310=0` (mod-210 table, 3 KiB) against
+  the default mod-2310 (15 KiB TABLE2310, competing for L1 with the segment
+  lines and the bucket blocks): 1e15 tail, sparse 1/2, ABAB x3, 148.0G vs
+  146.4G -- a tie; at `-t 12` the same tail is 334-346G vs 325-328G, the
+  -4% that chose mod-2310 in September. The table isn't what lowers the
+  sparse tier's IPC at two threads. Default kept.
+- `Presieve::fill` in one pass over all 16 tables (dst written once per
+  chunk) instead of 4 passes of 4 (dst read-modify-written 4 times): 1e10
+  `-t 12` 7.39G -> 7.79G (+5.5%), 1e11 90.8G -> 94.8G (+4.3%), 1e15 tail
+  `-t 2` 145.8G -> 148.6G (+2%). 16 streams in one loop lose more to
+  vectorization/register pressure than the three extra dst passes cost.
+  Reverted. fill's 4-table loop does vectorize (AVX2 `vporq`/`vmovdqu` on
+  ymm); the cost is the 16 table streams, which primesieve pays too (see
+  the per-tier entry above). Nothing left to take here short of fewer
+  tables, and dropping coverage was measured worse than the fill it saves
+  (each prime removed costs ~8x its share of the fill in small-tier hits).
 
 ### `.db` output: the `.blk` sidecar, blocks written by the sieve threads (kept, format 3, 2026-10-02)
 

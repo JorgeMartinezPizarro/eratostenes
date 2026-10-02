@@ -28,28 +28,28 @@ The last 1e11 numbers below N (`make benchmark-tails`):
 
 ## Intel Core i5-11400F
 
-6 cores / 12 threads, 48 KiB L1d and 512 KiB L2 per core, 12 MiB L3; WSL2 (Debian), primesieve 12.7, 12 threads. Tails: eratostenes a141dd1, 2026-10-02, best of 2.
+6 cores / 12 threads, 48 KiB L1d and 512 KiB L2 per core, 12 MiB L3; WSL2 (Debian), primesieve 12.7, 12 threads.
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
 | 1e10 | 0.16s | 0.187s | 0.86x |
-| 1e11 | 1.93s | 2.306s | 0.84x |
-| 1e12 | 23.54s | 27.283s | 0.86x |
-| 1e13 | 308.59s | 362.103s | 0.85x |
+| 1e11 | 1.89s | 2.303s | 0.82x |
+| 1e12 | 23.65s | 27.224s | 0.87x |
+| 1e13 | 308.81s | 363.157s | 0.85x |
 | 1e14 | 4185.20s | 5804.52s | 0.72x |
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
-| 1e13 | 3.64s | 4.514s | 0.81x |
-| 1e14 | 5.24s | 7.133s | 0.73x |
-| 1e15 | 7.59s | 9.609s | 0.79x |
-| 1e16 | 10.80s | 12.714s | 0.85x |
-| 1e17 | 14.13s | 15.893s | 0.89x |
-| 1e18 | 19.21s | 21.175s | 0.91x |
+| 1e13 | 3.44s | 4.318s | 0.80x |
+| 1e14 | 5.05s | 6.937s | 0.73x |
+| 1e15 | 7.09s | 9.580s | 0.74x |
+| 1e16 | 9.65s | 12.565s | 0.77x |
+| 1e17 | 12.84s | 15.819s | 0.81x |
+| 1e18 | 18.28s | 21.089s | 0.87x |
 
 ## Intel Xeon Emerald Rapids (claude.ai sandbox)
 
-Intel Xeon @ 2.10GHz (family 6 model 207), 2-vCPU KVM, 1 thread per core, 48 KiB L1d and 2 MiB L2 per core, L3 reported as 260 MiB (the whole host's); Ubuntu 24.04, g++ 13.3. primesieve 12.0, eratostenes bfcf8d1, 2 threads, 2026-10-02, one run each (primesieve varies up to 10% between runs on these tails).
+Intel Xeon @ 2.10GHz (family 6 model 207), 2-vCPU KVM, 1 thread per core, 48 KiB L1d and 2 MiB L2 per core, L3 reported as 260 MiB (the whole host's, shared with other tenants: times swing ~20% between hosts of this CPU, ratios less); Ubuntu 24.04, g++ 13.3, primesieve 12.0, 2 threads.
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
@@ -60,16 +60,16 @@ Intel Xeon @ 2.10GHz (family 6 model 207), 2-vCPU KVM, 1 thread per core, 48 KiB
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
-| 1e13 | 14.22s | 15.271s | 0.93x |
-| 1e14 | 17.40s | 17.431s | 1.00x |
-| 1e15 | 20.63s | 21.332s | 0.97x |
-| 1e16 | 23.83s | 24.135s | 0.99x |
-| 1e17 | 27.76s | 24.838s | 1.12x |
-| 1e18 | 32.75s | 29.667s | 1.10x |
+| 1e13 | 12.69s | 13.596s | 0.93x |
+| 1e14 | 15.69s | 15.830s | 0.99x |
+| 1e15 | 18.61s | 19.924s | 0.93x |
+| 1e16 | 21.73s | 20.948s | 1.04x |
+| 1e17 | 24.86s | 24.139s | 1.03x |
+| 1e18 | 28.31s | 27.915s | 1.01x |
 
 ## Intel Xeon @ 2.80GHz (claude.ai sandbox)
 
-Intel Xeon @ 2.80GHz (model hidden by the hypervisor), 2-vCPU KVM, 1 thread per core, 32 KiB L1d and 1 MiB L2 per core, 33 MiB L3. primesieve 12.0, eratostenes bfcf8d1, 2 threads, 2026-10-02, one run each.
+Intel Xeon @ 2.80GHz (model hidden by the hypervisor), 2-vCPU KVM, 1 thread per core, 32 KiB L1d and 1 MiB L2 per core, 33 MiB L3; primesieve 12.0, 2 threads.
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
@@ -89,7 +89,7 @@ Intel Xeon @ 2.80GHz (model hidden by the hypervisor), 2-vCPU KVM, 1 thread per 
 
 ## Intel Core i5-1235U (laptop)
 
-Hybrid, 2 P-cores with HT + 8 E-cores, 12 threads, 8 GB RAM. 2026-10-02 (eratostenes commit and rep count not recorded). The 1e18 tail needs ~0.4 GB per thread in each program and doesn't fit in 8 GB with 12 threads.
+Hybrid, 2 P-cores with HT + 8 E-cores, 12 threads, 8 GB RAM (the 1e18 tail needs ~0.4 GB per thread in each program and doesn't fit).
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
