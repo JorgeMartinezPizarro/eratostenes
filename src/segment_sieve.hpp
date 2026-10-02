@@ -536,12 +536,13 @@ private:
     // packed into `qw`, `pos` relative to whichever segment it's due in,
     // same layout as the dense tiers' DenseState, 8 bytes total), so
     // rescheduling COPIES the entry into the target slot's tail block
-    // instead of relinking an index. SPARSE_BLOCK_ENTRIES=128 (1 KiB/
-    // block). See
-    // docs/RESEARCH.md#sparse-tier-design-current-fixed-size-pooled-blocks-attempt-6
-    // and docs/RESEARCH.md#sparse_block_entries-tuning-1024-vs-128 for why
-    // this design (not an earlier idx-indexed intrusive list) and this
-    // block size.
+    // instead of relinking an index. Blocks of 4 KiB (512 entries): 1 KiB
+    // was chosen over 8 KiB in September; 4 KiB, never tried then, is
+    // -3.6..-3.9% at the 1e15 tail with 2 and with 12 threads (dev PC), a
+    // tie at 1e13. See
+    // docs/RESEARCH.md#sparse-tier-design-current-fixed-size-pooled-blocks-attempt-6,
+    // docs/RESEARCH.md#sparse_block_entries-tuning-1024-vs-128 and
+    // docs/RESEARCH.md#sparse-tier-block-size-4-kib-kept-2026-10-02.
     //
     // Drains this segment's ring slot: for each due entry, mark its one
     // hit (byte marking, mod-210 table lookup for mask/step -- see
@@ -709,7 +710,10 @@ private:
     // or resized in place). free_ is a stack of blocks not currently in
     // any ring slot; begin_chunk() repopulates it from every arena ever
     // allocated, never shrinking the pool.
-    static constexpr size_t BLK_BYTES = 1024;
+#ifndef ERA_BLK_BYTES
+#define ERA_BLK_BYTES 4096
+#endif
+    static constexpr size_t BLK_BYTES = ERA_BLK_BYTES; // -DERA_BLK_BYTES for A/B
     static constexpr size_t CHUNK_BLOCKS = 256;
     struct Blk {
         Blk* next;

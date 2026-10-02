@@ -2480,6 +2480,11 @@ combination (512 KiB with 1/4: tie). The split isn't what makes primesieve
 faster per thread; halving our segment doubles the medium and sparse tiers'
 per-segment costs, which EratMedium doesn't pay the same way. Not adopted.
 
+Compiler: clang 19.1.7 (`-O3 -march=native -flto`) against GCC's build, ABBA
+x2, cycles:u -- 1e11 `-t 12` 90.3-91.4G vs 89.8-90.9G, the 1e15 tail `-t 2`
+152-173G vs 152-169G: a tie both times. The switch/fall-through loops don't
+depend on which of the two compiles them.
+
 ### `MIN_SEGS_PER_CHUNK` as `--tune minsegs` (knob added, default kept, 2026-10-02)
 
 The i5-13500 at 1e10 (1.09x) is a tail-balance loss: `--debug-idle` shows 6.2%
@@ -2491,6 +2496,50 @@ since the sieve is carried across chunks. Dev PC (uniform cores), 1e10 `-t 12`:
 `minsegs=1` idle 2.9-5.0% -> 1.8-2.8%, 636 chunks instead of 255, wall
 unchanged (0.16-0.17 s); 1e11 unaffected (the floor doesn't bind: 1590 chunks
 either way). Default left at 4 until the server measures 1 and 2.
+
+### Per-tier cycles against primesieve at `-t 2`, and the sparse tier's block size: 4 KiB (kept, 2026-10-02)
+
+Two `perf record`s (cycles:u, instructions:u) per program, summed by tier
+(symbols -> small / med64 / medium / sparse / presieve; primesieve's
+EratSmall / EratMedium / EratBig). Dev PC, last 1e11 below 1e15, `-t 2`,
+sparse cutoff 1/2:
+
+| | eratostenes | | primesieve | |
+|---|---:|---:|---:|---:|
+| small (<6K) + med64 (6K-350K) + medium (350K-2.1M) | 83.7G | | EratSmall + EratMedium (<768K) 63.9G, plus EratBig's share for 768K-2.1M (~30% of its hits, ~18G) | ~82G |
+| sparse (>= 2.1M) | 57.9G | IPC 2.36 | EratBig for >= 2.1M (~70% of 60.8G) | ~43G, IPC 2.84 |
+| presieve | 3.5G | | | 0.5G |
+| total | 147.6G | IPC 1.83 | | 128.9G, IPC 2.13 |
+
+Below 2.1M the two are even; the `-t 2` gap on the dev PC is the sparse
+tier (+15G: the same instructions per hit as EratBig at a lower IPC) and
+the presieve (+3G, 16 tables x 4 passes per sub-block). On the i5-13500
+(native perf, P-cores 0,2, same tail): 119.1G vs 108.8G, we execute 7%
+fewer instructions (266.8G vs 286.0G) at IPC 2.24 vs 2.63, L2 misses only
++20% (1.25 MiB L2), nothing reaches memory; process_big 38.3G against
+EratBig's ~35G share for the same primes, the dense tiers 80.8G against
+~74G. So the sparse tier suffers where the segment is the whole L2 (dev,
+one thread per core), ties where it isn't. (An earlier reading here that
+"our sparse beats EratBig by 23%" compared different prime ranges --
+EratBig starts at 768K -- and was wrong.) The grouped Topdown events
+(`cpu_core/topdown-*`) are "not supported" by the server's perf, so the
+front/back-end split is still open.
+
+The sparse tier's one untested knob in this regime was its block size:
+1 KiB (128 entries) was picked over 8 KiB in September at 12 threads;
+primesieve's buckets are 8 KiB. `-DERA_BLK_BYTES`, ABAB x4, cycles:u:
+
+| | 1 KiB | 4 KiB | 8 KiB (ABC x2) |
+|---|---:|---:|---:|
+| 1e15 tail, `-t 2` (1/2) | 151.3G | **145.4G (-3.9%)** | ~150G |
+| 1e15 tail, `-t 12` | 345.8G | **333.5G (-3.6%)** | 350-357G |
+| 1e13 tail, `-t 12` | 163.4G | 164.9G (+0.9%) | |
+
+4 KiB kept as the default (`ERA_BLK_BYTES` stays overridable): fewer
+block boundaries per chain (the next-block prefetch, the pool push/pop)
+at a pool footprint that still fits beside the segment, where 8 KiB
+didn't. The server at 20 threads and the 1e16-1e18 tails are not measured
+yet.
 
 ### `.db` output: the `.blk` sidecar, blocks written by the sieve threads (kept, format 3, 2026-10-02)
 

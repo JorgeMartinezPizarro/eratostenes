@@ -49,43 +49,43 @@ The last 1e11 numbers below N (`make benchmark-tails`):
 
 ## Intel Xeon Emerald Rapids (claude.ai sandbox)
 
-Intel Xeon @ 2.10GHz (family 6 model 207), 2-vCPU KVM, 1 thread per core, 48 KiB L1d and 2 MiB L2 per core, L3 reported as 260 MiB (the whole host's). primesieve 12.0, 2 threads, 2026-10-02. Count: 3, 3, 2 and 1 runs at 1e10, 1e11, 1e12 and 1e13. Tails: eratostenes 55e2808, best of 2.
+Intel Xeon @ 2.10GHz (family 6 model 207), 2-vCPU KVM, 1 thread per core, 48 KiB L1d and 2 MiB L2 per core, L3 reported as 260 MiB (the whole host's); Ubuntu 24.04, g++ 13.3. primesieve 12.0, eratostenes bfcf8d1, 2 threads, 2026-10-02, one run each (primesieve varies up to 10% between runs on these tails).
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
-| 1e10 | 0.836s | 0.731s | 1.14x |
-| 1e11 | 8.84s | 8.61s | 1.03x |
-| 1e12 | 101.92s | 107.72s | 0.95x |
-| 1e13 | 1250.8s | 1337.3s | 0.94x |
+| 1e10 | 0.84s | 0.774s | 1.09x |
+| 1e11 | 8.71s | 8.515s | 1.02x |
+| 1e12 | 102.45s | 106.910s | 0.96x |
+| 1e13 | 1264.79s | 1324.144s | 0.96x |
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
-| 1e13 | 14.14s | 14.382s | 0.98x |
-| 1e14 | 17.09s | 16.873s | 1.01x |
-| 1e15 | 22.02s | 19.131s | 1.15x |
-| 1e16 | 26.43s | 21.534s | 1.23x |
-| 1e17 | 30.50s | 24.982s | 1.22x |
-| 1e18 | 37.21s | 31.329s | 1.19x |
+| 1e13 | 14.22s | 15.271s | 0.93x |
+| 1e14 | 17.40s | 17.431s | 1.00x |
+| 1e15 | 20.63s | 21.332s | 0.97x |
+| 1e16 | 23.83s | 24.135s | 0.99x |
+| 1e17 | 27.76s | 24.838s | 1.12x |
+| 1e18 | 32.75s | 29.667s | 1.10x |
 
 ## Intel Xeon @ 2.80GHz (claude.ai sandbox)
 
-Intel Xeon @ 2.80GHz, 2-vCPU KVM, 1 thread per core, 32 KiB L1d and 1 MiB L2 per core, 33 MiB L3. primesieve 12.0, eratostenes 55e2808, 2 threads, 2026-10-02. Count: best of 1 (primesieve: one run). Tails: best of 3.
+Intel Xeon @ 2.80GHz (model hidden by the hypervisor), 2-vCPU KVM, 1 thread per core, 32 KiB L1d and 1 MiB L2 per core, 33 MiB L3. primesieve 12.0, eratostenes bfcf8d1, 2 threads, 2026-10-02, one run each.
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
-| 1e10 | 0.73s | 0.747s | 0.98x |
-| 1e11 | 8.49s | 8.828s | 0.96x |
-| 1e12 | 100.65s | 104.099s | 0.97x |
-| 1e13 | 1381.85s | 1301.040s | 1.06x |
+| 1e10 | 0.80s | 0.869s | 0.92x |
+| 1e11 | 9.32s | 9.739s | 0.96x |
+| 1e12 | 114.25s | 119.365s | 0.96x |
+| 1e13 | 1502.30s | 1478.500s | 1.02x |
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
-| 1e13 | 16.00s | 14.098s | 1.13x |
-| 1e14 | 18.67s | 17.153s | 1.09x |
-| 1e15 | 23.04s | 20.192s | 1.14x |
-| 1e16 | 26.54s | 21.232s | 1.25x |
-| 1e17 | 31.12s | 25.662s | 1.21x |
-| 1e18 | 37.05s | 31.956s | 1.16x |
+| 1e13 | 17.50s | 16.139s | 1.08x |
+| 1e14 | 22.13s | 19.954s | 1.11x |
+| 1e15 | 28.03s | 22.108s | 1.27x |
+| 1e16 | 33.23s | 26.022s | 1.28x |
+| 1e17 | 40.58s | 32.133s | 1.26x |
+| 1e18 | 49.04s | 41.830s | 1.17x |
 
 ## Intel Core i5-1235U (laptop)
 
