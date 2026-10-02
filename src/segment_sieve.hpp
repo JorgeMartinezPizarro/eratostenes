@@ -90,6 +90,12 @@ public:
         if (big2310_ && (log2_sb_ > 24 || base_prime_max / WHEEL_MOD >= (uint64_t{1} << 28))) {
             throw std::runtime_error("SegmentSieve: segment or base prime too large for the mod-2310 sparse tier");
         }
+        // mod-210 (--tune big2310=0): qw = (qp << 9) | idx in 32 bits, so qp
+        // < 2^23, i.e. p < ~2.5e8 and N < ~6.3e16 -- this wrapped silently.
+        if (!big2310_ && base_prime_max / WHEEL_MOD >= (uint64_t{1} << 23)) {
+            throw std::runtime_error("SegmentSieve: base prime too large for the mod-210 sparse tier "
+                                     "(N must be below ~6.3e16 with --tune big2310=0)");
+        }
         uint64_t maxstep = base_prime_max / WHEEL_MOD * (big2310_ ? 14 : 10) + 16;
         uint64_t ahead = (maxstep >> log2_sb_) + 2;
         num_buckets_ = 1;

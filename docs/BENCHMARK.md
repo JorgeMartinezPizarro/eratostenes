@@ -65,7 +65,7 @@ Intel Xeon @ 2.80GHz, 2-vCPU KVM, 1 thread per core, 32 KiB L1d and 1 MiB L2 per
 
 ## Intel Core i5-1235U (laptop)
 
-Hybrid, 2 P-cores with HT + 8 E-cores, 12 threads, 8 GB RAM. eratostenes before 81f2918, 2026-09-30, one run; no tails yet.
+Hybrid, 2 P-cores with HT + 8 E-cores, 12 threads, 8 GB RAM. 2026-10-02 (eratostenes commit and rep count not recorded). The 1e18 tail needs ~0.4 GB per thread in each program and doesn't fit in 8 GB with 12 threads.
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|

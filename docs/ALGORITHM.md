@@ -13,10 +13,16 @@ stands today.
 ## 1. Base primes (`base_sieve.hpp`)
 
 Everything downstream needs the primes up to `sqrt(N)` -- these are the only ones
-whose multiples can possibly need marking. `sqrt(N)` is always small even for huge
-N (`sqrt(1e15) ≈ 31.6M`), so this step is a plain, non-segmented, odds-only bit
-sieve: no wheel, no parallelism, nothing fancy. It runs once, in milliseconds, and
-its output (a `std::vector<uint64_t>`) feeds every other step.
+whose multiples can possibly need marking. `sqrt(N)` is small next to N but not
+tiny at the top of the range (`sqrt(1e18) = 1e9`, 50.8M primes), so this step is a
+segmented, odds-only byte sieve in 32 KiB windows, split over the threads (each
+takes a contiguous part of the range). Its output is a **bitmap on the wheel**
+(`BasePrimes`): bit k set when `wheel_number(k)` (§2) is prime -- 33 MB at 1e18,
+where a `std::vector<uint64_t>` of the same primes took 406 MB and every thread
+read it all when activating (§5). A small rank index gives `pi(x)` for any x in a
+few popcounts. The dense tiers (§6) take their few hundred thousand primes out of
+the bitmap as lists; the sparse tier is just a run of the bitmap, walked bit by
+bit. 1e9 takes 0.12 s with 12 threads (dev PC).
 
 ## 2. Wheel factorization (`wheel.hpp`, `wheel210_big.hpp`)
 
@@ -98,20 +104,28 @@ same array -- this is the classic segmented-sieve idea, and it's the reason base
 primes only need O(1) state each between segments (§6) instead of O(range).
 
 Above that, the whole range is split into many more **chunks** than there are
-threads (`CHUNKS_PER_THREAD = 150`, `main.cpp`), pulled from a shared queue
-rather than assigned one fixed chunk per thread. This matters because chunks are
-not equal work: a chunk near the start of the range has far fewer *active* base
-primes per segment (most base primes haven't reached their first multiple yet)
-than a chunk near the end. Static one-chunk-per-thread assignment would leave
-early-finishing threads idle while the last one grinds through the most
-expensive part of the range; dynamic, fine-grained chunk stealing keeps every
-thread busy until the work genuinely runs out. 150 (not the more obvious-looking
-16) came out of an idle-time investigation on real target hardware -- see
-[RESEARCH.md](RESEARCH.md#run_parallel_chunks-chunk-granularity-idle-time-investigation-2026-09-25-external-review-opus-55).
+threads (`CHUNKS_PER_THREAD = 150`, `main.cpp`; 32 per thread on a `--start`
+tail), each a whole number of segments. Chunks are not equal work: a chunk near
+the start of the range has far fewer *active* base primes per segment (most base
+primes haven't reached their first multiple yet) than a chunk near the end, and
+on a hybrid CPU the cores aren't equal either. So each thread starts on its own
+**contiguous run** of chunks and walks it in order, carrying its `SegmentSieve`
+from one chunk into the next: the pending hit of every active prime is already
+known, so no base prime is activated again (§5). A thread whose run is empty
+**steals** the back of another run, in whole chunks, and pays one activation for
+the stolen piece. The steal is priced with what the run itself has measured --
+each thread's sieving rate and the time one activation takes -- so the thief
+takes the piece that has it and the victim finish together, and nothing when a
+piece wouldn't pay its activation; `--debug-idle` prints those measurements and
+how far apart the threads finished. 150 chunks per thread came out of an
+idle-time investigation on real target hardware (with the earlier shared-queue
+design) -- see
+[RESEARCH.md](RESEARCH.md#run_parallel_chunks-chunk-granularity-idle-time-investigation-2026-09-25-external-review-opus-55)
+and
+[RESEARCH.md](RESEARCH.md#run_parallel_chunks-contiguous-runs-the-sieve-carried-across-chunks-steals-kept-2026-10-01).
 At small N the chunk count is capped so every chunk still spans at least 4
-segments (`MIN_SEGS_PER_CHUNK`): each chunk re-creates its
-`SegmentSieve` and re-activates every base prime, and that setup would otherwise
-dominate. See `run_parallel_chunks` and `split_ranges` in `main.cpp`.
+segments (`MIN_SEGS_PER_CHUNK`). See `run_parallel_chunks`, `sieve_chunk` and
+`split_ranges` in `main.cpp`.
 
 Text output needs two passes over this same structure (count bytes, then write) so
 that `pwrite()` can have every thread's exact, disjoint file offset known before any
@@ -125,13 +139,17 @@ runs (no `-o`) are one pass and just `popcount` each finished word.
 
 A base prime only starts contributing hits once its square falls inside the range
 being processed -- below that, it can't have a multiple there that isn't already
-covered by a smaller prime. `SegmentSieve::sieve_and_emit` tracks, per tier, how far
-into each sorted prime list it has already "activated," so across a whole chunk's
-worth of segments, every prime is examined for activation exactly once, not once per
-segment. Activation finds the first multiplier `m` with `p*m >= max(p², segment
-start)` that is coprime to 30 (small, med64) or to 210 (medium, sparse), and packs
-the prime's state into 8 bytes (`erat::DenseState`: `p/30`, residue class and
-multiplier phase in one word, the pending hit's position in the other).
+covered by a smaller prime. `SegmentSieve::activate` tracks, per tier, how far into
+each sorted prime list (or, for the sparse tier, the base-prime bitmap) it has
+already "activated," so across a thread's whole run of chunks (§4), every prime is
+examined for activation exactly once, not once per segment. Activation finds the
+first multiplier `m` with `p*m >= max(p², segment start)` that is coprime to 30
+(small, med64), 210 (medium) or 2310 (sparse), and packs the prime's state into 8
+bytes (`erat::DenseState`: `p/30`, residue class and multiplier phase in one word,
+the pending hit's position in the other). Starting a run (or a stolen piece) at
+the top of 1e18 activates all 50M base primes at once, ~1 s per thread, most of
+it the kernel faulting in the bucket pool the entries go to (§6, sparse); that
+fixed cost is what the contiguous runs in §4 avoid paying per chunk.
 
 ## 6. Four-tier marking within a segment (`segment_sieve.hpp`, `erat_small.hpp`)
 
@@ -260,7 +278,12 @@ for when detection can't be trusted) rather than a fixed guess:
   1e12, where there's no sparse tier, which is why it's conditional). Even
   then, chunks entirely below narrow² (narrow = the width before doubling)
   can't have a sparse prime active yet, so they keep the narrow segment and
-  the tier split that goes with it (-1.8% at 1e13).
+  the tier split that goes with it (-1.8% at 1e13). The automatic width has a
+  **ceiling**: half the L2 per thread, but never under 16 x L1d (primesieve's
+  own cap) nor over 32 x L1d. On a CPU with a large L2 per thread (2 MiB on a
+  2-vCPU Xeon) the doubling otherwise fills the whole L2, 4-9% slower on the
+  top-of-range tails; the dev PC and the i5-13500 (256 KiB per thread under
+  HT) are below the ceiling and unchanged. The startup log says when it applies.
 - **Small-tier sub-block**: half the detected L1d -- that tier's whole point (§6)
   is keeping its marks inside L1, and the other half leaves room for the tier's
   own per-prime state and the presieve reads alongside the sub-block.
@@ -294,8 +317,8 @@ Since SQLite only allows one writer at a time, all the CPU-heavy work (sieving,
 delta-encoding, compressing) stays fully parallel across threads, and only the
 already-compressed block hand-off to a single dedicated writer thread is serialized.
 That writer thread inserts each block with a position that's initially only correct
-*relative to its own chunk* (chunks finish out of order, since they're pulled from
-the shared queue in §4) -- once every chunk's real prime count is known (a free
+*relative to its own chunk* (chunks finish out of order: every thread works on its
+own run of them at once, §4) -- once every chunk's real prime count is known (a free
 byproduct of the same sieve pass, no second pass needed), a handful of cheap
 `UPDATE`s correct every block's position to its true, file-wide value. Block
 metadata (position, count) and the compressed payload are two separate tables for
