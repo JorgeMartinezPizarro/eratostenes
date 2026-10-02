@@ -59,7 +59,6 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
-#include <span>
 #include <stdexcept>
 #include <fcntl.h>
 #include <unistd.h>
@@ -156,11 +155,11 @@ struct ChunkRange {
 
 // Segment width plus the base primes split into tiers for it (see main()).
 // A run has one, or two when its early chunks use a narrower segment. The
-// sparse tier is a view of base_primes' tail, not a copy (see classify).
+// sparse tier is a run of the base-prime bitmap, not a copy (see classify).
 struct TierSet {
     uint64_t width;
     std::vector<uint64_t> small, med64, medium;
-    std::span<const uint64_t> sparse;
+    SparsePrimes sparse;
 };
 
 // Splits the wheel indices into 'threads' chunks as evenly as possible, each
@@ -559,8 +558,8 @@ int main(int argc, char** argv) {
     uint64_t base_limit = isqrt(opt.limit);
     std::fprintf(stderr, "Computing base primes up to %llu...\n",
                  static_cast<unsigned long long>(base_limit));
-    std::vector<uint64_t> base_primes = sieve_base_primes(base_limit, opt.threads);
-    std::fprintf(stderr, "  %zu base primes found.\n", base_primes.size());
+    const BasePrimes base = sieve_base_primes(base_limit, opt.threads);
+    std::fprintf(stderr, "  %llu base primes found.\n", static_cast<unsigned long long>(base.count));
 
     // --segment-width is a numeric width (so the option keeps meaning the
     // same thing to the user); it's converted to a width in wheel indices
@@ -773,33 +772,30 @@ int main(int argc, char** argv) {
         presieve_primes_flat.insert(presieve_primes_flat.end(), group.begin(), group.end());
     const uint64_t presieve_max = *std::max_element(presieve_primes_flat.begin(), presieve_primes_flat.end());
 
-    // base_primes is sorted and every prime from FIRST_WHEEL_PRIME up to
-    // presieve_max is pre-sieved (checked below), so the sparse tier is
-    // exactly the tail from max(sp_limit, presieve_max + 1): a view, not a
-    // copy -- 50M primes (406 MB) at 1e18 -- and only the head is walked.
+    // Every prime from FIRST_WHEEL_PRIME up to presieve_max is pre-sieved
+    // (checked below), so the sparse tier is exactly the bitmap's primes from
+    // max(sp_limit, presieve_max + 1) up -- a run of it, not a copy (50M
+    // primes at 1e18) -- and only the dense tiers' primes are listed.
     auto classify = [&](TierSet& t, uint64_t m64_limit, uint64_t sp_limit) {
-        auto sparse_begin = std::lower_bound(base_primes.begin(), base_primes.end(),
-                                             std::max(sp_limit, presieve_max + 1));
-        t.sparse = std::span<const uint64_t>(sparse_begin, base_primes.end());
-        for (auto it = base_primes.begin(); it != sparse_begin; ++it) {
-            const uint64_t p = *it;
-            if (p < FIRST_WHEEL_PRIME) continue;
+        const uint64_t sparse_from = std::max(sp_limit, presieve_max + 1);
+        t.sparse = base.from(sparse_from);
+        base.for_each(0, sparse_from, [&](uint64_t p) {
             if (p <= presieve_max &&
                 std::find(presieve_primes_flat.begin(), presieve_primes_flat.end(), p) != presieve_primes_flat.end())
-                continue;
+                return;
             if (p >= sp_limit)
                 throw std::logic_error("classify: a prime below the largest pre-sieve prime isn't pre-sieved");
             if (p < small_limit) t.small.push_back(p);
             else if (p < m64_limit) t.med64.push_back(p);
             else t.medium.push_back(p);
-        }
+        });
     };
     TierSet wide{seg_k_width, {}, {}, {}, {}};
     classify(wide, med64_limit, sparse_limit);
     const std::vector<uint64_t>& small_primes = wide.small;
     const std::vector<uint64_t>& med64_primes = wide.med64;
     const std::vector<uint64_t>& medium_primes = wide.medium;
-    const std::span<const uint64_t> sparse_primes = wide.sparse;
+    const SparsePrimes& sparse_primes = wide.sparse;
 
     // Narrow segment for the chunks below narrow^2. The doubled segment
     // (see sparse_regime above) only pays off where sparse primes are
@@ -885,7 +881,7 @@ int main(int argc, char** argv) {
     // about as much as sieving 2.6 wheel indices each (dev PC, 1e18, 12
     // threads activating at once). At least 4 indices per base prime.
     constexpr uint64_t STEAL_K_PER_BASE_PRIME = 4;
-    STEAL_MIN_K = STEAL_K_PER_BASE_PRIME * base_primes.size();
+    STEAL_MIN_K = STEAL_K_PER_BASE_PRIME * base.count;
 
     // How many base primes a fresh start at each chunk activates (p*p below
     // its first segment's end), for run_parallel_chunks to price a steal.
@@ -893,8 +889,7 @@ int main(int argc, char** argv) {
     for (unsigned i = 0; i < num_chunks; ++i) {
         const ChunkRange& r = ranges[i];
         const uint64_t root = isqrt(wheel_number(std::min(r.low + tiers_for(r).width, r.high)));
-        fresh_primes[i] = static_cast<uint64_t>(std::upper_bound(base_primes.begin(), base_primes.end(), root) -
-                                                base_primes.begin());
+        fresh_primes[i] = base.count_upto(root);
     }
 
     // Whole-L1d sub-block (see the topology block above) when the threads
@@ -929,7 +924,7 @@ int main(int argc, char** argv) {
                  static_cast<unsigned long long>(WHEEL_MOD),
                  WHEEL_PRIMES.size(),
                  small_primes.size(), static_cast<unsigned long long>(SUB_BLOCK_BYTES / 1024),
-                 med64_primes.size(), medium_primes.size(), sparse_primes.size());
+                 med64_primes.size(), medium_primes.size(), static_cast<size_t>(sparse_primes.size()));
     if (sub_block_whole_l1d)
         std::fprintf(stderr, "  sub-block: whole L1d (%u threads <= %u cores with the largest L1d)\n",
                      actual_threads, l1_big_cores);

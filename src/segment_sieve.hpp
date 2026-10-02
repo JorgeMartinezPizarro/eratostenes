@@ -16,13 +16,13 @@
 #include <cstdint>
 #include <vector>
 #include <memory>
-#include <span>
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
 #include <stdexcept>
 #include <utility>
 
+#include "base_sieve.hpp"
 #include "erat_small.hpp"
 #include "presieve.hpp"
 #include "wheel.hpp"
@@ -108,7 +108,7 @@ public:
         next_small_idx_ = 0;
         next_med64_idx_ = 0;
         next_medium_idx_ = 0;
-        next_sparse_idx_ = 0;
+        next_sparse_k_ = 0; // activate() starts from the run's own first index
         for (auto& v : small_) v.clear();
         for (auto& v : m64_cur_) v.clear();
         for (auto& v : m64_nxt_) v.clear();
@@ -134,8 +134,8 @@ public:
                     const std::vector<uint64_t>& small_primes,
                     const std::vector<uint64_t>& med64_primes,
                     const std::vector<uint64_t>& medium_primes,
-                    std::span<const uint64_t> sparse_primes) {
-        const size_t before = next_small_idx_ + next_med64_idx_ + next_medium_idx_ + next_sparse_idx_;
+                    const SparsePrimes& sparse_primes) {
+        const size_t before = next_small_idx_ + next_med64_idx_ + next_medium_idx_;
         uint64_t high_n = wheel_number(k_high); // exclusive numeric bound, valid for the p*p cutoff
         uint64_t low_n = wheel_number(k_low);
 
@@ -161,58 +161,34 @@ public:
         activate_medium(medium_primes, next_medium_idx_, medium_dyn_, medium_qd_, medium_qp_base_, medium_qp_last_,
                         high_n, low_n, k_low);
 
-        // EratBig-style activation (see header comment): find the smallest
-        // multiplier m coprime to 210 (not just 30) with p*m >= max(p*p,
-        // low_n), then pack qp/residue-class/mod-210 phase into one word
-        // exactly like the dense tiers' DenseState, and file it directly
-        // into the bucket ring by byte position (shift/mask, no division).
-        while (next_sparse_idx_ < sparse_primes.size()) {
-            uint64_t p = sparse_primes[next_sparse_idx_];
-            if (p * p >= high_n) break;
-            uint64_t start_val = std::max(p * p, low_n);
-            uint64_t m = (start_val + p - 1) / p;
-            if (big2310_) {
-                // Packed as one word: idx (ri * 480 + w) in bits 0-11, pos
-                // in 12-35, qp in 36-63 -- see process_big<true>.
-                uint64_t t = m / 2310, sres = m % 2310;
-                uint64_t w = big::NEXT_W2310[sres];
-                if (w == big::W2310) { ++t; w = 0; }
-                m = t * 2310 + big::M2310[w];
-                uint64_t pos = p * m / WHEEL_MOD - k_low / 8;
-                uint64_t ri = static_cast<uint64_t>(WHEEL_POS[p % WHEEL_MOD]);
-                uint64_t ahead = pos >> log2_sb_;
-                if (ahead >= num_buckets_) {
-                    throw std::runtime_error(
-                        "bucket sieve: a sparse prime's step exceeds the bucket ring's margin "
-                        "(sizing bug in SegmentSieve's constructor)");
+        // Sparse tier: its primes are a run of the base-prime bitmap
+        // (base_sieve.hpp's SparsePrimes), walked in increasing order from
+        // next_sparse_k_ until p*p reaches this segment's end; file_sparse
+        // files each one into the bucket ring.
+        size_t sparse_activated = 0;
+        if (next_sparse_k_ < sparse_primes.k_begin) next_sparse_k_ = sparse_primes.k_begin;
+        while (next_sparse_k_ < sparse_primes.k_end) {
+            const uint64_t wi = next_sparse_k_ >> 6;
+            const uint64_t word_end = std::min((wi + 1) << 6, sparse_primes.k_end);
+            uint64_t bits = sparse_primes.words[wi] & (~uint64_t{0} << (next_sparse_k_ & 63));
+            bool reached = false; // p*p >= high_n: the rest activate in a later segment
+            while (bits) {
+                const uint64_t k = (wi << 6) + static_cast<uint64_t>(__builtin_ctzll(bits));
+                if (k >= word_end) break;
+                const uint64_t p = wheel_number(k);
+                if (p * p >= high_n) {
+                    next_sparse_k_ = k;
+                    reached = true;
+                    break;
                 }
-                uint64_t ent = (ri * big::W2310 + w) | ((pos & ((uint64_t{1} << log2_sb_) - 1)) << 12) |
-                               ((p / WHEEL_MOD) << 36);
-                erat::DenseState e;
-                std::memcpy(&e, &ent, sizeof(e));
-                push_sparse_entry(static_cast<uint32_t>((cur_segment_ + ahead) & (num_buckets_ - 1)), e);
-                ++next_sparse_idx_;
-                continue;
+                file_sparse(p, low_n, k_low);
+                ++sparse_activated;
+                bits &= bits - 1;
             }
-            uint64_t t = m / 210, sres = m % 210;
-            uint64_t w = big::NEXT_W[sres];
-            if (w == 48) { ++t; w = 0; }
-            m = t * 210 + big::M210[w];
-            uint64_t n = p * m;
-            uint64_t pos = n / WHEEL_MOD - k_low / 8;
-            uint64_t ri = static_cast<uint64_t>(WHEEL_POS[p % WHEEL_MOD]);
-            erat::DenseState e{static_cast<uint32_t>(((p / WHEEL_MOD) << 9) | (ri * 48 + w)), 0};
-            uint64_t ahead = pos >> log2_sb_;
-            e.pos = static_cast<uint32_t>(pos & ((uint64_t{1} << log2_sb_) - 1));
-            if (ahead >= num_buckets_) {
-                throw std::runtime_error(
-                    "bucket sieve: a sparse prime's step exceeds the bucket ring's margin "
-                    "(sizing bug in SegmentSieve's constructor)");
-            }
-            push_sparse_entry(static_cast<uint32_t>((cur_segment_ + ahead) & (num_buckets_ - 1)), e);
-            ++next_sparse_idx_;
+            if (reached) break;
+            next_sparse_k_ = word_end;
         }
-        return next_small_idx_ + next_med64_idx_ + next_medium_idx_ + next_sparse_idx_ - before;
+        return next_small_idx_ + next_med64_idx_ + next_medium_idx_ - before + sparse_activated;
     }
 
     template <typename Writer>
@@ -220,7 +196,7 @@ public:
                          const std::vector<uint64_t>& small_primes,
                          const std::vector<uint64_t>& med64_primes,
                          const std::vector<uint64_t>& medium_primes,
-                         std::span<const uint64_t> sparse_primes,
+                         const SparsePrimes& sparse_primes,
                          Writer& out, uint64_t& prime_count) {
         uint64_t count = (k_high > k_low) ? (k_high - k_low) : 0;
         if (count == 0) return;
@@ -648,6 +624,54 @@ private:
         }
     }
 
+    // Files sparse prime p (EratBig-style activation, see the header comment):
+    // the smallest multiplier m coprime to 210 (2310 with big2310_) with
+    // p*m >= max(p*p, low_n), packed with qp/residue class/phase into one
+    // word exactly like the dense tiers' DenseState, into the bucket ring by
+    // byte position (shift/mask, no division).
+    void file_sparse(uint64_t p, uint64_t low_n, uint64_t k_low) {
+        uint64_t start_val = std::max(p * p, low_n);
+        uint64_t m = (start_val + p - 1) / p;
+        if (big2310_) {
+            // Packed as one word: idx (ri * 480 + w) in bits 0-11, pos
+            // in 12-35, qp in 36-63 -- see process_big<true>.
+            uint64_t t = m / 2310, sres = m % 2310;
+            uint64_t w = big::NEXT_W2310[sres];
+            if (w == big::W2310) { ++t; w = 0; }
+            m = t * 2310 + big::M2310[w];
+            uint64_t pos = p * m / WHEEL_MOD - k_low / 8;
+            uint64_t ri = static_cast<uint64_t>(WHEEL_POS[p % WHEEL_MOD]);
+            uint64_t ahead = pos >> log2_sb_;
+            if (ahead >= num_buckets_) {
+                throw std::runtime_error(
+                    "bucket sieve: a sparse prime's step exceeds the bucket ring's margin "
+                    "(sizing bug in SegmentSieve's constructor)");
+            }
+            uint64_t ent = (ri * big::W2310 + w) | ((pos & ((uint64_t{1} << log2_sb_) - 1)) << 12) |
+                           ((p / WHEEL_MOD) << 36);
+            erat::DenseState e;
+            std::memcpy(&e, &ent, sizeof(e));
+            push_sparse_entry(static_cast<uint32_t>((cur_segment_ + ahead) & (num_buckets_ - 1)), e);
+            return;
+        }
+        uint64_t t = m / 210, sres = m % 210;
+        uint64_t w = big::NEXT_W[sres];
+        if (w == 48) { ++t; w = 0; }
+        m = t * 210 + big::M210[w];
+        uint64_t n = p * m;
+        uint64_t pos = n / WHEEL_MOD - k_low / 8;
+        uint64_t ri = static_cast<uint64_t>(WHEEL_POS[p % WHEEL_MOD]);
+        erat::DenseState e{static_cast<uint32_t>(((p / WHEEL_MOD) << 9) | (ri * 48 + w)), 0};
+        uint64_t ahead = pos >> log2_sb_;
+        e.pos = static_cast<uint32_t>(pos & ((uint64_t{1} << log2_sb_) - 1));
+        if (ahead >= num_buckets_) {
+            throw std::runtime_error(
+                "bucket sieve: a sparse prime's step exceeds the bucket ring's margin "
+                "(sizing bug in SegmentSieve's constructor)");
+        }
+        push_sparse_entry(static_cast<uint32_t>((cur_segment_ + ahead) & (num_buckets_ - 1)), e);
+    }
+
     // Blocks are BLK_BYTES-aligned: a tail pointer that lands exactly on a
     // BLK_BYTES boundary means "block full" (primesieve's Bucket trick) --
     // no count field to load on every push. Appends `entry` to ring slot
@@ -741,5 +765,5 @@ private:
     size_t next_small_idx_ = 0;
     size_t next_med64_idx_ = 0;
     size_t next_medium_idx_ = 0;
-    size_t next_sparse_idx_ = 0;
+    uint64_t next_sparse_k_ = 0; // wheel index of the next sparse prime to activate
 };
