@@ -2576,7 +2576,7 @@ The i5-13500 at 20 threads is still unmeasured (its 1e14 full run of
   tables, and dropping coverage was measured worse than the fill it saves
   (each prime removed costs ~8x its share of the fill in small-tier hits).
 
-### Sparse tier: two entries per iteration in `process_big` (kept, 2026-10-02)
+### Sparse tier: two entries per iteration in `process_big`, and a segment-byte prefetch 16 entries ahead (both kept, 2026-10-02)
 
 The per-tier map put the uncontended gap in the sparse tier's IPC (2.36 vs
 EratBig's 2.84 for the same instructions per hit). EratBig processes a
@@ -2597,9 +2597,32 @@ Dev PC, cycles:u, ABAB x3 per cell, counts identical:
 | 1e18 tail, `-t 12` | 738-784G | 746-774G | tie |
 
 Small, but every uncontended run with pairs beat every one without, and
-nothing got worse. The remaining IPC gap in this tier is still open; the
-next thing to try in the same direction is a 2-stage pipeline (prefetching
-the next pair's tail lines once their slots are known).
+nothing got worse. Generalized afterwards to `ERA_BIG_UNROLL` entries per
+iteration (constexpr loops, same instructions as the handwritten pair:
+266.60G vs 266.62G); 4 is worse than 2 at `-t 2` (150.7G vs 146.6G median,
+register pressure) and a tie at `-t 12`, so 2 stays.
+
+Two follow-ups on the same loop the same day:
+
+- Sparse tier before med64/medium in the segment (its RMWs on a segment the
+  med64 state stream hasn't evicted yet): L2 misses -7% at `-t 2`, cycles
+  -1.4% / +1% (`-t 2` / `-t 12`) -- overlapped misses again. Not kept.
+- Prefetch of the segment byte of the entries `ERA_BIG_PF` positions ahead
+  in the bucket (`pos` is the entry's own bits, no table lookup needed, and
+  that `s[pos] |= mask` is the load that misses), `-DERA_BIG_PF=0/8/16/32`,
+  cycles:u, 4 runs each at 1e15, 2 at 1e18:
+
+  | | 0 | 8 | 16 | 32 |
+  |---|---:|---:|---:|---:|
+  | 1e15 tail, `-t 12` | 326.7-338.1G | 321-337G (-2.3%) | **317-323G (-2.3..-3.3%)** | 322-335G |
+  | 1e18 tail, `-t 12` | 756-773G | | **722-725G (-5%)** | 695-734G |
+  | 1e15 tail, `-t 2` (1/2) | 141.7-142.9G | 140.9-144.4G | 142.8-144.6G | |
+  | 1e18 tail, `-t 2` (1/2) | 236-248G | | 230-236G | 233-236G |
+
+  Every `-t 12` run at 16 beat every run at 0. The complement of the pairs:
+  with one thread per core the segment sits in L2 and there is nothing to
+  prefetch (a tie); with two threads sharing an L2 the sparse RMWs miss and
+  the prefetch covers them. 16 kept as the default.
 
 ### `.db` output: the `.blk` sidecar, blocks written by the sieve threads (kept, format 3, 2026-10-02)
 

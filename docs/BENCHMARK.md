@@ -13,7 +13,7 @@ Intel Core i5-13500, [primesieve](https://github.com/kimwalisch/primesieve) alon
 | 1e12 | 20.93s | 23.724s | 0.92x |
 | 1e13 | 285.32s | 292.763s | 0.97x |
 | 1e14 | 3392.08s | 3349.907s | 1.01x |
-| 1e15 | 40976.93s | - | - |
+| 1e15 | 40664.78s | - | - |
 
 The last 1e11 numbers below N (`make benchmark-tails`):
 
