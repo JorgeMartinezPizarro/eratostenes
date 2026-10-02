@@ -2390,6 +2390,40 @@ activating 50.5M sparse primes (29 ns each, ~130 cycles).
   -> 3.30 s (-12%), i.e. ~0.45 s less; on the last 1e11 that is 2-3%, within
   that night's noise (1e15..1e18 ABBA x2: tie).
 
+### `-t 2` gap with the VMs' cutoff (sparse 1/2): L2 misses in med64, slicing med64 per segment (tried, reverted, 2026-10-02)
+
+The `-t 2` profile above was taken with the 1/1 cutoff; the sandbox VMs run 1/2
+(their L2 per thread passes the 512 KiB gate). Same tail (last 1e11 below 1e15),
+dev PC, `-t 2 --tune sparse=1/2`, perf stat (quiet machine):
+
+| | eratostenes | primesieve |
+|---|---:|---:|
+| cycles:u | 147.1G | 129.6G (1.135x; 1.21x with 1/1) |
+| instructions:u | 270.7G | 275.2G |
+| branch-misses:u | 0.91G | 0.99G |
+| l2_rqsts.miss:u | 6.57G | 2.39G |
+| cycle_activity.stalls_l2_miss:u | 13.25G | 6.60G |
+
+Fewer instructions and fewer mispredicts than primesieve; 2.75x its L2 misses.
+By symbol (perf record on l2_rqsts.miss): process_big 42% (2.8G, EratBig 2.0G),
+**med64 ~56% (3.7G, no counterpart: EratSmall isn't in primesieve's top 8)**,
+medium 12% (0.8G vs 0.24G). med64 makes ~1.76M marks per 512 KiB segment, so
+one mark in three misses L2: the segment is the size of the L2 (one thread per
+core) and gets evicted while med64 scatters over it; primesieve sieves 256 KiB.
+Shrinking the state instead doesn't help: `--tune med64=1/24` +2.7%, `small=1/2`
+tie, `med64=0` worse (4 runs each, ABBA); a 256 KiB segment (`--l2-bytes 256k`)
++4.7% (medium and sparse pay twice the per-segment costs).
+
+Tried: med64 alone in N slices of the segment (`--tune med64_parts=N`, each
+slice re-filing the 384 lists by exit phase, the last one rebasing), medium and
+sparse still seeing the whole segment. Counts OK. L2 misses: 7.9-8.1G -> 5.6G
+(N=2), 5.0G (N=4). Cycles: `-t 2` 158.0G -> 159.9G (N=2), 162.7G (N=4);
+`-t 12` 355-362G -> 381-390G (+8%), 434-441G (+22%). The misses go away and the
+time doesn't: they are overlapped (same lesson as the L1/prefetch entries), and
+each slice adds a re-filing pass over 29k entries that is paid for real.
+Reverted. TopdownL1 under WSL's vPMU counts ~6M slots for a 150G-cycle run:
+unusable here; the server (native) is where that question can be answered.
+
 ### i5-13500 server gap vs primesieve: medium-tier call count, sparse cutoff 1/2 gated on per-thread L2 (2026-09-28)
 
 Context: dev PC (i5-11400F, symmetric) is now below primesieve at every N in

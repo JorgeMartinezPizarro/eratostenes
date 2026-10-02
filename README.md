@@ -119,34 +119,12 @@ What this project is built from, one term each — follow the link for the conce
 | 1e14 | 3392.08s | 3349.907s | 1.01x |
 | 1e15 | 40976.93s | - | - |
 
-The last 1e11 numbers below N (`make benchmark-tails`):
-
-| N | eratostenes | primesieve | ratio |
-|---|---:|---:|---:|
-| 1e13 | 2.58s | 2.818s | 0.92x |
-| 1e14 | 3.66s | 3.856s | 0.95x |
-| 1e15 | 4.62s | 4.522s | 1.02x |
-| 1e16 | 5.52s | 5.139s | 1.07x |
-| 1e17 | 6.85s | 6.164s | 1.11x |
-| 1e18 | 8.39s | 7.905s | 1.06x |
-
-The same two tables (`make benchmark`, `make benchmark-tails`) on other machines: [docs/BENCHMARK.md](docs/BENCHMARK.md).
+For more machines and results, see: [docs/BENCHMARK.md](docs/BENCHMARK.md).
 
 ## Validation
 
 `make test` checks pi(N) and primes by position against [primecount](https://github.com/kimwalisch/primecount) across several N and parameter combinations (threads, segment width, cache-size overrides, `.db` block size, zstd level), and checks `.db` output against plain text output position by position.
 
-## WSL issues
+## Issues
 
-WSL2's virtual disk doesn't shrink back automatically after deleting large files inside it. From PowerShell:
-
-```powershell
-Get-ChildItem "$env:LOCALAPPDATA\Packages" -Filter *.vhdx -Recurse | Select-Object FullName, Length
-wsl --shutdown
-```
-Then open ```diskpart``` and add 
-
-```powershell
-select vdisk file="C:\ruta\completa\a\ext4.vhdx"
-compact vdisk
-```
+See [docs/ISSUES.md](docs/ISSUES.md) for known issues.

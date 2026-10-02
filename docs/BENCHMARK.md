@@ -2,7 +2,31 @@
 
 `eratostenes` against [primesieve](https://github.com/kimwalisch/primesieve) on machines other than the i5-13500 server (its tables are in the [README](../README.md#benchmark)). One section per machine: a description, then the count table (`make benchmark`, pi(N)) and the tails table (`make benchmark-tails`, the last 1e11 numbers below each N), with the same thread count for the two programs. Ratio = eratostenes / primesieve: below 1 means eratostenes is faster.
 
-## Intel Core i5-11400F (dev PC)
+## Intel Core i5-13500 
+
+Intel Core i5-13500, [primesieve](https://github.com/kimwalisch/primesieve) alongside it for reference:
+
+| N | eratostenes | primesieve | ratio |
+|---|---:|---:|---:|
+| 1e10 | 0.15s | 0.137s | 1.09x |
+| 1e11 | 1.50s | 1.656s | 0.91x |
+| 1e12 | 22.83s | 24.682s | 0.92x |
+| 1e13 | 285.32s | 292.763s | 0.97x |
+| 1e14 | 3392.08s | 3349.907s | 1.01x |
+| 1e15 | 40976.93s | - | - |
+
+The last 1e11 numbers below N (`make benchmark-tails`):
+
+| N | eratostenes | primesieve | ratio |
+|---|---:|---:|---:|
+| 1e13 | 2.57s | 2.827s | 0.91x |
+| 1e14 | 3.81s | 3.872s | 0.98x |
+| 1e15 | 4.58s | 4.529s | 1.01x |
+| 1e16 | 5.52s | 5.234s | 1.05x |
+| 1e17 | 6.49s | 6.272s | 1.03x |
+| 1e18 | 8.38s | 7.969s | 1.05x |
+
+## Intel Core i5-11400F
 
 6 cores / 12 threads, 48 KiB L1d and 512 KiB L2 per core, 12 MiB L3; WSL2 (Debian), primesieve 12.7, 12 threads. Tails: eratostenes a141dd1, 2026-10-02, best of 2.
 
