@@ -70,7 +70,7 @@ outside the container.
 
 ## Database
 
-The `.db` format is a indexed sqlite file (max 256TB size), so it is suitable up to `e16`, around `160TB`. To query for primes you can use the `nth_prime` companion:
+`-o out.db` writes two files that travel together: `out.db`, a small SQLite index (one row per block of 65536 primes: position, count, first prime, and where the block sits in the sidecar), and `out.blk`, the gap-encoded, zstd-compressed blocks themselves, written in parallel by every sieve thread. The index stays in the MBs; the `.blk` is ~0.55 bytes per prime (~17 TB at 1e15; on ext4 a single file tops out at 16 TiB, XFS has no such limit). To query for primes you can use the `nth_prime` companion:
 
 ```sh
 ./nth_prime out.db 1000000     # the 1,000,000th prime
@@ -80,7 +80,7 @@ The `.db` format is a indexed sqlite file (max 256TB size), so it is suitable up
 make nth-prime ARGS="/output/out.db 1000000"
 ```
 
-`nth_prime` looks up the one block containing the requested position (indexed by `start_index`, not a table scan) and decodes just that block — lookups stay fast regardless of file size.
+`nth_prime` looks up the one block containing the requested position in the index (by `start_index`, not a table scan), reads just those bytes from the `.blk` with one `pread` and decodes that block — lookups stay at a few milliseconds regardless of file size. It checks that the `.blk` next to the `.db` is the one it was written with (name and size).
 
 Below the results for `./eratostenes limit -o base.db`:
 

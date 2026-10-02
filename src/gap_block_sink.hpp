@@ -1,8 +1,10 @@
 #pragma once
-// Sink for .db (SQLite) output mode: buffers primes into fixed-size
-// blocks, gap-encodes each block (gap_encoding.hpp), zstd-compresses it,
-// and hands the finished block off via a callback (SqlitePrimeStore::push,
-// see sqlite_prime_store.hpp) for a dedicated writer thread to insert.
+// Sink for .db output mode: buffers primes into fixed-size blocks,
+// gap-encodes each block (gap_encoding.hpp), zstd-compresses it, writes the
+// bytes into the shared .blk file itself (block_file.hpp, parallel across
+// threads) and hands the block's index row -- position, count, first prime,
+// offset and length -- off via a callback (SqlitePrimeStore::push, see
+// sqlite_prime_store.hpp) for a dedicated writer thread to insert.
 //
 // Same write_uint64(uint64_t) contract as NullSink/ByteCounter/DirectWriter
 // in sinks.hpp, so sieve_chunk<Writer> (main.cpp) works unchanged. One
@@ -32,6 +34,7 @@
 #include <vector>
 #include <zstd.h>
 
+#include "block_file.hpp"
 #include "gap_encoding.hpp"
 
 struct PendingBlock {
@@ -39,7 +42,8 @@ struct PendingBlock {
     uint64_t start_index; // chunk-relative until SqlitePrimeStore::finish() fixes it up
     uint64_t count;
     uint64_t start_prime;
-    std::vector<uint8_t> compressed;
+    uint64_t offset; // of the compressed block in the .blk file
+    uint64_t len;
 };
 
 class GapBlockSink {
@@ -47,8 +51,8 @@ public:
     static constexpr bool WANTS_VALUES = true;
     using PushFn = std::function<void(PendingBlock)>;
 
-    GapBlockSink(uint64_t chunk_id, uint64_t block_size, int zstd_level, PushFn push)
-        : chunk_id_(chunk_id), block_size_(block_size), zstd_level_(zstd_level),
+    GapBlockSink(uint64_t chunk_id, uint64_t block_size, int zstd_level, BlockFile& blocks, PushFn push)
+        : chunk_id_(chunk_id), block_size_(block_size), zstd_level_(zstd_level), blocks_(blocks),
           push_(std::move(push)) {
         raw_.reserve(block_size_ * 2); // ~1 byte per gap, rare 5-byte escapes; generous headroom
         cbuf_.resize(ZSTD_compressBound(block_size_ * 5 + 16)); // worst case: every gap escapes (5 bytes)
@@ -111,7 +115,8 @@ private:
         blk.start_index = start_index_;
         blk.count = count_in_block_;
         blk.start_prime = block_start_prime_;
-        blk.compressed.assign(cbuf_.data(), cbuf_.data() + csize);
+        blk.len = csize;
+        blk.offset = blocks_.append(cbuf_.data(), csize);
         push_(std::move(blk));
 
         start_index_ += count_in_block_;
@@ -123,6 +128,7 @@ private:
     uint64_t start_index_ = 0;
     uint64_t block_size_;
     int zstd_level_;
+    BlockFile& blocks_;
     PushFn push_;
 
     std::vector<uint8_t> raw_;

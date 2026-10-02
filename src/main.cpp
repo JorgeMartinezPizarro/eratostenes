@@ -93,7 +93,7 @@ static void write_tiny_db(const std::string& path, const std::vector<uint64_t>& 
                            uint64_t limit, uint64_t block_size, int zstd_level) {
     SqlitePrimeStore store(path);
     {
-        GapBlockSink sink(0, block_size, zstd_level,
+        GapBlockSink sink(0, block_size, zstd_level, store.block_file(),
                            [&store](PendingBlock b) { store.push(std::move(b)); });
         for (uint64_t p : primes) sink.write_uint64(p);
         sink.flush();
@@ -313,7 +313,7 @@ static void emit_db_worker(int idx, ChunkRange range, const TierSet& t, uint64_t
                             uint64_t block_size, int zstd_level,
                             uint64_t& out_count,
                             std::atomic<uint64_t>& progress) {
-    GapBlockSink sink(static_cast<uint64_t>(idx), block_size, zstd_level,
+    GapBlockSink sink(static_cast<uint64_t>(idx), block_size, zstd_level, store.block_file(),
                        [&store](PendingBlock b) { store.push(std::move(b)); });
     uint64_t local_count = 0;
 

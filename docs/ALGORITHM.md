@@ -299,32 +299,36 @@ entries on each half-size margin.
 
 ## 8. Output: text vs `.db`
 
-Text output is one prime per line, written directly. `.db` output is a SQLite file
-where primes are grouped into fixed-size blocks, each block **delta-encoded**
+Text output is one prime per line, written directly. `.db` output is two files:
+`out.blk`, the primes grouped into fixed-size blocks, each block **delta-encoded**
 (storing gaps between consecutive primes instead of the primes themselves) and then
-zstd-compressed. The gap is counted in **wheel indices** (§2), not integers: one byte
-= how many mod-30 candidates the next prime is ahead, with a rare 5-byte escape for
-the primes off the wheel (2, 3, 5) and gaps over 255 candidates. Counted that way
-the gaps are close to independent and geometric, which zstd's Huffman stage codes
-within ~1% of their entropy; counted in integers (the previous format) they carry
-the residue-class structure zstd can't see, ~16-18% more bits per prime (see
-`gap_encoding.hpp`). Each block is a row carrying its own starting
-position and prime count, indexed by position (`idx_blocks_start`) so `nth_prime`
-can find and decompress just the one block a query needs, rather than scanning the
-file -- lookups stay fast (milliseconds) regardless of how large the file gets.
+zstd-compressed, one block after another; and `out.db`, a SQLite index with one
+small row per block (its starting position and prime count, its first prime, and
+its offset and length in the `.blk`). The gap is counted in **wheel indices** (§2),
+not integers: one byte = how many mod-30 candidates the next prime is ahead, with a
+rare 5-byte escape for the primes off the wheel (2, 3, 5) and gaps over 255
+candidates. Counted that way the gaps are close to independent and geometric, which
+zstd's Huffman stage codes within ~1% of their entropy; counted in integers (format
+1) they carry the residue-class structure zstd can't see, ~16-18% more bits per
+prime (see `gap_encoding.hpp`). The index is keyed by position
+(`idx_blocks_start`), so `nth_prime` finds the one block a query needs, `pread`s
+just its bytes from the `.blk` and decompresses that block -- a few index pages,
+one contiguous read, one zstd frame, whatever the file's size.
 
-Since SQLite only allows one writer at a time, all the CPU-heavy work (sieving,
-delta-encoding, compressing) stays fully parallel across threads, and only the
-already-compressed block hand-off to a single dedicated writer thread is serialized.
-That writer thread inserts each block with a position that's initially only correct
-*relative to its own chunk* (chunks finish out of order: every thread works on its
-own run of them at once, §4) -- once every chunk's real prime count is known (a free
-byproduct of the same sieve pass, no second pass needed), a handful of cheap
-`UPDATE`s correct every block's position to its true, file-wide value. Block
-metadata (position, count) and the compressed payload are two separate tables for
-this specific reason: SQLite stores a whole row together, so correcting a small
-integer column would otherwise force rewriting the compressed payload too. See
-`sqlite_prime_store.hpp`'s own comment for the measured cost of getting that wrong.
+The blocks never pass through SQLite: each sieve thread writes its finished block
+into the `.blk` itself, at an offset handed out by one atomic counter
+(`block_file.hpp`) -- any number of threads append at once, no lock, no gaps, no
+merge step; blocks land in completion order and the index says where each one is.
+Only the ~40-byte index rows go through a queue to a single writer thread, since
+SQLite allows one writer at a time. Until format 3 the compressed blocks were BLOBs
+in the `.db`, and that single writer -- in the kernel, copying every page twice
+through the WAL -- capped `.db` output at ~260 MB/s on an NVMe RAID0 while most
+cores waited (see RESEARCH.md). The writer inserts each row with a position that's
+initially only correct *relative to its own chunk* (chunks finish out of order:
+every thread works on its own run of them at once, §4) -- once every chunk's real
+prime count is known (a free byproduct of the same sieve pass), a handful of cheap
+`UPDATE`s correct every block's position to its true, file-wide value. The `.db`
+records the `.blk`'s name and size, which `nth_prime` checks before reading.
 
 ## 9. Verification
 

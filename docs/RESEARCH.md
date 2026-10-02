@@ -1936,7 +1936,7 @@ WORSE on the server at both N=1e12 and N=1e13 -- reverted. Root cause not isolat
 don't re-propose a bigger `cache_size` without new evidence for why the default
 would be the bottleneck.
 
-### `blocks`/`block_data` table split (kept)
+### `blocks`/`block_data` table split (kept until format 3, 2026-10-02: the blocks left SQLite, see `.db` output: the `.blk` sidecar)
 
 Metadata (small, mutable -- `start_index` gets corrected after the fact via
 `fix_offsets`) lives apart from the compressed payload (large, immutable, written
@@ -2483,6 +2483,34 @@ since the sieve is carried across chunks. Dev PC (uniform cores), 1e10 `-t 12`:
 `minsegs=1` idle 2.9-5.0% -> 1.8-2.8%, 636 chunks instead of 255, wall
 unchanged (0.16-0.17 s); 1e11 unaffected (the floor doesn't bind: 1590 chunks
 either way). Default left at 4 until the server measures 1 and 2.
+
+### `.db` output: the `.blk` sidecar, blocks written by the sieve threads (kept, format 3, 2026-10-02)
+
+Follows from the entry below: the single SQLite writer was the `.db` limit on
+both machines, in kernel time, not CPU. The compressed blocks now go to a
+`.blk` file next to the `.db` (block_file.hpp): a block's place is one
+`fetch_add` on a shared offset and the thread that compressed it `pwrite`s
+it there -- parallel, lock-free, no gaps, no merge. The `.db` keeps the index
+(one row per block: start_index, count, start_prime, offset, len; format 3),
+plus the sidecar's name and size, which `nth_prime` checks; it reads a block
+with one `pread`. The `blocks`/`block_data` split is gone (no BLOB to keep
+away from the start_index UPDATEs). Dev PC, 1e11, 12 threads:
+
+| destination | before (BLOBs in SQLite) | after (.blk) |
+|---|---:|---:|
+| tmpfs | 6.1-7.2 s | 4.4-4.8 s (-30%) |
+| WSL virtual disk | 18.9-26.3 s | 6.1-10.6 s (-60..-70%) |
+| user CPU | 50-55 s | 47-50 s |
+| size | 2019 MiB | 1990 MiB + 3.3 MiB index |
+
+On tmpfs ~10 of 12 cores are now busy; what remains is the extraction + gap
+encoding (36% of the CPU, ~30 cycles per prime, one prime at a time) and zstd
+(16%). `make test` (positions against primecount, text vs .db round trip)
+passes; a `.blk` truncated by one byte is rejected by name/size. Server
+(NVMe RAID0, 1e12: 77 s before, 43 s CPU floor) not yet measured. A single
+`.blk` for now: ext4 caps a file at 16 TiB (1e15 is ~15.5 TiB), so sharding
+the sidecar (a file number in the index) is the follow-up if that disk is
+ext4.
 
 ### `.db` output: where the time goes (2026-10-02)
 

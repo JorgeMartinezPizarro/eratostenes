@@ -1,10 +1,11 @@
 #pragma once
-// Owns the .db (SQLite) file for .db output mode: schema, a thread-safe
-// queue of finished blocks (fed by every sieve thread's GapBlockSink via
-// push()), and one dedicated writer thread that drains the queue with
-// batched transactions. This keeps SQLite's single-writer constraint off
-// the sieve/compress hot path -- that stays fully parallel across threads;
-// only the (cheap, already-compressed) insert step is serialized.
+// Owns the .db (SQLite) file for .db output mode -- the index: schema, a
+// thread-safe queue of finished blocks' index rows (fed by every sieve
+// thread's GapBlockSink via push()), and one dedicated writer thread that
+// drains the queue with batched transactions -- plus the .blk sidecar
+// (block_file.hpp) the compressed blocks themselves go to, written by the
+// sieve threads in parallel. SQLite's single writer only ever sees ~40-byte
+// rows (the blocks used to go through it as BLOBs: docs/RESEARCH.md).
 //
 // No separate counting pre-pass feeds this any more (see gap_block_sink.hpp
 // and main.cpp's is_db_output block): every block arrives with a
@@ -26,11 +27,12 @@
 #include <thread>
 #include <sqlite3.h>
 
+#include "block_file.hpp"
 #include "gap_block_sink.hpp"
 
 class SqlitePrimeStore {
 public:
-    explicit SqlitePrimeStore(const std::string& path) {
+    explicit SqlitePrimeStore(const std::string& path) : blocks_(blk_path_for(path)) {
         // PRAGMA page_size only takes effect on a page-less (brand new)
         // database, so any stale file at this path must go first. See
         // docs/RESEARCH.md#page-size-kept.
@@ -48,30 +50,23 @@ public:
         // 2MB) was tried and measured worse on the server at both N=1e12
         // and N=1e13 -- see docs/RESEARCH.md.
         exec("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);");
-        // Metadata (small, mutable -- start_index gets corrected after the
-        // fact, see fix_offsets) lives apart from the compressed payload
-        // (large, immutable, written once), so fix_offsets only ever
-        // touches the tiny `blocks` rows. See
-        // docs/RESEARCH.md#blocksblock_data-table-split-kept.
+        // One row per block: where it sits in the prime sequence
+        // (start_index, corrected after the fact -- see fix_offsets -- and
+        // count), its first prime, and where its compressed bytes sit in the
+        // .blk file (offset, len).
         exec("CREATE TABLE blocks ("
              "  block_id    INTEGER PRIMARY KEY,"
              "  chunk_id    INTEGER NOT NULL,"
              "  start_index INTEGER NOT NULL,"
              "  count       INTEGER NOT NULL,"
-             "  start_prime INTEGER NOT NULL"
-             ");");
-        exec("CREATE TABLE block_data ("
-             "  block_id INTEGER PRIMARY KEY,"
-             "  data     BLOB NOT NULL"
+             "  start_prime INTEGER NOT NULL,"
+             "  offset      INTEGER NOT NULL,"
+             "  len         INTEGER NOT NULL"
              ");");
         check(sqlite3_prepare_v2(db_,
-                  "INSERT INTO blocks (chunk_id, start_index, count, start_prime) VALUES (?,?,?,?);",
+                  "INSERT INTO blocks (chunk_id, start_index, count, start_prime, offset, len) VALUES (?,?,?,?,?,?);",
                   -1, &insert_stmt_, nullptr),
               "prepare insert");
-        check(sqlite3_prepare_v2(db_,
-                  "INSERT INTO block_data (block_id, data) VALUES (?,?);",
-                  -1, &insert_data_stmt_, nullptr),
-              "prepare insert data");
 
         writer_ = std::thread([this] { writer_loop(); });
     }
@@ -92,17 +87,16 @@ public:
             writer_.join();
         }
         if (insert_stmt_) sqlite3_finalize(insert_stmt_);
-        if (insert_data_stmt_) sqlite3_finalize(insert_data_stmt_);
         if (db_) sqlite3_close(db_);
     }
 
+    // The .blk file the sinks write their compressed blocks to.
+    BlockFile& block_file() { return blocks_; }
+
     // Called from sieve threads -- many concurrent callers, must stay safe.
-    // Blocks (backpressure) once the queue holds too many not-yet-written
-    // blocks: sieve+zstd across many threads can outrun the single
-    // serialized SQLite writer, and an unbounded queue here means
-    // compressed blocks pile up in RAM without limit -- for large N (e.g.
-    // 1e12, hundreds of thousands of blocks) that's enough to OOM the
-    // process before disk ever fills up.
+    // Blocks (backpressure) once the queue holds too many not-yet-inserted
+    // rows, so a writer slower than the producers bounds memory instead of
+    // growing the queue without limit.
     void push(PendingBlock blk) {
         std::unique_lock<std::mutex> lk(mu_);
         cv_not_full_.wait(lk, [&] { return queue_.size() < MAX_QUEUED_BLOCKS || done_; });
@@ -137,14 +131,24 @@ public:
 
         sqlite3_finalize(insert_stmt_);
         insert_stmt_ = nullptr;
-        sqlite3_finalize(insert_data_stmt_);
-        insert_data_stmt_ = nullptr;
+
+        const uint64_t blk_bytes = blocks_.finish();
 
         fix_offsets(chunk_offset);
 
         exec("CREATE INDEX idx_blocks_start ON blocks(start_index);");
 
-        write_meta("format_version", "2"); // 2: wheel-index gaps, see gap_encoding.hpp
+        // 3: blocks in the .blk sidecar (2 held them as BLOBs; the gap
+        // encoding is version 2's, see gap_encoding.hpp). blk_file is the
+        // sidecar's name next to the .db, blk_bytes its size: nth_prime
+        // checks both.
+        write_meta("format_version", "3");
+        {
+            const std::string& bp = blocks_.path();
+            const size_t slash = bp.find_last_of('/');
+            write_meta("blk_file", slash == std::string::npos ? bp : bp.substr(slash + 1));
+        }
+        write_meta("blk_bytes", std::to_string(blk_bytes));
         write_meta("limit", std::to_string(limit));
         write_meta("wheel_mod", std::to_string(wheel_mod));
         write_meta("block_size", std::to_string(block_size));
@@ -218,17 +222,10 @@ private:
         sqlite3_bind_int64(insert_stmt_, 2, static_cast<sqlite3_int64>(blk.start_index));
         sqlite3_bind_int64(insert_stmt_, 3, static_cast<sqlite3_int64>(blk.count));
         sqlite3_bind_int64(insert_stmt_, 4, static_cast<sqlite3_int64>(blk.start_prime));
+        sqlite3_bind_int64(insert_stmt_, 5, static_cast<sqlite3_int64>(blk.offset));
+        sqlite3_bind_int64(insert_stmt_, 6, static_cast<sqlite3_int64>(blk.len));
         if (sqlite3_step(insert_stmt_) != SQLITE_DONE) {
             throw std::runtime_error(std::string("sqlite: failed inserting block: ") + sqlite3_errmsg(db_));
-        }
-        sqlite3_int64 block_id = sqlite3_last_insert_rowid(db_);
-
-        sqlite3_reset(insert_data_stmt_);
-        sqlite3_bind_int64(insert_data_stmt_, 1, block_id);
-        sqlite3_bind_blob(insert_data_stmt_, 2, blk.compressed.data(),
-                           static_cast<int>(blk.compressed.size()), SQLITE_TRANSIENT);
-        if (sqlite3_step(insert_data_stmt_) != SQLITE_DONE) {
-            throw std::runtime_error(std::string("sqlite: failed inserting block data: ") + sqlite3_errmsg(db_));
         }
     }
 
@@ -269,15 +266,11 @@ private:
 
     sqlite3* db_ = nullptr;
     sqlite3_stmt* insert_stmt_ = nullptr;
-    sqlite3_stmt* insert_data_stmt_ = nullptr;
+    BlockFile blocks_;
 
-    // Caps how many compressed-but-not-yet-inserted blocks can queue up.
-    // Generous enough to smooth out scheduling jitter between producer
-    // threads and the single writer, but bounded so a writer that's
-    // slower than the sieve+compress side (large N, slow disk, many
-    // threads) applies backpressure instead of growing the queue --
-    // and process memory -- without limit.
-    static constexpr size_t MAX_QUEUED_BLOCKS = 512;
+    // Caps how many not-yet-inserted index rows can queue up (~40 bytes
+    // each, so this bounds the wait, not memory).
+    static constexpr size_t MAX_QUEUED_BLOCKS = 4096;
 
     std::mutex mu_;
     std::condition_variable cv_;

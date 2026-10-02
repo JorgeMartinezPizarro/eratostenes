@@ -34,7 +34,7 @@ KEEP_DB="${KEEP_DB:-0}"
 CURRENT_IO_FILE=""
 cleanup_current_io_file() {
     if [ "$KEEP_DB" = "0" ] && [ -n "$CURRENT_IO_FILE" ]; then
-        rm -f "$CURRENT_IO_FILE"
+        rm -f "$CURRENT_IO_FILE" "${CURRENT_IO_FILE%.db}.blk"
     fi
 }
 trap cleanup_current_io_file EXIT
@@ -53,9 +53,9 @@ esac
 mkdir -p "$WRITE_PATH"
 
 # N -> pi(N) conocido, misma escala x10 que el barrido manual (1k..1t).
-IO_SIZES=(100m 1b 10b 100b 1t)
-IO_LIMITS=(100000000 1000000000 10000000000 100000000000 1000000000000)
-IO_EXPECTED=(5761455 50847534 455052511 4118054813 37607912018)
+IO_SIZES=(100m 1b 10b 100b 1t 10t)
+IO_LIMITS=(100000000 1000000000 10000000000 100000000000 1000000000000 10000000000000)
+IO_EXPECTED=(5761455 50847534 455052511 4118054813 37607912018 346065536839)
 
 # bytes -> "X.XX UUU" (KiB/MiB/GiB/TiB), sin depender de numfmt.
 human_size() {
@@ -101,7 +101,8 @@ for i in "${!IO_SIZES[@]}"; do
         break
     fi
 
-    bytes=$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file")
+    # .db (index) plus its .blk sidecar (the blocks): the table reports both together.
+    bytes=$(( $(stat -c%s "$file") + $(stat -c%s "${file%.db}.blk") ))
 
     IO_SIZE_BYTES[$n]="$bytes"
     IO_TOTAL_S[$n]="$total_s"
@@ -110,7 +111,7 @@ for i in "${!IO_SIZES[@]}"; do
     echo "  pi(N)=$count  tamano=$(human_size "$bytes")  total=${total_s}s" >&2
 
     if [ "$KEEP_DB" = "0" ]; then
-        rm -f "$file"
+        rm -f "$file" "${file%.db}.blk"
     fi
     CURRENT_IO_FILE=""
 done
