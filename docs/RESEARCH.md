@@ -2320,6 +2320,76 @@ threads vs 6), and the i5-13500 won with 1/2 at 20 threads. No thread-count
 rule fits; left at the current gate. A startup calibration of this cutoff
 on the machine at hand is the candidate.
 
+### Segment ceiling: half the L2 per thread, within 16-32 x L1d (kept, 2026-10-02)
+
+The sparse-regime doubling (see arg_parser.hpp's entries) takes the segment to
+the whole L2 share. On the 2-vCPU Emerald Rapids sandbox (48 KiB L1d, 2 MiB L2
+per vCPU) that is 2 MiB, and `-s` at 1 MiB or 512 KiB was 3-11% faster on the
+last 1e11 below 1e15..1e18. primesieve never goes there: api.cpp's
+`get_sieve_size` caps its sieve at 16 x L1d and below the L2 per thread (8 x
+L1d when the OS reports no cache sharing, as in VMs). A first ceiling of
+16 x L1d (6f645c9) fixed 1e15+ on that VM (-4..-9%) but cost +6% at 1e13
+(768 KiB instead of 1 MiB) and +3% at 1e14; on the 32 KiB-L1d / 1 MiB-L2 Xeon
+sandbox it took 1 MiB down to 512 KiB, -7% at 1e15, neutral at 1e18. Both
+fit `max(16 x L1d, min(32 x L1d, L2 per thread / 2))`: 1 MiB on the first,
+512 KiB on the second; the dev PC and the i5-13500 (256 KiB of L2 per thread
+under HT) get 768 KiB, above their 512 KiB, unchanged. Fitted on two VMs; the
+startup log says when it applies.
+
+### `run_parallel_chunks`: steals priced with the run's own measurements (kept, 2026-10-02)
+
+The fixed steal threshold (4 wheel indices per base prime) came from the dev
+PC; on the i5-13500 it let only 4 steals through at the last 1e11 below 1e18
+and left 7-9% idle (P-cores finishing ~1.3 s before E-cores). sieve_chunk now
+times each fresh start's activation and each chunk's sieving (three clock
+reads per chunk), and a thief takes the back piece, in whole chunks, that has
+it and the victim finish together: activation + piece / its rate = (left -
+piece) / victim's rate, the victim being the run whose own worker would take
+longest. No steal when a single chunk doesn't pay its activation.
+`--debug-idle` prints the measured activation cost and the range of rates.
+
+i5-13500, 1e18 tail: 10 steals instead of 4, idle 3.1% instead of 7.0-9.1%,
+rates 176-270 Mk/s (E- vs P-cores), but the wall time didn't move (7.48 s vs
+7.36-7.47 s): each extra steal re-activates 50.8M primes (~0.75 s of one
+thread at 14.7 ns each), which eats what the balance gains. Dev PC: same
+decisions as the old threshold (activation measured ~3.2 indices per prime
+at 1e18), A/B within noise. Kept: no loss anywhere, and it adapts by itself.
+
+### Activation cost at the top of N (2026-10-02)
+
+At the last 1e11 below 1e18 the dev PC sieved ~9% faster than primesieve per
+wheel index but paid ~1.6 s more of fixed cost (T(W) = F + c*W over W = 5e10
+and 1e11, 12 threads: F 3.6 s vs 2.0 s, c 2.05 vs 2.25 s per 1e10): the
+single-threaded part of the base-prime phase (0.45 s) and ~1.5 s per thread
+activating 50.5M sparse primes (29 ns each, ~130 cycles).
+
+- Kernel time: a 1e18 run with a 1e9 window spent 10.6 s sys against 14.4 s
+  user (12 threads, 1.42M page faults): each thread's bucket pool (406 MB of
+  8-byte entries) is faulted in and zeroed as activation fills it.
+  primesieve's EratBig holds the same entries (4.71 GB peak vs our 5.06 GB at
+  the 1e11 tail), so it pays the same.
+- Transparent huge pages for the pool (2 MiB-aligned arenas,
+  `madvise(MADV_HUGEPAGE)`; WSL2 has `enabled=madvise`, `defrag=madvise`):
+  faults 1.42M -> 0.22M but wall 2.3 s -> 4.3 s, sys 20.6 s -- direct
+  compaction for every huge page, 12 threads at once. Micro-benchmark, 12
+  threads x 406 MB written once: 4 KiB pages 0.8-0.96 s wall, THP 2.4 s,
+  `MAP_POPULATE` 2.1-3.2 s (threads serialize in the kernel). Reverted.
+- Activation in batches of 16 with a write prefetch of each target bucket
+  tail before the pushes: 28-35 ns per prime vs 30-33, no change. Reverted.
+- Base primes as a bitmap on the wheel (kept, e1b177a): `sieve_base_primes`
+  sets bits (an atomic OR, neighbouring threads can share a word) instead of
+  filling a `vector<uint64_t>`; classify lists only the dense tiers' primes
+  and the sparse tier is a run of the bitmap (`SparsePrimes`) that activation
+  walks with ctz. 1e9 (N = 1e18): 33 MB instead of 406 MB, sieved in 0.12 s
+  instead of 0.41 s with 12 threads (no concatenation), and every thread
+  reads 33 MB instead of 406 MB when activating (20-22 ns per prime instead
+  of 23-31). Same primes as the old sieve for every limit up to 20000 and at
+  sqrt(1e10..1e18) with 1, 3 and 12 threads, same `count_upto`; all `make
+  test` cases pass. A/B, last 1e10 (fixed cost dominates), 4 runs each:
+  1e17 2.29 -> 1.83 s (-20%, every new run below every old one), 1e18 3.75
+  -> 3.30 s (-12%), i.e. ~0.45 s less; on the last 1e11 that is 2-3%, within
+  that night's noise (1e15..1e18 ABBA x2: tie).
+
 ### i5-13500 server gap vs primesieve: medium-tier call count, sparse cutoff 1/2 gated on per-thread L2 (2026-09-28)
 
 Context: dev PC (i5-11400F, symmetric) is now below primesieve at every N in
