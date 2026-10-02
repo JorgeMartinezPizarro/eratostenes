@@ -49,7 +49,7 @@ The last 1e11 numbers below N (`make benchmark-tails`):
 
 ## Intel Xeon Emerald Rapids (claude.ai sandbox)
 
-Intel Xeon @ 2.10GHz (family 6 model 207), 2-vCPU KVM, 1 thread per core, 48 KiB L1d and 2 MiB L2 per core, L3 reported as 260 MiB (the whole host's, shared with other tenants: times swing ~20% between hosts of this CPU, ratios less); Ubuntu 24.04, g++ 13.3, primesieve 12.0, 2 threads.
+Intel Xeon @ 2.10GHz (family 6 model 207), 2-vCPU KVM, 1 thread per core, 48 KiB L1d and 2 MiB L2 per core, L3 reported as 260 MiB (the whole host's, shared with other tenants: the same binary's 1e18 tail ranged from 28 s to 41 s across three hosts of this CPU on one day, primesieve's from 28 s to 37 s, so only ratios from one host are comparable); Ubuntu 24.04, g++ 13.3, primesieve 12.0, 2 threads.
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|

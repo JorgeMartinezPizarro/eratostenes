@@ -28,6 +28,12 @@
 #include "wheel.hpp"
 #include "wheel210_big.hpp"
 
+// Sparse tier: process_big takes two bucket entries per iteration (see its
+// comment); -DERA_BIG_PAIRS=0 restores one per iteration for an A/B.
+#ifndef ERA_BIG_PAIRS
+#define ERA_BIG_PAIRS 1
+#endif
+
 class SegmentSieve {
 public:
     // seg_k_width: wheel-index width of a normal (non-final) segment, same
@@ -592,6 +598,38 @@ private:
                 // new-block path out of line: the loop is load-port bound, and
                 // field-by-field loads plus spills of the loop constants
                 // around the inline allocation cost ~12 loads per hit.
+                //
+                // Two entries per iteration (mod-2310 path): both entries'
+                // loads, table rows and segment bytes are issued before either
+                // push, so one entry's misses overlap the other's -- EratBig's
+                // own loop shape. The pushes stay in order: if both land in
+                // the same slot the second reads the tail the first just wrote.
+                if constexpr (W2310 && ERA_BIG_PAIRS) {
+                    for (; it + 2 <= end; it += 2) {
+                        uint64_t ent0, ent1;
+                        std::memcpy(&ent0, it, sizeof(ent0));
+                        std::memcpy(&ent1, it + 1, sizeof(ent1));
+                        uint64_t pos0 = (ent0 >> 12) & 0xffffff, pos1 = (ent1 >> 12) & 0xffffff;
+                        const uint64_t te0 = big::TABLE2310[ent0 & 4095], te1 = big::TABLE2310[ent1 & 4095];
+                        s[pos0] |= static_cast<uint8_t>(te0);
+                        s[pos1] |= static_cast<uint8_t>(te1);
+                        pos0 += (ent0 >> 36) * ((te0 >> 8) & 0xff) + ((te0 >> 16) & 15);
+                        pos1 += (ent1 >> 36) * ((te1 >> 8) & 0xff) + ((te1 >> 16) & 15);
+                        const uint64_t sl0 = (cur + (pos0 >> log2sb)) & bmask, sl1 = (cur + (pos1 >> log2sb)) & bmask;
+                        const uint64_t e0 = (ent0 & ~((uint64_t{1} << 36) - 1)) | (te0 >> 20) | ((pos0 & modsb) << 12);
+                        const uint64_t e1 = (ent1 & ~((uint64_t{1} << 36) - 1)) | (te1 >> 20) | ((pos1 & modsb) << 12);
+                        erat::DenseState* w0 = tails[sl0];
+                        if ((reinterpret_cast<uintptr_t>(w0) & (BLK_BYTES - 1)) == 0) [[unlikely]]
+                            w0 = new_block(static_cast<uint32_t>(sl0));
+                        std::memcpy(w0, &e0, sizeof(e0));
+                        tails[sl0] = w0 + 1;
+                        erat::DenseState* w1 = tails[sl1];
+                        if ((reinterpret_cast<uintptr_t>(w1) & (BLK_BYTES - 1)) == 0) [[unlikely]]
+                            w1 = new_block(static_cast<uint32_t>(sl1));
+                        std::memcpy(w1, &e1, sizeof(e1));
+                        tails[sl1] = w1 + 1;
+                    }
+                }
                 for (; it != end; ++it) {
                     uint64_t ent;
                     std::memcpy(&ent, it, sizeof(ent));

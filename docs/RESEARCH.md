@@ -2576,6 +2576,31 @@ The i5-13500 at 20 threads is still unmeasured (its 1e14 full run of
   tables, and dropping coverage was measured worse than the fill it saves
   (each prime removed costs ~8x its share of the fill in small-tier hits).
 
+### Sparse tier: two entries per iteration in `process_big` (kept, 2026-10-02)
+
+The per-tier map put the uncontended gap in the sparse tier's IPC (2.36 vs
+EratBig's 2.84 for the same instructions per hit). EratBig processes a
+bucket's primes two at a time; `process_big` went one entry at a time, each
+iteration a dependent chain (entry load, table row, segment byte, tail
+pointer, store). The mod-2310 loop now takes two entries per iteration: both
+entries' loads, table rows and segment RMWs are issued before either push,
+and the pushes stay in order (a shared slot's second push reads the tail the
+first just wrote). `-DERA_BIG_PAIRS=0` restores the single-entry loop.
+
+Dev PC, cycles:u, ABAB x3 per cell, counts identical:
+
+| | single | pairs | |
+|---|---:|---:|---:|
+| 1e15 tail, `-t 2` (1/2) | 145.6-147.5G | 142.8-144.4G | -2.2% |
+| 1e18 tail, `-t 2` (1/2) | 238.0-239.3G | 234.0-236.8G | -1.4% |
+| 1e15 tail, `-t 12` | 326.7-334.3G | 324.0-330.6G | -1% (noise) |
+| 1e18 tail, `-t 12` | 738-784G | 746-774G | tie |
+
+Small, but every uncontended run with pairs beat every one without, and
+nothing got worse. The remaining IPC gap in this tier is still open; the
+next thing to try in the same direction is a 2-stage pipeline (prefetching
+the next pair's tail lines once their slots are known).
+
 ### `.db` output: the `.blk` sidecar, blocks written by the sieve threads (kept, format 3, 2026-10-02)
 
 Follows from the entry below: the single SQLite writer was the `.db` limit on
