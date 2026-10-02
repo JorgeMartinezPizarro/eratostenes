@@ -2424,6 +2424,35 @@ each slice adds a re-filing pass over 29k entries that is paid for real.
 Reverted. TopdownL1 under WSL's vPMU counts ~6M slots for a 150G-cycle run:
 unusable here; the server (native) is where that question can be answered.
 
+### Medium tier in fixed-iteration bands, predicated hits (tried, reverted, 2026-10-02)
+
+The medium loop (`cross_off_medium`) leaves at a data-dependent `pos < end`:
+one mispredict per prime per segment, 60% of all branch misses on the
+i5-13500 at 1e14 and ~70% of its gap in TopdownL1 (entry below). Tried:
+each class's list (sorted by p, so expected hits per segment fall along it)
+cut at activation into bands with the same fixed iteration count h = expected
+hits (6.857 x bytes / p) x factor + 1; a band's primes all run exactly h
+predicated iterations (a hit past `end` marks a spare byte s[end] and doesn't
+advance), the trip count constant across the band so the exit predicts; a
+plain loop afterwards catches the rare prime with more hits (correctness) and
+the primes expected above 8 hits (`--tune medband=a/b`, `medbandmax`).
+
+First version with `hit ? pos : end`: GCC compiled the ?: back into a
+`pos < end` branch per iteration (asm: 149 jcc, 18 cmov) -- branch misses
+unchanged (1.36G -> 1.39G), cycles +6-8%. With arithmetic masks
+(`m = 0 - (pos < end)`, `s[(pos & m) | (end & ~m)]`, `pos += step & m`) the
+misses do go: 1e13 tail `-t 12` 1.31G -> 0.64G (-51%), 1e15 tail `-t 2`
+(sparse 1/2) 0.98G -> 0.54G (-45%). Cycles, same runs: `-t 12` 172.7G ->
+192.3G (+11%; factor 3: +44%), `-t 2` 154.0G -> 156.4G (factor 1.2, +1.5%),
+162.7G (factor 1.4, +5.5%). The arithmetic matches: medium is ~75G of the
+`-t 12` run, the mispredicts removed are worth ~11G, and the predicated loop
+costs ~10 ops per iteration instead of 5 plus ~40% wasted iterations, ~+30G.
+So on this core the medium exit mispredict is cheap -- overlapped with the
+s[pos] misses the tier waits on anyway -- and the tier's cost is the work per
+hit. Reverted. The same conclusion as the small/med64 "redirected stores"
+attempt (erat_small.hpp entries): fewer mispredicts bought with more
+instructions don't pay in any tier here.
+
 ### i5-13500 server gap vs primesieve: medium-tier call count, sparse cutoff 1/2 gated on per-thread L2 (2026-09-28)
 
 Context: dev PC (i5-11400F, symmetric) is now below primesieve at every N in
