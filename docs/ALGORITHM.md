@@ -213,9 +213,10 @@ sparse, then extraction.
   a *bucket* earns its keep -- most segments have nothing to do for most of these
   primes, so each one is filed into the ring slot of the segment its next hit
   falls in, and a segment only touches the primes due in it (`process_big`,
-  primesieve's EratBig design). Each ring slot is a linked list of 1 KiB,
-  1 KiB-aligned blocks from a pool (a tail pointer landing on a block boundary
-  means "full", so there's no count field); hits are byte marks stepped with
+  primesieve's EratBig design). Each ring slot is a linked list of 4 KiB,
+  4 KiB-aligned blocks from a pool (a tail pointer landing on a block boundary
+  means "full", so there's no count field; 4 KiB rather than the earlier 1 KiB
+  is -4..-8% on the 1e15-1e18 tails, see RESEARCH.md); hits are byte marks stepped with
   `big::TABLE2310` (mod-2310, §2; each entry one 64-bit word, class/phase index |
   byte position << 12 | qp << 36); the slot is `byte position >> log2(segment bytes)`,
   so whenever any prime is sparse `main.cpp` floors the segment to a power of 2
@@ -285,8 +286,11 @@ overrides for when detection can't be trusted) rather than a fixed guess:
   top-of-range tails; the dev PC and the i5-13500 (256 KiB per thread under
   HT) are below the ceiling and unchanged. The startup log says when it applies.
 - **Small-tier sub-block**: half the detected L1d -- that tier's whole point (§6)
-  is keeping its marks inside L1, and the other half leaves room for the tier's
-  own per-prime state and the presieve reads alongside the sub-block.
+  is keeping its marks inside L1, and the other half is the hyperthread sibling's
+  share. When no more threads run than physical cores with the largest L1d
+  (VMs without SMT, `-t` below the core count), each thread has the L1d to
+  itself and the sub-block takes all of it; the small/med64 cutoff stays at the
+  half-L1d value either way.
 
 On a hybrid CPU (P-cores and E-cores with different caches) both are still
 applied **uniformly to every thread** -- threads migrate between core types at
