@@ -2472,6 +2472,14 @@ a third of those stalls; the rest is consistent with med64's scattered RMW
 stores filling the store buffer (not counted as load stalls). Splitting
 front- from back-end needs a native PMU (the server).
 
+primesieve's own tier split at `-t 2` (its sieve is 256 KiB and EratMedium
+stops at ~2.7 hits per segment, the rest going to EratBig): `--l2-bytes 256k`
+with sparse 1/2, 1/4 and 1/8, against our 512 KiB with 1/2 (ABCDE EDCBA,
+same tail): 164-170G cycles vs 152-160G, +5..+10% for every 256 KiB
+combination (512 KiB with 1/4: tie). The split isn't what makes primesieve
+faster per thread; halving our segment doubles the medium and sparse tiers'
+per-segment costs, which EratMedium doesn't pay the same way. Not adopted.
+
 ### `MIN_SEGS_PER_CHUNK` as `--tune minsegs` (knob added, default kept, 2026-10-02)
 
 The i5-13500 at 1e10 (1.09x) is a tail-balance loss: `--debug-idle` shows 6.2%
