@@ -263,11 +263,11 @@ count, which is what the byte-position change went after. The medium tier's
 population is capped by π(seg_k_width); past N ≈ seg_k_width² (~4.4e12 here) the
 rest of the base primes go sparse.
 
-## 7. Cache auto-tuning (`arg_parser.hpp`, `main.cpp`)
+## 7. Cache auto-tuning (`cpu_cache.hpp`, `main.cpp`)
 
 Two sizes are auto-tuned from the machine's real, detected cache sizes (read from
-`/sys/devices/system/cpu/...` on Linux, with `--l1-bytes`/`--l2-bytes` overrides
-for when detection can't be trusted) rather than a fixed guess:
+`/sys/devices/system/cpu/...` on Linux by `cpu_cache.hpp`, with `--l1-bytes`/`--l2-bytes`
+overrides for when detection can't be trusted) rather than a fixed guess:
 
 - **Segment width**: half the detected L2, so the segment's own bit array stays
   cache-resident alongside a hyperthread sibling and the tiers' state. Past that

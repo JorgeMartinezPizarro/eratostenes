@@ -32,12 +32,10 @@ static_assert(WHEEL_MOD == 30 && WHEEL_SIZE == 8,
 
 namespace erat {
 
-constexpr uint32_t R[8] = {1, 7, 11, 13, 17, 19, 23, 29};
-
-constexpr int pos30(uint32_t x) {
-    for (int j = 0; j < 8; ++j) if (R[j] == x) return j;
-    return -1;
-}
+// The mod-30 residues and their bit positions, shared with the mod-210 /
+// mod-2310 tables (wheel210_big.hpp).
+inline constexpr const uint32_t (&R)[8] = big::R30;
+using big::pos30;
 constexpr uint64_t C(int pr, int j) { return R[pr] * R[j] / 30; }
 constexpr uint8_t M(int pr, int j) { return static_cast<uint8_t>(1u << pos30(R[pr] * R[j] % 30)); }
 
