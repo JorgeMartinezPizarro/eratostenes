@@ -2453,6 +2453,67 @@ hit. Reverted. The same conclusion as the small/med64 "redirected stores"
 attempt (erat_small.hpp entries): fewer mispredicts bought with more
 instructions don't pay in any tier here.
 
+### `-t 2` gap: Topdown from raw slot counters (2026-10-02)
+
+WSL's vPMU breaks `-M TopdownL1` (bad-spec = all slots) but counts the raw
+events. Last 1e11 below 1e15, `taskset -c 0,2`, 2 threads, dev PC, cutoff 1/1:
+
+| | eratostenes | primesieve | delta |
+|---|---:|---:|---:|
+| TOPDOWN.SLOTS | 720.9G | 601.2G | +119.7G |
+| UOPS_RETIRED.SLOTS | 300.8G | 315.6G | -14.8G |
+| issued - retired (bad speculation) | 137.4G | 92.7G | +44.7G |
+| slots not issued (front/back-end stalls) | 282.7G | 192.8G | +89.9G |
+
+We retire fewer uops and still need 20% more slots: 37% of the gap is bad
+speculation (INT_MISC.CLEARS 1.35G vs 1.06G), 63% stalls with nothing issued.
+`cycle_activity.stalls_l2_miss` (13.25G vs 6.60G cycles, ~33G slots) is about
+a third of those stalls; the rest is consistent with med64's scattered RMW
+stores filling the store buffer (not counted as load stalls). Splitting
+front- from back-end needs a native PMU (the server).
+
+### `MIN_SEGS_PER_CHUNK` as `--tune minsegs` (knob added, default kept, 2026-10-02)
+
+The i5-13500 at 1e10 (1.09x) is a tail-balance loss: `--debug-idle` shows 6.2%
+idle (0.169 s vs 0.190 s between threads), rates 408-1229 Mk/s -- at this N the
+E-cores run 3x slower than the P-cores -- and the ~12 ms idle is about the
+whole gap. The chunk floor of 4 segments (~9 ms on an E-core) sets the tail
+granularity, and its reason (each chunk re-activated every base prime) is gone
+since the sieve is carried across chunks. Dev PC (uniform cores), 1e10 `-t 12`:
+`minsegs=1` idle 2.9-5.0% -> 1.8-2.8%, 636 chunks instead of 255, wall
+unchanged (0.16-0.17 s); 1e11 unaffected (the floor doesn't bind: 1590 chunks
+either way). Default left at 4 until the server measures 1 and 2.
+
+### `.db` output: where the time goes (2026-10-02)
+
+Count vs `.db` at 1e11 on the dev PC (12 threads): 1.93 s / 22.6 s user vs
+12.4-26.3 s / 50 s user to the WSL virtual disk -- 4.4 of 12 cores busy; to
+tmpfs 6.1-7.2 s / 53-57 s user, 8.8 cores busy. i5-13500 at 1e12 (20
+threads, NVMe RAID0): 21.5 s / 414 s user vs 77.4 s / 825 s user + 41 s sys,
+11.2 of 20 cores busy, 260 MB/s. So `.db` costs 2.1-2.4x the count's CPU
+(extraction + gaps + zstd) and 3-4x its wall: the single SQLite writer is the
+limit on both machines, and not for CPU -- perf (user cycles) puts libsqlite3
+at 2.45%, libzstd 15.8%, our code 78.5%, the writer thread at 1.4% -- but for
+kernel time: with WAL every page is copied twice, 4-5 s of sys on tmpfs for a
+2 GB file, and the producers wait on the full queue. Of the user CPU, 36% is
+`sieve_chunk<GapBlockSink>` (ctz extraction + `write_k` gap encoding, ~30
+cycles per prime), more than any sieve tier. `PRAGMA page_size` 16K/64K
+(fewer overflow pages per ~35 KB blob): 64K +78% file size (3602 vs 2019 MB)
+and slower, 16K +6% size and no faster; 4K kept. A parallel block file
+(producers `pwrite` their compressed blocks at offsets handed out by an atomic
+counter, SQLite keeping only the index) would remove the writer, but changes
+the format `nth_prime` reads.
+
+### Startup: the dev PC's "7-8 ms overhead" was exec from /mnt/c (2026-10-02)
+
+`./eratostenes 1` (parse and exit) takes 7-9 ms from the repo on /mnt/c (WSL's
+9p mount) and 1 ms from ext4; a 1e8 run 10-13 ms vs 5 ms (primesieve 5-8 ms).
+Our own startup is ~2 ms: topology detection 0.5-0.8 ms (sysfs, 12 CPUs), 12
+threads ~1 ms, presieve tables 0.1 ms, dynamic loader 0.1 ms. The i5-13500
+inside Docker: `./eratostenes 1` 1-4 ms, `primesieve 1` 5-25 ms, so its 1e10
+loss isn't startup either (see the minsegs entry). Small-N timings on the dev
+PC should run a copy of the binary from /home.
+
 ### i5-13500 server gap vs primesieve: medium-tier call count, sparse cutoff 1/2 gated on per-thread L2 (2026-09-28)
 
 Context: dev PC (i5-11400F, symmetric) is now below primesieve at every N in

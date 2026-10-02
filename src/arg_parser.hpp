@@ -291,6 +291,7 @@ struct Options {
     Fraction tune_sparse; // medium/sparse cutoff, default 1/1 or 1/2 (main.cpp); lowering only
     bool big2310 = true; // sparse tier on the mod-2310 wheel (false: mod-210)
     int medium_nta = -1; // medium-tier prefetchnta: -1 auto (L3 gate), 1 on, 0 off
+    uint64_t minsegs = 4;    // smallest chunk, in segments (main.cpp's MIN_SEGS_PER_CHUNK)
 };
 
 // Interprets suffixes: k=1e3 m=1e6 b=1e9 (short scale billion) t=1e12
@@ -402,7 +403,8 @@ inline void parse_tune(Options& opt, const std::string& kv) {
     else if (k == "sparse") opt.tune_sparse = parse_fraction(k, v);
     else if (k == "big2310") opt.big2310 = parse_switch(k, v, "1", "0");
     else if (k == "medium_nta") opt.medium_nta = parse_switch(k, v, "1", "0") ? 1 : 0;
-    else throw std::runtime_error("--tune: unknown key '" + k + "' (small, med64, sparse, big2310, medium_nta)");
+    else if (k == "minsegs") { opt.minsegs = parse_fraction(k, v).num; if (opt.minsegs < 1) throw std::runtime_error("--tune minsegs: at least 1"); }
+    else throw std::runtime_error("--tune: unknown key '" + k + "' (small, med64, sparse, big2310, medium_nta, minsegs)");
 }
 
 inline void print_usage(const char* prog) {
