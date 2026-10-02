@@ -1075,7 +1075,7 @@ int main(int argc, char** argv) {
     // segments. See
     // docs/RESEARCH.md#chunk-width-floor-at-least-4-segments-per-chunk-kept-2026-09-27.
     constexpr unsigned CHUNKS_PER_THREAD = 150;
-    const uint64_t MIN_SEGS_PER_CHUNK = opt.minsegs; // default 4; --tune minsegs=N (A/B)
+    const uint64_t MIN_SEGS_PER_CHUNK = opt.minsegs; // default 1 (--tune minsegs=N); 4 until 2026-10-02, see docs/RESEARCH.md
     uint64_t width_cap = wheel_count_upto(opt.limit) / (MIN_SEGS_PER_CHUNK * seg_k_width);
     // No floor of one chunk per thread either: a range under threads *
     // MIN_SEGS_PER_CHUNK segments runs on fewer threads (actual_threads

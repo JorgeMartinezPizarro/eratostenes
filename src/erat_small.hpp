@@ -291,4 +291,62 @@ __attribute__((noinline)) void cross_off_medium(uint8_t* s, uint64_t end, uint32
 // outright) at this project's actual E13-E14 target range. See
 // docs/RESEARCH.md for the full measurements.
 
+// Medium tier in bands of a fixed, predicated iteration count
+// (-DERA_MED_BANDS=1; off by default). The plain loop above leaves at a
+// data-dependent `pos < end`, one mispredict per prime per segment; the
+// i5-13500's Topdown puts ~90% of its remaining 2-thread gap in bad
+// speculation. A class's list is sorted by p, so expected hits per segment
+// (~6.857 * bytes / p) fall along it; activate_medium cuts it into bands
+// with the same h = expected hits x factor + 1, and every prime of a band
+// runs exactly h iterations with arithmetic masks (a hit past `end` marks
+// the spare byte s[end] and doesn't advance; ?: would be compiled back into
+// a branch). The trip count is constant across a band, so the exit is
+// predicted; the plain loop afterwards catches the rare prime with more
+// hits (correctness) and the primes expected above MEDIUM_BAND_MAX_HITS
+// (h = 0). On the i5-11400F this loses (branch misses -50%, cycles +1.5..11%:
+// the mispredict was overlapped there); see docs/RESEARCH.md.
+struct MedBand {
+    uint32_t end; // index one past the band's last prime in the class's list
+    uint8_t h;    // fixed iterations, 0 = plain loop
+};
+
+template <int PR, bool NTA>
+__attribute__((noinline)) void cross_off_medium_banded(uint8_t* s, uint64_t end, uint32_t* dyn, const uint8_t* qds,
+                                                       uint64_t qp_base, uint64_t rebase,
+                                                       const MedBand* band, const MedBand* band_last) {
+    const uint32_t* pack = big::PACK210[PR].data();
+    uint64_t qp = qp_base;
+    uint32_t i = 0;
+    for (; band != band_last; ++band) {
+        const uint32_t bend = band->end;
+        const unsigned H = band->h;
+        for (; i < bend; ++i) {
+            if constexpr (NTA) {
+                __builtin_prefetch(dyn + i + MEDIUM_NTA_DIST, 0, 0);
+                __builtin_prefetch(qds + i + MEDIUM_NTA_DIST * 4, 0, 0);
+            }
+            uint32_t d = dyn[i];
+            uint64_t pos = d >> 6;
+            uint64_t w = d & 63;
+            qp += qds[i];
+            for (unsigned h = 0; h < H; ++h) {
+                const uint32_t t = pack[w];
+                const uint64_t m = 0 - static_cast<uint64_t>(pos < end); // all ones on a hit
+                s[(pos & m) | (end & ~m)] |= static_cast<uint8_t>(t);
+                const uint64_t step = qp * ((t >> 8) & 0xff) + (t >> 16);
+                pos += step & m;
+                w += m & 1;
+            }
+            while (pos < end) {
+                uint32_t t = pack[w];
+                s[pos] |= static_cast<uint8_t>(t);
+                pos += qp * ((t >> 8) & 0xff) + (t >> 16);
+                if (++w == 96) [[unlikely]] w = 48;
+            }
+            while (w >= 48) w -= 48;
+            dyn[i] = static_cast<uint32_t>(((pos - rebase) << 6) | w);
+        }
+    }
+}
+
 } // namespace erat

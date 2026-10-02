@@ -2624,6 +2624,67 @@ Two follow-ups on the same loop the same day:
   prefetch (a tie); with two threads sharing an L2 the sparse RMWs miss and
   the prefetch covers them. 16 kept as the default.
 
+### i5-13500 Topdown at `-t 2`: the residual gap is bad speculation; `minsegs` 1; medium bands as an option (2026-10-02)
+
+Native Topdown L1 (image `dev`, `--privileged`, `perf stat -a -C 0,2 -e
+'{cpu_core/slots/,cpu_core/topdown-*/}'`), both programs on P-cores 0 and 2,
+last 1e11 below 1e15, 2 threads:
+
+| slots | eratostenes | primesieve | delta |
+|---|---:|---:|---:|
+| total | 696.1G | 658.7G | +37.4G |
+| retiring | 322.1G (46.3%) | 334.4G (50.7%) | -12.3G |
+| bad speculation | 128.3G (18.4%) | 95.5G (14.5%) | **+32.8G** |
+| frontend bound | 68.2G (9.8%) | 63.3G (9.6%) | +5.0G |
+| backend bound | 177.4G (25.5%) | 166.8G (25.3%) | +10.6G |
+
+The back-end is even; ~90% of the slot gap is bad speculation (the WSL
+estimate for the dev PC had put it at 37%, with L2 stalls as the rest: the
+two cores differ). That reopens the predicated medium-tier bands, which cut
+branch misses in half on the dev PC but cost more ALU work than they saved
+there; Raptor Cove has the wider back-end and the bigger speculation bill.
+Re-added behind `-DERA_MED_BANDS=1` (default 0, factor 1.2, plain loop above
+8 expected hits): dev PC `-t 2` 1e15 tail, branch-misses 0.866G -> 0.509G,
+cycles 143.2G -> 151.2G (+5.6%), as before. To be A/B'd on the i5-13500.
+
+`minsegs` on the i5-13500, 1e10, 20 runs each (`make run`): default 4
+median 0.195 s, `minsegs=1` 0.185 s; the runs are bimodal (0.13-0.15 s when
+the tail lands well, 0.19-0.20 s when it doesn't) and 1 hits the fast mode
+6 times in 20 against 3. Small, nothing lost on the dev PC: default now 1.
+
+### Where the losses are after the sparse-tier changes (2026-10-02, end of day)
+
+Three sandbox sessions on 51523dc (4 KiB blocks, pairs, prefetch), the
+i5-13500 with the blocks and pairs, the dev PC with everything, all tails
+`REPS=2` (the last 1e11 below N) unless noted:
+
+| machine | 1e13 | 1e14 | 1e15 | 1e16 | 1e17 | 1e18 |
+|---|---:|---:|---:|---:|---:|---:|
+| i5-11400F, 12 threads | 0.80x | 0.73x | 0.74x | 0.77x | 0.81x | 0.87x |
+| i5-13500, 20 threads | 0.97x | 0.94x | 0.96x | 0.99x | 1.02x | 0.96x |
+| Xeon Emerald Rapids, 2 vCPU (quiet host) | 0.97x | 1.00x | 1.00x | 1.04x | 0.96x | 0.98x |
+| Xeon @ 2.80GHz (32 KiB L1d, 1 MiB L2), 2 vCPU, two hosts | 1.10-1.12x | 1.08-1.09x | 1.04-1.13x | 1.16x | 1.12-1.15x | 1.00-1.04x |
+
+Full counts on Emerald Rapids (three hosts, 53d3073): 1e10-1e12 0.97-1.01x,
+1e13 0.93-0.95x. The i5-13500's full 1e15 with the day-before code (steals,
+bitmap; no blocks yet): 40,664.78 s against 40,976.93 s.
+
+What moved today: on the 2.80GHz Xeon the 1e15-1e18 tails went from
+1.17-1.28x to 1.00-1.16x (blocks + pairs, -5..-7% on the same host); on the
+server from 1.01-1.05x to 0.96-1.02x. The prefetch is neutral with one
+thread per core (A/B on Emerald Rapids: -2.4..+1.5%, noise), as predicted.
+
+What is left: one machine, the 2.80GHz Xeon, loses 4-16% everywhere,
+including the 1e13 and 1e14 tails where the sparse tier barely runs -- so
+its dense tiers lose too, which they don't on Emerald Rapids (48 KiB L1d,
+2 MiB L2). Its L1d is 32 KiB (sub-block 32 KiB whole, small_limit 4K) and
+its L2 1 MiB (512 KiB segment); same per-thread regime as the dev PC at
+`-t 2`, which also loses 1.19x at 1e14. Everything that was tried on the
+dense tiers today (bands, slices, cutoffs, primesieve's split) failed on
+the dev PC; that CPU hasn't been profiled (no PMU in the VM).
+Everything else is at parity or better, and the server's 1e10 (1.09x,
+tail balance) still waits for the `minsegs` repetitions.
+
 ### `.db` output: the `.blk` sidecar, blocks written by the sieve threads (kept, format 3, 2026-10-02)
 
 Follows from the entry below: the single SQLite writer was the `.db` limit on

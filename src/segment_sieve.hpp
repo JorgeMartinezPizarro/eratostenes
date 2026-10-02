@@ -32,6 +32,14 @@
 // comment); -DERA_BIG_UNROLL=1 restores one per iteration for an A/B.
 // Sparse tier: process_big prefetches the segment byte of the entries this
 // many positions ahead in the bucket (see its comment); 0 turns it off.
+// Medium tier in predicated bands (erat_small.hpp::cross_off_medium_banded):
+// -DERA_MED_BANDS=1 for an A/B on CPUs where bad speculation dominates.
+#ifndef ERA_MED_BANDS
+#define ERA_MED_BANDS 0
+#endif
+constexpr double MEDIUM_BAND_FACTOR = 1.2;
+constexpr double MEDIUM_BAND_MAX_HITS = 8.0;
+
 #ifndef ERA_BIG_PF
 #define ERA_BIG_PF 16
 #endif
@@ -61,7 +69,7 @@ public:
     // has_sparse is true; this constructor just verifies that was done.
     SegmentSieve(uint64_t seg_k_width, uint64_t base_prime_max, const Presieve& presieve,
                  uint64_t sub_block_bytes, bool has_sparse, bool medium_nta, bool big2310)
-        : words_((seg_k_width + 63) / 64, 0),
+        : words_((seg_k_width + 63) / 64 + 1, 0), // +1 word: s[bytes_needed] is the banded medium tier's spare byte
           seg_k_width_(seg_k_width),
           sub_block_bytes_(sub_block_bytes),
           medium_nta_(medium_nta),
@@ -131,6 +139,7 @@ public:
         for (auto& v : m64_nxt_) v.clear();
         for (auto& v : medium_dyn_) v.clear();
         for (auto& v : medium_qd_) v.clear();
+        for (auto& v : medium_bands_) v.clear();
         std::fill(head_.begin(), head_.end(), nullptr);
         std::fill(tail_.begin(), tail_.end(), nullptr);
         // Blocks aren't freed, just handed back to the pool: every block
@@ -176,7 +185,7 @@ public:
         activate_dense(small_primes, next_small_idx_, small_, true, high_n, low_n, k_low);
         activate_med64(med64_primes, next_med64_idx_, m64_cur_.data(), high_n, low_n, k_low);
         activate_medium(medium_primes, next_medium_idx_, medium_dyn_, medium_qd_, medium_qp_base_, medium_qp_last_,
-                        high_n, low_n, k_low);
+                        medium_bands_, seg_k_width_ / 8, high_n, low_n, k_low);
 
         // Sparse tier: its primes are a run of the base-prime bitmap
         // (base_sieve.hpp's SparsePrimes), walked in increasing order from
@@ -443,15 +452,31 @@ private:
     //
     // qp goes in as a 1-byte delta from the class's previous prime (see
     // cross_off_medium); the first prime of a class sets qp_base.
+    //
+    // Bands (erat_small.hpp::MedBand, ERA_MED_BANDS): a prime's fixed
+    // iteration count is its expected hits per segment (6.857 * segment
+    // bytes / p: a 210-multiplier cycle is 7p bytes and 48 hits) times
+    // MEDIUM_BAND_FACTOR, plus one; above MEDIUM_BAND_MAX_HITS expected,
+    // h = 0 (plain loop). Consecutive primes with the same h share a band.
     __attribute__((noinline)) static void activate_medium(const std::vector<uint64_t>& primes, size_t& next,
                                  std::vector<uint32_t>* dyn, std::vector<uint8_t>* qds,
                                  uint32_t* qp_base, uint32_t* qp_last,
+                                 std::vector<erat::MedBand>* bands, uint64_t seg_bytes,
                                  uint64_t high_n, uint64_t low_n, uint64_t k_low) {
         while (next < primes.size()) {
             uint64_t p = primes[next];
             if (p * p >= high_n) break;
             uint64_t start_val = std::max(p * p, low_n);
             uint64_t pr = static_cast<uint64_t>(WHEEL_POS[p % WHEEL_MOD]);
+            if constexpr (ERA_MED_BANDS) {
+                uint8_t h = 0;
+                const double mean = 6.857 * static_cast<double>(seg_bytes) / static_cast<double>(p);
+                if (mean <= MEDIUM_BAND_MAX_HITS) h = static_cast<uint8_t>(std::min(250.0, mean * MEDIUM_BAND_FACTOR) + 1);
+                if (bands[pr].empty() || bands[pr].back().h != h) bands[pr].push_back({static_cast<uint32_t>(dyn[pr].size() + 1), h});
+                else bands[pr].back().end = static_cast<uint32_t>(dyn[pr].size() + 1);
+            } else {
+                (void)bands; (void)seg_bytes;
+            }
             uint64_t m0 = (start_val + p - 1) / p;
             uint64_t t = m0 / 210, sres = m0 % 210;
             uint32_t w = big::NEXT_W[sres];
@@ -524,6 +549,17 @@ private:
     // rebase is the segment's own width, like process_med64's.
     template <bool NTA>
     void run_medium(uint8_t* bytes, uint64_t bytes_needed) {
+        if constexpr (ERA_MED_BANDS) {
+            erat::cross_off_medium_banded<0, NTA>(bytes, bytes_needed, medium_dyn_[0].data(), medium_qd_[0].data(), medium_qp_base_[0], bytes_needed, medium_bands_[0].data(), medium_bands_[0].data() + medium_bands_[0].size());
+            erat::cross_off_medium_banded<1, NTA>(bytes, bytes_needed, medium_dyn_[1].data(), medium_qd_[1].data(), medium_qp_base_[1], bytes_needed, medium_bands_[1].data(), medium_bands_[1].data() + medium_bands_[1].size());
+            erat::cross_off_medium_banded<2, NTA>(bytes, bytes_needed, medium_dyn_[2].data(), medium_qd_[2].data(), medium_qp_base_[2], bytes_needed, medium_bands_[2].data(), medium_bands_[2].data() + medium_bands_[2].size());
+            erat::cross_off_medium_banded<3, NTA>(bytes, bytes_needed, medium_dyn_[3].data(), medium_qd_[3].data(), medium_qp_base_[3], bytes_needed, medium_bands_[3].data(), medium_bands_[3].data() + medium_bands_[3].size());
+            erat::cross_off_medium_banded<4, NTA>(bytes, bytes_needed, medium_dyn_[4].data(), medium_qd_[4].data(), medium_qp_base_[4], bytes_needed, medium_bands_[4].data(), medium_bands_[4].data() + medium_bands_[4].size());
+            erat::cross_off_medium_banded<5, NTA>(bytes, bytes_needed, medium_dyn_[5].data(), medium_qd_[5].data(), medium_qp_base_[5], bytes_needed, medium_bands_[5].data(), medium_bands_[5].data() + medium_bands_[5].size());
+            erat::cross_off_medium_banded<6, NTA>(bytes, bytes_needed, medium_dyn_[6].data(), medium_qd_[6].data(), medium_qp_base_[6], bytes_needed, medium_bands_[6].data(), medium_bands_[6].data() + medium_bands_[6].size());
+            erat::cross_off_medium_banded<7, NTA>(bytes, bytes_needed, medium_dyn_[7].data(), medium_qd_[7].data(), medium_qp_base_[7], bytes_needed, medium_bands_[7].data(), medium_bands_[7].data() + medium_bands_[7].size());
+            return;
+        }
         erat::cross_off_medium<0, NTA>(bytes, bytes_needed, medium_dyn_[0].data(), medium_dyn_[0].data() + medium_dyn_[0].size(), medium_qd_[0].data(), medium_qp_base_[0], bytes_needed);
         erat::cross_off_medium<1, NTA>(bytes, bytes_needed, medium_dyn_[1].data(), medium_dyn_[1].data() + medium_dyn_[1].size(), medium_qd_[1].data(), medium_qp_base_[1], bytes_needed);
         erat::cross_off_medium<2, NTA>(bytes, bytes_needed, medium_dyn_[2].data(), medium_dyn_[2].data() + medium_dyn_[2].size(), medium_qd_[2].data(), medium_qp_base_[2], bytes_needed);
@@ -812,6 +848,7 @@ private:
     // 1-byte deltas from the class's first prime (medium_qp_base_).
     std::vector<uint32_t> medium_dyn_[8];
     std::vector<uint8_t> medium_qd_[8];
+    std::vector<erat::MedBand> medium_bands_[8]; // ERA_MED_BANDS: fixed-iteration bands over each class's list
     uint32_t medium_qp_base_[8] = {};
     uint32_t medium_qp_last_[8] = {}; // activation only: qp of the class's last activated prime
 
