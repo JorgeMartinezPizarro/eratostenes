@@ -658,17 +658,31 @@ int main(int argc, char** argv) {
         opt.segment_width = seg_k_width * WHEEL_MOD / WHEEL_SIZE; // keep the startup log's "segment=" accurate
     }
 
-    // Ceiling on the automatic segment, primesieve's own rule (api.cpp's
-    // get_sieve_size: at most 16 x L1d, below the L2 per thread): on a CPU
-    // with a large L2 per core, the doubling above takes the segment to the
-    // whole L2, far past what pays. 2-vCPU Xeon Emerald Rapids (48 KiB L1d,
-    // 2 MiB L2), last 1e11 below N, -s 512 KiB instead of the doubled 2 MiB:
-    // -2.7% at 1e15, -7.4% at 1e16, -9.2% at 1e18. 16 x 48 KiB = 768 KiB
-    // leaves the dev PC and the i5-13500 (512 KiB) as they were; the power-
-    // of-2 fixup below takes 768 KiB down to 512 KiB. Auto width only.
+    // Smallest L2 share per hardware thread (sysfs), or --l2-bytes when given:
+    // the segment ceiling below and the sparse cutoff further down use it.
+    uint64_t min_l2_share = 0;
+    for (uint64_t s : topo.l2_share)
+        if (s && (min_l2_share == 0 || s < min_l2_share)) min_l2_share = s;
+
+    // Ceiling on the automatic segment: half the L2 per thread, so the
+    // segment leaves room for the bucket blocks and the med64/medium state,
+    // but never under 16 x L1d (primesieve's own ceiling, api.cpp's
+    // get_sieve_size) nor over 32 x L1d. Without it the doubling above takes
+    // the segment to the whole L2, far past what pays on a CPU with a large
+    // L2 per thread. Last 1e11 below N, A/B on the same host:
+    //   - 2-vCPU Xeon Emerald Rapids (48 KiB L1d, 2 MiB L2 per vCPU): 1 MiB
+    //     best everywhere; 16 x L1d alone (768/512 KiB) was +6% at 1e13 and
+    //     +3% at 1e14, and the uncapped 2 MiB +4..+9% from 1e15 to 1e18;
+    //   - 2-vCPU Xeon @ 2.80GHz (32 KiB L1d, 1 MiB L2): 512 KiB, -7% at 1e15
+    //     against the doubled 1 MiB.
+    // The dev PC and the i5-13500 (L2 shared by HT siblings, 256 KiB per
+    // thread) get 16 x 48 KiB = 768 KiB, above their 512 KiB: unchanged.
+    // The power-of-2 fixup below rounds a ceiling down. Auto width only.
     uint64_t seg_uncapped_k = 0; // startup log: the width before the ceiling, 0 if it didn't apply
     if (!opt.segment_width_set) {
-        const uint64_t cap_k = 16 * l1_max * 8; // bytes -> wheel indices (one bit each)
+        const uint64_t l2_thread = opt.l2_bytes_override ? opt.l2_bytes_override : min_l2_share;
+        const uint64_t cap_bytes = std::max(16 * l1_max, std::min(32 * l1_max, l2_thread / 2));
+        const uint64_t cap_k = cap_bytes * 8; // bytes -> wheel indices (one bit each)
         if (seg_k_width > cap_k) {
             seg_uncapped_k = seg_k_width;
             seg_k_width = cap_k;
@@ -702,9 +716,6 @@ int main(int argc, char** argv) {
     // hardware, not of the segment sizing); undetected -> 1/1.
     // --tune sparse=a/b overrides it (lowering only).
     // Evaluated after the power-of-2 fixup below, like med64_limit.
-    uint64_t min_l2_share = 0;
-    for (uint64_t s : topo.l2_share)
-        if (s && (min_l2_share == 0 || s < min_l2_share)) min_l2_share = s;
     constexpr uint64_t SPARSE_HALF_MIN_L2_SHARE = 512 * 1024;
     uint64_t sparse_num = 1;
     uint64_t sparse_den = (sparse_regime && min_l2_share >= SPARSE_HALF_MIN_L2_SHARE) ? 2 : 1;
@@ -923,7 +934,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "  sub-block: whole L1d (%u threads <= %u cores with the largest L1d)\n",
                      actual_threads, l1_big_cores);
     if (seg_uncapped_k)
-        std::fprintf(stderr, "  segment: %llu KiB instead of %llu KiB (at most 16 x L1d)\n",
+        std::fprintf(stderr, "  segment: %llu KiB instead of %llu KiB (ceiling: half the L2 per thread, 16-32 x L1d)\n",
                      static_cast<unsigned long long>(seg_k_width / 8 / 1024),
                      static_cast<unsigned long long>(seg_uncapped_k / 8 / 1024));
     if (opt.medium_nta >= 0) {
