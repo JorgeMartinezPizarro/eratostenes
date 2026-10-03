@@ -108,7 +108,7 @@ What this project is built from, one term each — follow the link for the conce
 
 ## Benchmark
 
-`./eratostenes N` (counts only) on an Intel Core i5-13500, [primesieve](https://github.com/kimwalisch/primesieve) alongside it for reference:
+`./eratostenes N` (counts only) on an Intel Core i5-13500 (Raptor Lake, 2023), [primesieve](https://github.com/kimwalisch/primesieve) alongside it for reference:
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|

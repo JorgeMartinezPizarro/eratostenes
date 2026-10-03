@@ -4,7 +4,7 @@
 
 ## Intel Core i5-13500 
 
-Intel Core i5-13500, [primesieve](https://github.com/kimwalisch/primesieve) alongside it for reference:
+Intel Core i5-13500 (Raptor Lake, 2023), [primesieve](https://github.com/kimwalisch/primesieve) alongside it for reference:
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
@@ -28,7 +28,7 @@ The last 1e11 numbers below N (`make benchmark-tails`):
 
 ## Intel Core i5-11400F
 
-6 cores / 12 threads, 48 KiB L1d and 512 KiB L2 per core, 12 MiB L3; WSL2 (Debian), primesieve 12.7, 12 threads.
+Intel Core i5-11400F (Rocket Lake, 2021), 6 cores / 12 threads, 48 KiB L1d and 512 KiB L2 per core, 12 MiB L3; WSL2 (Debian), primesieve 12.7, 12 threads.
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
@@ -49,7 +49,7 @@ The last 1e11 numbers below N (`make benchmark-tails`):
 
 ## Intel Xeon Emerald Rapids (claude.ai sandbox)
 
-Intel Xeon @ 2.10GHz (family 6 model 207), 2-vCPU KVM, 1 thread per core, 48 KiB L1d and 2 MiB L2 per core, L3 reported as 260 MiB (the whole host's, shared with other tenants: the same binary's 1e18 tail ranged from 28 s to 41 s across three hosts of this CPU on one day, primesieve's from 28 s to 37 s, so only ratios from one host are comparable); Ubuntu 24.04, g++ 13.3, primesieve 12.0, 2 threads.
+Intel Xeon @ 2.10GHz (Emerald Rapids, family 6 model 207, 2023), 2-vCPU KVM, 1 thread per core, 48 KiB L1d and 2 MiB L2 per core, L3 reported as 260 MiB (the whole host's, shared with other tenants: the same binary's 1e18 tail ranged from 28 s to 41 s across three hosts of this CPU on one day, primesieve's from 28 s to 37 s, so only ratios from one host are comparable); Ubuntu 24.04, g++ 13.3, primesieve 12.0, 2 threads.
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
@@ -69,7 +69,7 @@ Intel Xeon @ 2.10GHz (family 6 model 207), 2-vCPU KVM, 1 thread per core, 48 KiB
 
 ## Intel Xeon @ 2.80GHz (claude.ai sandbox)
 
-Intel Xeon @ 2.80GHz (model hidden by the hypervisor), 2-vCPU KVM, 1 thread per core, 32 KiB L1d and 1 MiB L2 per core, 33 MiB L3; primesieve 12.0, 2 threads.
+Intel Xeon @ 2.80GHz (model hidden by the hypervisor; 32 KiB L1d and 1 MiB L2 per core point at Cascade Lake, 2019), 2-vCPU KVM, 1 thread per core, 32 KiB L1d and 1 MiB L2 per core, 33 MiB L3; primesieve 12.0, 2 threads.
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
@@ -89,7 +89,7 @@ Intel Xeon @ 2.80GHz (model hidden by the hypervisor), 2-vCPU KVM, 1 thread per 
 
 ## Intel Core i5-1235U (laptop)
 
-Hybrid, 2 P-cores with HT + 8 E-cores, 12 threads, 8 GB RAM (the 1e18 tail needs ~0.4 GB per thread in each program and doesn't fit).
+Intel Core i5-1235U (Alder Lake, 2022), hybrid, 2 P-cores with HT + 8 E-cores, 12 threads, 8 GB RAM (the 1e18 tail needs ~0.4 GB per thread in each program and doesn't fit).
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
@@ -109,7 +109,7 @@ Hybrid, 2 P-cores with HT + 8 E-cores, 12 threads, 8 GB RAM (the 1e18 tail needs
 
 ## Intel Core i7-620M (2010 MacBook Pro)
 
-Intel Core i7 M620 @ 2.67GHz (Arrandale), 2 cores with HT, 4 threads, 32 KiB L1d and 256 KiB L2 per core, 4 MiB L3, 8 GB RAM; Ubuntu, primesieve 12.12, 4 threads. Tails: last 1e10 below N instead of the standard 1e11.
+Intel Core i7 M620 @ 2.67GHz (Arrandale, 2010), 2 cores with HT, 4 threads, 32 KiB L1d and 256 KiB L2 per core, 4 MiB L3, 8 GB RAM; Ubuntu, primesieve 12.12, 4 threads. Tails: last 1e10 below N instead of the standard 1e11.
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
@@ -126,3 +126,23 @@ Intel Core i7 M620 @ 2.67GHz (Arrandale), 2 cores with HT, 4 threads, 32 KiB L1d
 | 1e16 | 11.22s | 10.639s | 1.05x |
 | 1e17 | 14.19s | 13.477s | 1.05x |
 | 1e18 | 21.33s | 19.979s | 1.07x |
+
+## Intel Core i5-3470 (2012 desktop)
+
+Intel Core i5-3470 @ 3.20GHz (Ivy Bridge, 2012), 4 cores, 4 threads, 32 KiB L1d and 256 KiB L2 per core, 6 MiB L3, 8 GB RAM; Ubuntu (live USB), primesieve 12.12, 4 threads. Count table: single runs.
+
+| N | eratostenes | primesieve | ratio |
+|---|---:|---:|---:|
+| 1e10 | 0.50s | 0.440s | 1.14x |
+| 1e11 | 6.06s | 5.555s | 1.09x |
+| 1e12 | 77.06s | 70.241s | 1.10x |
+| 1e13 | 1054.75s | 1002.202s | 1.05x |
+
+| N | eratostenes | primesieve | ratio |
+|---|---:|---:|---:|
+| 1e13 | 11.62s | 11.552s | 1.01x |
+| 1e14 | 14.37s | 14.465s | 0.99x |
+| 1e15 | 17.55s | 17.545s | 1.00x |
+| 1e16 | 19.67s | 20.721s | 0.95x |
+| 1e17 | 22.39s | 24.284s | 0.92x |
+| 1e18 | 25.51s | 27.628s | 0.92x |
