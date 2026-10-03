@@ -2729,6 +2729,40 @@ mini rounds) is +6.5% at 1e13 (overlapping, the host's first-run drift) and
 three Emerald Rapids hosts and the i5-13500's P+E mix: the medium tier's
 loop-exit mispredict is cheaper than the predicated iterations everywhere
 measured. The flag stays as an A/B knob only.
+
+**The i5-3470 tower (Ivy Bridge, 2012: 4 cores, no SMT, 32 KiB L1d, 256 KiB
+L2, 6 MiB L3; Ubuntu from a live USB, primesieve 12.12), the same night --
+the first one-thread-per-core machine on the metal.** Its tables
+(BENCHMARK.md): counts 1.14 / 1.09 / 1.10 / 1.05x (1e10-1e13, single runs),
+tails 1.01 / 0.99 / 1.00 / 0.95 / 0.92 / 0.92x -- the inverse of every HT
+machine: behind in the dense regime, ahead from 1e16 up, on 256 KiB
+segments (the doubled 128 KiB base) with cutoff 1/1. The L3 gate's
+threshold, `--tune sparse` vs auto, 1e11 windows, x2:
+
+| threads (L3 each) | N | 1/2 | 1/4 |
+|---|---|---:|---:|
+| 4 (1.5 MiB) | 1e13 | -3.6% (overlap: a 12 -> 13.4 s drift between reps) | +1.1% |
+| 4 (1.5 MiB) | 1e14 | -5.1% (4/4) | -0.9% |
+| 2 (3 MiB) | 1e13 | -4.6% (4/4) | -3.5% (4/4) |
+| 2 (3 MiB) | 1e14 | -3.5% (4/4) | -1.0% |
+
+1/2 wins at both thread counts and both N; 1/4 is behind 1/2 everywhere,
+so the gate gets a 1/2 step from 1.5 MiB of L3 per active thread (inside
+the sparse regime only: below it the margin for 1/2 is the regime itself).
+Checked on the dev PC at 6 threads (2 MiB each), where the 1/2 step now
+fires: 1e14 tail -2.1% / -3.5% against 1/1 in two rounds (4/4 both), 1e15
+noise (+2.3%, overlapping). 12 threads (1 MiB) and the HT laptops stay at
+1/1, the i5-13500 at its L2-gated 1/2.
+
+The dense-regime loss on the tower (1.09-1.14x at 1e10-1e12) is not the
+instruction set: the dev PC built with `-march=ivybridge` (no AVX2, no BMI)
+against native is +1.7% at the 1e11 window and +2.4% at 1e12 (4/4), +0.0%
+at the 1e13 tail. The `make benchmark-mini` round there was unreadable
+(auto 1.14 s at the start, 1.34 s at the control: the live system drifts
+17% within three minutes), and `perf` is closed by perf_event_paranoid = 4
+on that kernel, so what the Ivy Bridge core does with the dense tiers --
+the segment sweep hinted at nothing, every width within the drift -- stays
+open until it can be counted.
 ### `run_parallel_chunks`: steals priced with the run's own measurements (kept, 2026-10-02)
 
 The fixed steal threshold (4 wheel indices per base prime) came from the dev

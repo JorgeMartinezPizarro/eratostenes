@@ -212,9 +212,9 @@ sparse, then extraction.
 - **Sparse** (`p >= seg_k_width`, at most ~1 hit per segment; once the tier
   exists anyway the cutoff drops to `seg_k_width / 2` from 512 KiB of L2 per
   thread and to `seg_k_width / 4` from 1 MiB, or from 4 MiB of L3 per
-  *active* thread (the L3 divided by the threads that run), the latter also
-  below the sparse regime when an octave of base primes would land in the
-  tier -- the bucket ring beats the medium tier's per-call cost for primes
+  *active* thread (the L3 divided by the threads that run; 1/2 from 1.5 MiB),
+  the 1/4 also below the sparse regime when an octave of base primes would
+  land in the tier -- the bucket ring beats the medium tier's per-call cost for primes
   with fewer than ~4 hits per segment whenever the active threads have the
   bandwidth for its traffic: -10% at 1 and 2 threads on a 12 MiB L3, +13% at
   12; `--tune sparse=a/b` overrides, the startup log prints the choice): the

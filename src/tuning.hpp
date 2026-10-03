@@ -329,7 +329,14 @@ inline SievePlan plan_sieve(Options& opt, const BasePrimes& base, uint64_t base_
     // Emerald Rapids at 1e13 (1.5 MiB segment, every prime <= isqrt(N) has
     // 4+ hits) 1/4 would only have shrunk the segment, +1.4%. See
     // docs/RESEARCH.md#one-thread-per-core-the-medium-tiers-per-call-cost-and-the-sparse-cutoff-by-active-threads-2026-10-03-evening.
+    // And 1/2 from 1.5 MiB: the i5-3470 (6 MiB L3, 256 KiB L2) at 4 threads
+    // (1.5 MiB each) and at 2 (3 MiB) had 1/2 at -3.5..-5.1% on the 1e13 and
+    // 1e14 tails, 1/4 at -1..-3.5% (4/4 on three of the four 1/2 pairs);
+    // the dev PC at 6 threads (2 MiB) -2.1% at 1e14 (4/4), noise at 1e15.
+    // Below the sparse regime the 1/2 step can't have an octave (the margin
+    // is the regime itself), so it only applies inside it.
     constexpr uint64_t SPARSE_QUARTER_MIN_L3_PER_THREAD = 4 * uint64_t{1024} * 1024;
+    constexpr uint64_t SPARSE_HALF_MIN_L3_PER_THREAD = 3 * uint64_t{512} * 1024;
     uint64_t l3_per_thread = 0;
     {
         const CpuCacheInfo l3 = detect_cpu_cache_info(0, 3);
@@ -340,6 +347,9 @@ inline SievePlan plan_sieve(Options& opt, const BasePrimes& base, uint64_t base_
     if (l3_per_thread >= SPARSE_QUARTER_MIN_L3_PER_THREAD &&
         (sparse_regime || base_limit >= 2 * (seg_k_width / 4))) {
         sparse_den = 4;
+        sparse_l3_gate = true;
+    } else if (l3_per_thread >= SPARSE_HALF_MIN_L3_PER_THREAD && sparse_regime && sparse_den < 2) {
+        sparse_den = 2;
         sparse_l3_gate = true;
     }
     const uint64_t sparse_den_auto = sparse_den; // startup log
@@ -530,7 +540,8 @@ inline void print_plan(const SievePlan& P, const Options& opt, unsigned actual_t
         std::fprintf(stderr, "  sparse cutoff: %llu/%llu of the segment%s\n",
                      static_cast<unsigned long long>(P.sparse_num), static_cast<unsigned long long>(P.sparse_den),
                      opt.tune_sparse.den ? " (--tune sparse)"
-                     : P.sparse_l3_gate ? " (L3 per active thread >= 4 MiB)"
+                     : P.sparse_l3_gate ? (P.sparse_den_auto == 4 ? " (L3 per active thread >= 4 MiB)"
+                                                                   : " (L3 per active thread >= 1.5 MiB)")
                      : P.sparse_den_auto == 4 ? " (L2 per thread >= 1 MiB)"
                      : P.sparse_den_auto == 2 ? " (L2 per thread >= 512 KiB)" : "");
     if (!cfg.big2310 && !P.wide.sparse.empty()) std::fprintf(stderr, "  sparse tier on the mod-210 wheel (--tune big2310=0)\n");
