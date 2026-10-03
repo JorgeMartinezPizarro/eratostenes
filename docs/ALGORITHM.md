@@ -209,7 +209,12 @@ sparse, then extraction.
   of L2 so the segment stays there. The unrolled loop, a 4-way interleave,
   per-hit prefetching and the 64-list layout were all measured slower here --
   see [RESEARCH.md](RESEARCH.md#erat_smallhpp).
-- **Sparse** (`p >= seg_k_width`, at most ~1 hit per segment): the only tier where
+- **Sparse** (`p >= seg_k_width`, at most ~1 hit per segment; once the tier
+  exists anyway the cutoff drops to `seg_k_width / 2` from 512 KiB of L2 per
+  thread and to `seg_k_width / 4` from 1 MiB -- the bucket ring beats the
+  medium tier's per-segment cost for primes with a few hits per segment
+  when the L2 has room for the extra blocks; `--tune sparse=a/b` overrides,
+  the startup log prints the choice): the only tier where
   a *bucket* earns its keep -- most segments have nothing to do for most of these
   primes, so each one is filed into the ring slot of the segment its next hit
   falls in, and a segment only touches the primes due in it (`process_big`,

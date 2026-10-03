@@ -2376,6 +2376,42 @@ passes each of auto / `-s 15728640` (512 KiB) / `-s 31457280` (1 MiB)):
   512 KiB clearly worst on both; the 1e13 tail went from 0.97x to 0.91x /
   1.00x. A 32 x L1d cap that gave 1 MiB here (21 x L1d) would take the Xeon
   2.80 back to 672 KiB, so the cap stays unless a longer ABAB settles it.
+  Settled the next round on the clean host: 1.5 MiB 12.06, 11.73, 12.05 s vs
+  1 MiB 12.45, 12.54, 12.64 s (-5%, 3/3); the noisy host spread 14.4-16.8 s
+  on the same configuration and said nothing.
+
+### Sparse cutoff 1/4 from 1 MiB of L2 per thread (kept, 2026-10-03)
+
+Same operators, e379255, last 1e11 below 1e14 and 1e15, `real`, two passes
+of auto (cutoff 1/2) / `-s 31457280` (1 MiB segment, i.e. without the
+ceiling on the Xeon 2.80; on the Emerald Rapids auto already is 1 MiB there)
+/ `--tune sparse=1/4`:
+
+| host | tail | auto | 1 MiB | sparse 1/4 |
+|---|---|---:|---:|---:|
+| Emerald Rapids, clean | 1e14 | 15.44, 15.54 | 15.26, 15.19 | 14.51, 14.84 |
+| | 1e15 | 17.61, 17.60 | 17.53, 17.68 | 16.80, 16.72 |
+| Xeon 2.80 | 1e14 | 18.55, 18.09 | 18.08, 17.50 | 17.96, 17.87 |
+| | 1e15 | 21.74, 22.09 | 20.56, 21.23 | 20.72, 21.19 |
+| Emerald Rapids, noisy | 1e14 | 17.95, 19.93 | 18.00, 18.69 | 17.37, 17.85 |
+| | 1e15 | 21.16, 21.54 | 20.97, 21.35 | 23.70, 21.05 |
+
+1/4 is -5% on the clean Emerald Rapids at both tails (4/4) and -2..-4% on the
+Xeon 2.80; the noisy host agrees at 1e14 and says nothing at 1e15. These are
+2-vCPU machines with 1 MiB and 2 MiB of L2 per vCPU and no SMT. The i5-13500
+(640 KiB per thread) had 1/4 behind 1/2 at both N (-1.1% vs -6.0% at 1e14,
++6.2% vs +0.2% at 1e15, P-cores, cycles:u), and the dev PC at `-t 2` had 1/2
+and 1/4 tied (-6.7% / -7.0% against 1/1) -- the bucket ring's extra blocks
+want room in L2. So the per-thread-L2 gate gains a second step: 1/2 from
+512 KiB (unchanged), 1/4 from 1 MiB. Nothing changes on the dev PC (256 KiB),
+the i5-13500 (640/512 KiB) or the i5-1235U (640/512 KiB); `--tune sparse`
+still overrides. The startup log prints the cutoff and why.
+
+Also in that round, the Xeon 2.80 with the 1 MiB segment in the sparse
+regime (the ceiling lifted): -2.5% at 1e14, -4.6% at 1e15 -- the opposite
+sign to the -7% at 1e15 that fitted the ceiling's `L2 / 2` term on another
+host of this CPU (2026-10-02). Host noise either way; the ceiling stays
+until 1/4 and the segment are measured together.
 
 ### `run_parallel_chunks`: steals priced with the run's own measurements (kept, 2026-10-02)
 

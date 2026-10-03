@@ -972,13 +972,22 @@ int main(int argc, char** argv) {
     // docs/RESEARCH.md#i5-13500-server-gap-vs-primesieve-medium-tier-call-count-sparse-cutoff-12-gated-on-per-thread-l2-2026-09-28 --
     // and the three earlier `seg_k_width/4` reverts at
     // docs/RESEARCH.md#eratbig-style-sparse-tier-forcing-a-power-of-2-segment-width-and-sparse_limit--seg_k_width4-all-attempts-reverted.
+    // From 1 MiB of L2 per thread the optimum moves on to 1/4: on the
+    // 2-vCPU sandboxes (1 MiB and 2 MiB per vCPU, no SMT) 1/4 is -3..-5%
+    // against 1/2 at the 1e14 and 1e15 tails, while the i5-13500 (640KiB)
+    // had 1/4 behind 1/2 (-1.1% vs -6.0% at 1e14, +6.2% vs +0.2% at 1e15).
+    // See docs/RESEARCH.md#sparse-cutoff-14-from-1-mib-of-l2-per-thread-kept-2026-10-03.
     // Detected from sysfs regardless of --l2-bytes (it's a property of the
     // hardware, not of the segment sizing); undetected -> 1/1.
     // --tune sparse=a/b overrides it (lowering only).
     // Evaluated after the power-of-2 fixup below, like med64_limit.
     constexpr uint64_t SPARSE_HALF_MIN_L2_SHARE = 512 * 1024;
+    constexpr uint64_t SPARSE_QUARTER_MIN_L2_SHARE = 1024 * 1024;
     uint64_t sparse_num = 1;
-    uint64_t sparse_den = (sparse_regime && min_l2_share >= SPARSE_HALF_MIN_L2_SHARE) ? 2 : 1;
+    uint64_t sparse_den = !sparse_regime ? 1
+                        : min_l2_share >= SPARSE_QUARTER_MIN_L2_SHARE ? 4
+                        : min_l2_share >= SPARSE_HALF_MIN_L2_SHARE ? 2 : 1;
+    const uint64_t sparse_den_auto = sparse_den; // startup log
     if (opt.tune_sparse.den) { sparse_num = opt.tune_sparse.num; sparse_den = opt.tune_sparse.den; }
     // Lowering only: dense-tier state is sized for p < seg_k_width (see
     // SegmentSieve's constructor checks).
@@ -1204,6 +1213,12 @@ int main(int argc, char** argv) {
                      medium_primes.size() >= cfg.medium_nta_min_primes ? "yes" : "no",
                      format_thousands(cfg.medium_nta_min_primes).c_str());
     }
+    if (!sparse_primes.empty())
+        std::fprintf(stderr, "  sparse cutoff: %llu/%llu of the segment%s\n",
+                     static_cast<unsigned long long>(sparse_num), static_cast<unsigned long long>(sparse_den),
+                     opt.tune_sparse.den ? " (--tune sparse)"
+                     : sparse_den_auto == 4 ? " (L2 per thread >= 1 MiB)"
+                     : sparse_den_auto == 2 ? " (L2 per thread >= 512 KiB)" : "");
     if (!cfg.big2310 && !sparse_primes.empty()) std::fprintf(stderr, "  sparse tier on the mod-210 wheel (--tune big2310=0)\n");
     if (narrow_early) {
         unsigned narrow_chunks = 0;
