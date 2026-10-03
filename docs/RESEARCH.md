@@ -2336,6 +2336,45 @@ fit `max(16 x L1d, min(32 x L1d, L2 per thread / 2))`: 1 MiB on the first,
 under HT) get 768 KiB, above their 512 KiB, unchanged. Fitted on two VMs; the
 startup log says when it applies.
 
+**2026-10-03, the `L2 / 2` term dropped (three operators, 691509d, `-t 2`,
+last 1e11 below N, `real`, two passes).** auto / `-s 31457280` (1 MiB) /
+`-s 47185920` (1.5 MiB):
+
+| host, width | 1e14 | 1e15 | 1e16 | 1e17 | 1e18 |
+|---|---|---|---|---|---|
+| Xeon 2.80, auto (512 KiB) | 19.04, 18.06 | 21.80, 21.36 | 24.99, 24.99 | 29.54, 29.30 | 34.52, 34.94 |
+| Xeon 2.80, 1 MiB | 17.89, 17.52 | 21.46, 21.40 | 24.00, 24.61 | 28.48, 29.17 | 33.68, 33.35 |
+| Emerald Rapids clean, auto (1 MiB) | 15.49, 15.05 | 17.43, 17.55 | 20.03, 20.03 | 23.08, 23.74 | 26.66, 26.69 |
+| Emerald Rapids clean, `-s 31457280` | 15.19, 15.00 | 17.67, 17.88 | 20.47, 20.98 | 23.13, 23.60 | 27.06, 27.01 |
+| Emerald Rapids noisy, auto (1 MiB) | 14.75, 14.84 | 17.96, 17.32 | 20.73, 19.71 | 24.55, 23.35 | 29.19, 29.45 |
+| Emerald Rapids noisy, `-s 31457280` | 14.88, 14.24 | 16.97, 17.01 | 21.22, 20.21 | 23.95, 25.25 | 29.21, 28.57 |
+
+Xeon 2.80, means: 1 MiB -4.6% / -0.7% / -2.8% / -2.1% / -3.5%, 9 of 10
+passes under both auto passes. Third round on this CPU with the same sign
+(e379255 with cutoff 1/2: -2.5% / -4.6%; 691509d with 1/4: -3.2% / -3.8%,
+both 1e14 / 1e15). On the Emerald Rapids `-s 31457280` is the auto width,
+so those pairs are the host's noise floor: within 3%, both signs.
+
+`-s 47185920` never ran in the sparse regime: the power-of-2 fixup (main.cpp,
+after the ceiling) rounds an explicit `-s` down as well, 1.5 MiB -> 1 MiB,
+and said nothing (the startup log now reports it). The 1.5 MiB width only
+held at 1e14, where it has no sparse tier at all (isqrt(1e14) = 1e7 below
+its seg_k_width of 12.6M: 582,554 medium primes, 0 sparse) and cost +8%
+(clean host), +17% (noisy), +5% (Xeon 2.80) -- the medium tier down to one
+hit per segment, not a segment-size result. So on the Emerald Rapids the
+ceiling's `L2 / 2` (1 MiB) and `L2` (1.5 MiB, rounded to 1 MiB) were never
+distinguishable, and on the Xeon 2.80 `L2 / 2` was wrong. The ceiling is
+now `max(16 x L1d, min(32 x L1d, L2 per thread))`, the fixup after it: Xeon
+2.80 1 MiB, Emerald Rapids 1 MiB, the HT machines (768 KiB floor above
+their 512 KiB) unchanged.
+
+Same round, the SMT question on the Xeon 2.80 (the one VM whose dense tiers
+lose, 1.02-1.04x at the 1e13 tail): 1e13 tail, `-t 1` -> `-t 2`, eratostenes
+28.93 -> 14.21 s (2.04x), primesieve 27.76 -> 14.26 s (1.95x); the Emerald
+Rapids hosts 1.92x / 1.88x and 1.98x / 1.97x. Two real cores on all three
+VMs, so that loss is not a shared physical core. At `-t 1` the ratios are
+1.04x (Xeon 2.80), 1.02x and 0.95x (Emerald Rapids): the same as at `-t 2`.
+
 ### Whole-L2 base segment: one thread per core, no sparse tier (kept, 2026-10-03)
 
 The base segment is half the L2 share so the segment, the tiers' state and a
@@ -2412,6 +2451,36 @@ regime (the ceiling lifted): -2.5% at 1e14, -4.6% at 1e15 -- the opposite
 sign to the -7% at 1e15 that fitted the ceiling's `L2 / 2` term on another
 host of this CPU (2026-10-02). Host noise either way; the ceiling stays
 until 1/4 and the segment are measured together.
+
+Confirmation round on 691509d (1/4 now the default), same three operators,
+two passes of auto (1/4) / `--tune sparse=1/2` / `-s 31457280` (1 MiB), last
+1e11 below 1e14 and 1e15, `real`:
+
+| host | tail | auto (1/4) | sparse 1/2 | 1 MiB |
+|---|---|---:|---:|---:|
+| Emerald Rapids, clean | 1e14 | 14.72, 15.02 | 15.73, 14.91 | 14.31, 14.60 |
+| | 1e15 | 16.71, 17.22 | 17.70, 17.61 | 17.28, 16.88 |
+| Xeon 2.80 | 1e14 | 17.72, 18.04 | 18.47, 18.17 | 17.18, 17.42 |
+| | 1e15 | 21.37, 21.03 | 21.86, 21.61 | 20.43, 20.37 |
+| Emerald Rapids, noisy | 1e14 | 16.93, 17.62 | 17.92, 17.49 | 17.47, 16.93 |
+| | 1e15 | 19.80, 19.73 | 20.83, 19.61 | 20.14, 19.76 |
+
+1/2 is +3..+4% (means) on the clean Emerald Rapids and +2.5% on the Xeon
+2.80; the noisy host has it +2.4% with one pass each way. The 1/4 default
+holds. On the Emerald Rapids the 1 MiB column repeats auto (same segment)
+and lands within 1% of it, which is the host noise floor for this test.
+On the Xeon 2.80 the 1 MiB segment on top of 1/4 is -3.2% at 1e14 and
+-3.8% at 1e15 (4/4 passes under every auto pass), the same sign as the
+e379255 round (-2.5% / -4.6% with 1/2): the ceiling's `L2 / 2` term now
+has two rounds against it and one for it (the -7% at 1e15 of 2026-10-02)
+on this CPU. Tails on 691509d: clean Emerald Rapids 0.94 / 0.95 / 0.96 /
+0.90 / 0.99 / 0.96 (first round with all six under 1.00x on this machine;
+BENCHMARK.md updated), Xeon 2.80 1.04 / 1.12 / 1.05 / 1.12 / 1.16 / 1.02,
+the same as the e379255 row within host noise (BENCHMARK.md updated to this run all the same, so both VM tables sit on 691509d). Next on the Xeon
+2.80: auto vs `-s 31457280` at 1e16-1e18 (the uncapped 2 MiB lost there on
+the Emerald Rapids); if 1 MiB holds, lift the ceiling to the whole L2 share
+when L2 <= 32 x L1d, which leaves the Emerald Rapids (2 MiB > 1.5 MiB) at
+its measured 1 MiB.
 
 ### `run_parallel_chunks`: steals priced with the run's own measurements (kept, 2026-10-02)
 

@@ -285,11 +285,13 @@ overrides for when detection can't be trusted) rather than a fixed guess:
   then, chunks entirely below narrow² (narrow = the width before doubling)
   can't have a sparse prime active yet, so they keep the narrow segment and
   the tier split that goes with it (-1.8% at 1e13). In the sparse regime the
-  automatic width has a **ceiling**: half the L2 per thread, but never under
-  16 x L1d (primesieve's own cap) nor over 32 x L1d. On a CPU with a large L2
-  per thread (2 MiB on a 2-vCPU Xeon) the doubling otherwise fills the whole
-  L2, 4-9% slower on the top-of-range tails; the dev PC and the i5-13500
-  (256 KiB per thread under HT) are below the ceiling and unchanged. Below the
+  automatic width has a **ceiling**: the L2 per thread, but never under 16 x
+  L1d (primesieve's own cap) nor over 32 x L1d, rounded down to a power of 2
+  (the bucket tier's requirement). On a CPU with a large L2 per thread (2 MiB
+  on a 2-vCPU Xeon) the doubling otherwise fills the whole L2, 4-9% slower on
+  the top-of-range tails, and the ceiling lands on 1 MiB; on a 1 MiB-L2 Xeon
+  the ceiling is the whole L2, 2-5% faster than half of it; the dev PC and
+  the i5-13500 (256 KiB per thread under HT) are below it and unchanged. Below the
   sparse regime, when each thread has a core to itself (no SMT, or `-t` at
   or below the core count), the base segment is the **whole** L2 share (within
   32 x L1d) rather than half: the half is the hyperthread sibling's share, and

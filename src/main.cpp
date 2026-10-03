@@ -924,24 +924,28 @@ int main(int argc, char** argv) {
         }
     }
 
-    // Ceiling on the automatic segment: half the L2 per thread, so the
-    // segment leaves room for the bucket blocks and the med64/medium state,
-    // but never under 16 x L1d (primesieve's own ceiling, api.cpp's
-    // get_sieve_size) nor over 32 x L1d. Without it the doubling above takes
-    // the segment to the whole L2, far past what pays on a CPU with a large
+    // Ceiling on the automatic segment: the L2 per thread, within 16 x L1d
+    // (primesieve's own ceiling, api.cpp's get_sieve_size) and 32 x L1d,
+    // and the power-of-2 fixup below rounds it down. Without it the
+    // doubling above takes the segment past what pays on a CPU with a large
     // L2 per thread. Last 1e11 below N, A/B on the same host:
     //   - 2-vCPU Xeon Emerald Rapids (48 KiB L1d, 2 MiB L2 per vCPU): 1 MiB
     //     best everywhere; 16 x L1d alone (768/512 KiB) was +6% at 1e13 and
-    //     +3% at 1e14, and the uncapped 2 MiB +4..+9% from 1e15 to 1e18;
-    //   - 2-vCPU Xeon @ 2.80GHz (32 KiB L1d, 1 MiB L2): 512 KiB, -7% at 1e15
-    //     against the doubled 1 MiB.
+    //     +3% at 1e14, and the uncapped 2 MiB +4..+9% from 1e15 to 1e18.
+    //     1.5 MiB (32 x L1d) is not a width the sparse tier can take, so
+    //     the ceiling lands on 1 MiB whether its term is L2 or L2 / 2;
+    //   - 2-vCPU Xeon @ 2.80GHz (32 KiB L1d, 1 MiB L2): 1 MiB (the whole
+    //     L2) over 512 KiB (L2 / 2) in three rounds, -2..-5% at every tail
+    //     from 1e14 to 1e18 (2026-10-03). The -7% at 1e15 for 512 KiB that
+    //     fitted an L2 / 2 term (2026-10-02) was one host, one round.
     // The dev PC and the i5-13500 (L2 shared by HT siblings, 256 KiB per
     // thread) get 16 x 48 KiB = 768 KiB, above their 512 KiB: unchanged.
-    // The power-of-2 fixup below rounds a ceiling down. Auto width only.
+    // Auto width only. See
+    // docs/RESEARCH.md#segment-ceiling-half-the-l2-per-thread-within-16-32-x-l1d-kept-2026-10-02.
     uint64_t seg_uncapped_k = 0; // startup log: the width before the ceiling, 0 if it didn't apply
     if (!opt.segment_width_set && sparse_regime) {
         const uint64_t l2_thread = opt.l2_bytes_override ? opt.l2_bytes_override : min_l2_share;
-        const uint64_t cap_bytes = std::max(16 * l1_max, std::min(32 * l1_max, l2_thread / 2));
+        const uint64_t cap_bytes = std::max(16 * l1_max, std::min(32 * l1_max, l2_thread));
         const uint64_t cap_k = cap_bytes * 8; // bytes -> wheel indices (one bit each)
         if (seg_k_width > cap_k) {
             seg_uncapped_k = seg_k_width;
@@ -995,10 +999,12 @@ int main(int argc, char** argv) {
     // Power-of-2 fixup whenever some prime may end up sparse. With the
     // default cutoff this is base_limit >= seg_k_width; a lowered cutoff
     // (NUM < DEN) can make primes sparse below that, so take the smaller.
+    uint64_t seg_unrounded_k = 0; // startup log: an explicit -s the fixup rounded down, 0 otherwise
     if (base_limit >= seg_k_width || base_limit >= seg_k_width * sparse_num / sparse_den) {
         uint64_t sb = seg_k_width / 8, p2 = 1;
         while (p2 * 2 <= sb) p2 *= 2;
         if (p2 != sb) {
+            if (opt.segment_width_set) seg_unrounded_k = seg_k_width;
             seg_k_width = std::max<uint64_t>(64, p2 * 8);
             opt.segment_width = seg_k_width * WHEEL_MOD / WHEEL_SIZE; // keep the startup log's "segment=" accurate
         }
@@ -1202,9 +1208,13 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "  segment: whole L2 per thread (%u threads <= %u cores, no sparse tier)\n",
                      opt.threads, l1_big_cores);
     if (seg_uncapped_k)
-        std::fprintf(stderr, "  segment: %llu KiB instead of %llu KiB (ceiling: half the L2 per thread, 16-32 x L1d)\n",
+        std::fprintf(stderr, "  segment: %llu KiB instead of %llu KiB (ceiling: the L2 per thread, 16-32 x L1d)\n",
                      static_cast<unsigned long long>(seg_k_width / 8 / 1024),
                      static_cast<unsigned long long>(seg_uncapped_k / 8 / 1024));
+    if (seg_unrounded_k)
+        std::fprintf(stderr, "  segment: %llu KiB instead of the %llu KiB of -s (a power of 2 for the sparse tier)\n",
+                     static_cast<unsigned long long>(seg_k_width / 8 / 1024),
+                     static_cast<unsigned long long>(seg_unrounded_k / 8 / 1024));
     if (opt.medium_nta >= 0) {
         std::fprintf(stderr, "  medium-tier prefetchnta: %s (forced, --tune medium_nta=%d)\n",
                      opt.medium_nta ? "yes" : "no", opt.medium_nta);
