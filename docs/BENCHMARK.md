@@ -19,12 +19,12 @@ The last 1e11 numbers below N (`make benchmark-tails`):
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
-| 1e13 | 2.84s | 3.428s | 0.83x |
-| 1e14 | 3.75s | 4.002s | 0.94x |
-| 1e15 | 4.36s | 4.463s | 0.98x |
-| 1e16 | 5.16s | 5.161s | 1.00x |
-| 1e17 | 6.00s | 6.236s | 0.96x |
-| 1e18 | 7.76s | 7.868s | 0.99x |
+| 1e13 | 2.53s | 2.872s | 0.88x |
+| 1e14 | 3.68s | 3.997s | 0.92x |
+| 1e15 | 4.51s | 4.620s | 0.98x |
+| 1e16 | 5.08s | 5.307s | 0.96x |
+| 1e17 | 6.03s | 6.123s | 0.98x |
+| 1e18 | 7.74s | 7.972s | 0.97x |
 
 ## Intel Core i5-11400F
 
@@ -106,15 +106,17 @@ Hybrid, 2 P-cores with HT + 8 E-cores, 12 threads, 8 GB RAM (the 1e18 tail needs
 | 1e16 | 14.76s | 16.571s | 0.89x |
 | 1e17 | 17.88s | 21.703s | 0.82x |
 | 1e18 | N/A | N/A | N/A |
+
 ## Intel Core i7-620M (2010 MacBook Pro)
 
-Intel Core i7 M620 @ 2.67GHz (Arrandale, 2010 MacBook Pro), 2 cores with HT, 4 threads, 32 KiB L1d and 256 KiB L2 per core, 4 MiB L3, 8 GB; Ubuntu on the metal (no container: Docker Desktop's VM reports a fake cache topology there, see RESEARCH.md), primesieve 12.12, 4 threads. The tails use a 1e10 window (`WIDTH=1e10`), a tenth of the other machines', so a run stays under half a minute; ratios are comparable within this table, not with the 1e11 tables (the startup both programs pay is a larger share of a 1e10 window from 1e16 up). Count table: single runs of each program (`eratostenes N -t 4`, `primesieve N -c -t 4`), stopped at 1e12 (a full 1e13 is ~1 h 40 min per program here).
+Intel Core i7 M620 @ 2.67GHz (Arrandale), 2 cores with HT, 4 threads, 32 KiB L1d and 256 KiB L2 per core, 4 MiB L3, 8 GB RAM; Ubuntu, primesieve 12.12, 4 threads. Tails: last 1e10 below N instead of the standard 1e11.
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
 | 1e10 | 3.25s | 4.046s | 0.80x |
 | 1e11 | 39.49s | 48.221s | 0.82x |
 | 1e12 | 496.56s | 561.887s | 0.88x |
+| 1e13 | N/A | N/A | N/A |
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
