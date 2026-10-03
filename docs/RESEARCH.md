@@ -2700,6 +2700,35 @@ handles it). To be measured on the 2-vCPU Xeons at 1e13 (`--tune
 sparse=1/4` vs auto: the below-the-regime half of the rule), on the Ivy
 Bridge tower at 4 and 2 threads, and on the i5-13500 (where it must stay
 at 1/2) before the rule goes in.
+
+**Kept (same evening): the L3-per-active-thread gate.** tuning.hpp: 1/4
+when the L3 (sysfs, cpu0's) divided by min(threads, its sharers) is at
+least 4 MiB, on top of the per-thread-L2 gate; below the sparse regime only
+when an octave of base primes lands in the sparse tier (base_limit >= 2 x
+seg_k_width / 4), which is what the Emerald Rapids at 1e13 lacked. The new
+automatic against the old behaviour (`--tune sparse=1/1`), dev PC, 1e10
+windows, x2: `-t 1` 1e13 -10.0%, `-t 2` 1e13 -10.6%, 1e14 -9.2%, all 4/4;
+`-t 2` 1e12 identical configurations, +4.2% "every B above" -- the noise
+floor of a 1 s run. Unchanged where the gate is off: `-t 6` (2 MiB per
+thread), `-t 12`, the i5-13500 (1.2 MiB), the HT laptops (1 MiB), and the
+2-vCPU Xeons at 1e13 (the octave margin; at 1e14+ they already had 1/4 from
+the L2 gate). The operators' round on three Emerald Rapids hosts the same
+evening: `--tune sparse=1/4` at 1e13 -6.3% / +1.4% / -1.8% (the segment
+shrinking 1.5 -> 1 MiB by the fixup, nothing else: every prime <= isqrt(N)
+has 4+ hits in a 1.5 MiB segment), and `-DERA_MED_BANDS=1` +4..+13% at
+1e13-1e15 on all three, +8..+10% with the cutoff raised to 1/2: the medium
+bands are refuted on Emerald Rapids as on the i5-11400F. The i5-13500 at 20
+threads with 1/4 at 1e13: +3.2% (3/3), the gate's lower end.
+
+The i5-13500 at 20 threads, same evening, `make docker-benchmark-ab` x3,
+1e11 windows: the 128 KiB segment (`-s 3932160`, the -4% hint of the two
+mini rounds) is +6.5% at 1e13 (overlapping, the host's first-run drift) and
++5.4% at 1e14, every B run above every A: closed, the 512 KiB auto stays.
+`-DERA_MED_BANDS=1` at 1e14: +9.0%, each B run above its A pair (3.66 vs
+3.11, 3.93 vs 3.75, 4.02 vs 3.79 s). The bands are refuted on the i5-11400F,
+three Emerald Rapids hosts and the i5-13500's P+E mix: the medium tier's
+loop-exit mispredict is cheaper than the predicated iterations everywhere
+measured. The flag stays as an A/B knob only.
 ### `run_parallel_chunks`: steals priced with the run's own measurements (kept, 2026-10-02)
 
 The fixed steal threshold (4 wheel indices per base prime) came from the dev

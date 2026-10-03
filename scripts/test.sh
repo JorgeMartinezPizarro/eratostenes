@@ -356,6 +356,18 @@ expect_log "-s respetado sin tier sparse"     "segment=47185920,"               
 expect_log "--tune sparse en el log"          "sparse cutoff: 1/2 of the segment \(--tune sparse\)" $T15 --tune sparse=1/2
 expect_log "--tune medium_nta forzado"        "medium-tier prefetchnta: no \(forced" $T13 --tune medium_nta=0
 
+# The L3 gate (tuning.hpp): 1/4 from 4 MiB of L3 per active thread, also
+# below the sparse regime when an octave of base primes lands in the sparse
+# tier. Needs the machine's own L3 (sysfs), so only where it is >= 4 MiB:
+# at -t 1 the whole L3 is one thread's.
+L3_KB=$(cat /sys/devices/system/cpu/cpu0/cache/index3/size 2>/dev/null | tr -d 'K')
+if [ -n "$L3_KB" ] && [ "$(cat /sys/devices/system/cpu/cpu0/cache/index3/level 2>/dev/null)" = "3" ] && [ "$L3_KB" -ge 4096 ]; then
+    expect_log "corte 1/4 por L3 por hilo activo (-t 1)" "sparse cutoff: 1/4 of the segment \(L3 per active thread >= 4 MiB\)" 10000000000000 --start 9999999000000 -t 1
+    expect_log "sin tier sparse a 1e12 (-t 1, margen de una octava)" "^Starting 1 threads.* 0 sparse" 1000000000000 --start 999999000000 -t 1
+else
+    echo "SKIP corte 1/4 por L3 por hilo activo (L3 de cpu0 no detectado o < 4 MiB)"
+fi
+
 # --- 7: un tramo del regimen sparse real (la ultima 1e8 bajo 1e15, 1.8M
 # primos base, el corte automatico de esta maquina) contra primecount, y los
 # errores que nth_prime debe detectar ---

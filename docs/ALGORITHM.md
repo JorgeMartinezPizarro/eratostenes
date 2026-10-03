@@ -211,10 +211,14 @@ sparse, then extraction.
   see [RESEARCH.md](RESEARCH.md#erat_smallhpp).
 - **Sparse** (`p >= seg_k_width`, at most ~1 hit per segment; once the tier
   exists anyway the cutoff drops to `seg_k_width / 2` from 512 KiB of L2 per
-  thread and to `seg_k_width / 4` from 1 MiB -- the bucket ring beats the
-  medium tier's per-segment cost for primes with a few hits per segment
-  when the L2 has room for the extra blocks; `--tune sparse=a/b` overrides,
-  the startup log prints the choice): the only tier where
+  thread and to `seg_k_width / 4` from 1 MiB, or from 4 MiB of L3 per
+  *active* thread (the L3 divided by the threads that run), the latter also
+  below the sparse regime when an octave of base primes would land in the
+  tier -- the bucket ring beats the medium tier's per-call cost for primes
+  with fewer than ~4 hits per segment whenever the active threads have the
+  bandwidth for its traffic: -10% at 1 and 2 threads on a 12 MiB L3, +13% at
+  12; `--tune sparse=a/b` overrides, the startup log prints the choice): the
+  only tier where
   a *bucket* earns its keep -- most segments have nothing to do for most of these
   primes, so each one is filed into the ring slot of the segment its next hit
   falls in, and a segment only touches the primes due in it (`process_big`,
