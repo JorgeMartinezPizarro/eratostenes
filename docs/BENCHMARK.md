@@ -108,7 +108,13 @@ Hybrid, 2 P-cores with HT + 8 E-cores, 12 threads, 8 GB RAM (the 1e18 tail needs
 | 1e18 | N/A | N/A | N/A |
 ## Intel Core i7-620M (2010 MacBook Pro)
 
-Intel Core i7 M620 @ 2.67GHz (Arrandale, 2010 MacBook Pro), 2 cores with HT, 4 threads, 32 KiB L1d and 256 KiB L2 per core, 4 MiB L3, 8 GB; Ubuntu on the metal (no container: Docker Desktop's VM reports a fake cache topology there, see RESEARCH.md), primesieve 12.12, 4 threads. The tails use a 1e10 window (`WIDTH=1e10`), a tenth of the other machines', so a run stays under half a minute; ratios are comparable within this table, not with the 1e11 tables (the startup both programs pay is a larger share of a 1e10 window from 1e16 up). Count table pending (`make benchmark`).
+Intel Core i7 M620 @ 2.67GHz (Arrandale, 2010 MacBook Pro), 2 cores with HT, 4 threads, 32 KiB L1d and 256 KiB L2 per core, 4 MiB L3, 8 GB; Ubuntu on the metal (no container: Docker Desktop's VM reports a fake cache topology there, see RESEARCH.md), primesieve 12.12, 4 threads. The tails use a 1e10 window (`WIDTH=1e10`), a tenth of the other machines', so a run stays under half a minute; ratios are comparable within this table, not with the 1e11 tables (the startup both programs pay is a larger share of a 1e10 window from 1e16 up). Count table: single runs of each program (`eratostenes N -t 4`, `primesieve N -c -t 4`), stopped at 1e12 (a full 1e13 is ~1 h 40 min per program here).
+
+| N | eratostenes | primesieve | ratio |
+|---|---:|---:|---:|
+| 1e10 | 3.25s | 4.046s | 0.80x |
+| 1e11 | 39.49s | 48.221s | 0.82x |
+| 1e12 | 496.56s | 561.887s | 0.88x |
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
