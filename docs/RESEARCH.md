@@ -2363,6 +2363,20 @@ vs 702/666 G, 1e13 tail 104.7/103.7 vs 108.1/102.4 G (ABAB). `-t 12` and
 every run with -s or --l2-bytes keep their width. The startup log says when the
 rule applies.
 
+Validation on the sandboxes (e379255, last 1e11 below 1e13, `real`, two
+passes each of auto / `-s 15728640` (512 KiB) / `-s 31457280` (1 MiB)):
+
+- Xeon 2.80GHz (auto = 1 MiB): 13.67, 13.66 / 15.26, 15.26 / 13.82, 13.63 s --
+  -10.5% against the old 512 KiB, equal to the forced 1 MiB as expected. The
+  1e13 tail went from 1.10x to 1.02x. 1e14-1e17 stay 1.10-1.15x: there the
+  sparse regime holds and the ceiling keeps 512 KiB.
+- Emerald Rapids (auto = 1.5 MiB), two hosts: 12.47, 12.39 / 15.28, 15.09 /
+  12.92, 12.97 s (-4% against 1 MiB) and 14.76, 14.11 / 15.33, 15.33 / 13.44,
+  13.79 s (+5% against 1 MiB, the noisier host). 1.5 vs 1 MiB unresolved,
+  512 KiB clearly worst on both; the 1e13 tail went from 0.97x to 0.91x /
+  1.00x. A 32 x L1d cap that gave 1 MiB here (21 x L1d) would take the Xeon
+  2.80 back to 672 KiB, so the cap stays unless a longer ABAB settles it.
+
 ### `run_parallel_chunks`: steals priced with the run's own measurements (kept, 2026-10-02)
 
 The fixed steal threshold (4 wheel indices per base prime) came from the dev
