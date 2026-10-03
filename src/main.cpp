@@ -883,6 +883,12 @@ int main(int argc, char** argv) {
         }
     }
 
+    // Smallest L2 share per hardware thread (sysfs): the whole-L2 base below,
+    // the segment ceiling and the sparse cutoff further down use it.
+    uint64_t min_l2_share = 0;
+    for (uint64_t s : topo.l2_share)
+        if (s && (min_l2_share == 0 || s < min_l2_share)) min_l2_share = s;
+
     // Once some base prime would be sparse (isqrt(N) >= seg_k_width), use
     // the whole per-thread L2 share instead of half: every medium/med64
     // prime pays a fixed cost per segment (state load/store, loop exit
@@ -895,16 +901,28 @@ int main(int argc, char** argv) {
     // Same condition (on the pre-doubling width) also gates the lowered
     // medium/sparse cutoff below.
     const bool sparse_regime = base_limit >= seg_k_width;
+    const bool one_per_core = l1_big_cores && opt.threads <= l1_big_cores;
+    bool whole_l2_base = false; // startup log
     if (!opt.segment_width_set && sparse_regime) {
         seg_k_width *= 2;
         opt.segment_width = seg_k_width * WHEEL_MOD / WHEEL_SIZE; // keep the startup log's "segment=" accurate
+    } else if (!opt.segment_width_set && !opt.l2_bytes_override && one_per_core && min_l2_share) {
+        // No sparse tier and a core to itself: the base segment is the
+        // thread's whole L2 share, not half of it, within 32 x L1d. The
+        // medium tier pays a fixed cost per prime per segment, and here
+        // every base prime is dense. 2-vCPU Xeon with 32 KiB L1d and 1 MiB
+        // L2 per vCPU (no SMT), last 1e11 below 1e13: 512 KiB -> 1 MiB is
+        // -8..-13% (two hosts, all runs below); on an SMT machine the share
+        // is already half the L2 and nothing changes (dev PC: 256 KiB; a
+        // forced 512 KiB there was neutral at 1e11, 1e12 and the 1e13 tail).
+        // See docs/RESEARCH.md#whole-l2-base-segment-one-thread-per-core-no-sparse-tier-kept-2026-10-03.
+        const uint64_t base_k = std::min(min_l2_share, 32 * l1_max) * 8 / 64 * 64;
+        if (base_k > seg_k_width) {
+            seg_k_width = base_k;
+            opt.segment_width = seg_k_width * WHEEL_MOD / WHEEL_SIZE;
+            whole_l2_base = true;
+        }
     }
-
-    // Smallest L2 share per hardware thread (sysfs), or --l2-bytes when given:
-    // the segment ceiling below and the sparse cutoff further down use it.
-    uint64_t min_l2_share = 0;
-    for (uint64_t s : topo.l2_share)
-        if (s && (min_l2_share == 0 || s < min_l2_share)) min_l2_share = s;
 
     // Ceiling on the automatic segment: half the L2 per thread, so the
     // segment leaves room for the bucket blocks and the med64/medium state,
@@ -921,7 +939,7 @@ int main(int argc, char** argv) {
     // thread) get 16 x 48 KiB = 768 KiB, above their 512 KiB: unchanged.
     // The power-of-2 fixup below rounds a ceiling down. Auto width only.
     uint64_t seg_uncapped_k = 0; // startup log: the width before the ceiling, 0 if it didn't apply
-    if (!opt.segment_width_set) {
+    if (!opt.segment_width_set && sparse_regime) {
         const uint64_t l2_thread = opt.l2_bytes_override ? opt.l2_bytes_override : min_l2_share;
         const uint64_t cap_bytes = std::max(16 * l1_max, std::min(32 * l1_max, l2_thread / 2));
         const uint64_t cap_k = cap_bytes * 8; // bytes -> wheel indices (one bit each)
@@ -1171,6 +1189,9 @@ int main(int argc, char** argv) {
     if (sub_block_whole_l1d)
         std::fprintf(stderr, "  sub-block: whole L1d (%u threads <= %u cores with the largest L1d)\n",
                      actual_threads, l1_big_cores);
+    if (whole_l2_base)
+        std::fprintf(stderr, "  segment: whole L2 per thread (%u threads <= %u cores, no sparse tier)\n",
+                     opt.threads, l1_big_cores);
     if (seg_uncapped_k)
         std::fprintf(stderr, "  segment: %llu KiB instead of %llu KiB (ceiling: half the L2 per thread, 16-32 x L1d)\n",
                      static_cast<unsigned long long>(seg_k_width / 8 / 1024),

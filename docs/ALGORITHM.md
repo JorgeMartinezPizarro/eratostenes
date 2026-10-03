@@ -279,12 +279,18 @@ overrides for when detection can't be trusted) rather than a fixed guess:
   1e12, where there's no sparse tier, which is why it's conditional). Even
   then, chunks entirely below narrow² (narrow = the width before doubling)
   can't have a sparse prime active yet, so they keep the narrow segment and
-  the tier split that goes with it (-1.8% at 1e13). The automatic width has a
-  **ceiling**: half the L2 per thread, but never under 16 x L1d (primesieve's
-  own cap) nor over 32 x L1d. On a CPU with a large L2 per thread (2 MiB on a
-  2-vCPU Xeon) the doubling otherwise fills the whole L2, 4-9% slower on the
-  top-of-range tails; the dev PC and the i5-13500 (256 KiB per thread under
-  HT) are below the ceiling and unchanged. The startup log says when it applies.
+  the tier split that goes with it (-1.8% at 1e13). In the sparse regime the
+  automatic width has a **ceiling**: half the L2 per thread, but never under
+  16 x L1d (primesieve's own cap) nor over 32 x L1d. On a CPU with a large L2
+  per thread (2 MiB on a 2-vCPU Xeon) the doubling otherwise fills the whole
+  L2, 4-9% slower on the top-of-range tails; the dev PC and the i5-13500
+  (256 KiB per thread under HT) are below the ceiling and unchanged. Below the
+  sparse regime, when each thread has a core to itself (no SMT, or `-t` at
+  or below the core count), the base segment is the **whole** L2 share (within
+  32 x L1d) rather than half: the half is the hyperthread sibling's share, and
+  with every base prime dense the medium tier's per-segment cost dominates
+  (-8..-13% at 1e13 on a 2-vCPU Xeon with 1 MiB L2 per vCPU). The startup log
+  says when either rule applies.
 - **Small-tier sub-block**: half the detected L1d -- that tier's whole point (§6)
   is keeping its marks inside L1, and the other half is the hyperthread sibling's
   share. When no more threads run than physical cores with the largest L1d

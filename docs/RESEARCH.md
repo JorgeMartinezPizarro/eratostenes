@@ -2336,6 +2336,33 @@ fit `max(16 x L1d, min(32 x L1d, L2 per thread / 2))`: 1 MiB on the first,
 under HT) get 768 KiB, above their 512 KiB, unchanged. Fitted on two VMs; the
 startup log says when it applies.
 
+### Whole-L2 base segment: one thread per core, no sparse tier (kept, 2026-10-03)
+
+The base segment is half the L2 share so the segment, the tiers' state and a
+hyperthread sibling fit together. On the 2-vCPU Xeon @ 2.80GHz sandbox (32 KiB
+L1d, 1 MiB L2 per vCPU, no SMT -- the only machine still losing to primesieve,
+1.00-1.16x on the tails) a sweep of the knobs over the last 1e11 below 1e13 and
+1e15 moved only one of them: `--l2-bytes 2097152`, i.e. a 1 MiB base segment
+instead of 512 KiB, was -8..-13% at 1e13 on two hosts (every run below every
+default run) and 0..-3% at 1e15, where the sparse-regime doubling already gives
+1 MiB and the ceiling takes it back to 512 KiB. `--tune sparse=1/1` was +9% at
+1e15 (1/2 stays), the sub-block, the prefetch distance and `minsegs` were noise.
+
+Rule: when no base prime is sparse (no doubling) and there are no more threads
+than physical cores with the largest L1d (the same `one_per_core` as the
+whole-L1d sub-block), the base segment is the whole L2 share, within 32 x L1d.
+On an SMT machine the share is already half the L2 and nothing changes (dev
+PC, i5-13500: 256 KiB per thread). The ceiling now applies only in the sparse
+regime, where it was fitted; below it the rule above is the only widening.
+Consequences: Xeon 2.80 1e13/1e14 512 KiB -> 1 MiB (the measured win), 1e15+
+unchanged; Emerald Rapids (48 KiB L1d, 2 MiB L2) 1e13 1 MiB -> 1.5 MiB,
+1e14+ unchanged (operators to A/B against `-s 31457280`, 1 MiB); the dev PC
+`-t 2` with a forced 512 KiB base (`--l2-bytes 1048576`, L2 per core instead of
+per thread) was neutral: cycles:u 1e11 48.9/52.7 vs 53.4/52.5 G, 1e12 698/710
+vs 702/666 G, 1e13 tail 104.7/103.7 vs 108.1/102.4 G (ABAB). `-t 12` and
+every run with -s or --l2-bytes keep their width. The startup log says when the
+rule applies.
+
 ### `run_parallel_chunks`: steals priced with the run's own measurements (kept, 2026-10-02)
 
 The fixed steal threshold (4 wheel indices per base prime) came from the dev
