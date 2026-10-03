@@ -861,6 +861,36 @@ worst with both SMT threads busy: ~8 x 17 KB of switch code, with the exit
 stubs, doesn't fit the frontend the two siblings share, where the 48-case
 version did. Closed: med64 stays on mod 210.
 
+### `cross_off_medium`: two primes per iteration (tried, not adopted, 2026-10-04)
+
+The one idea left on the medium tier after the bands: its loop is one
+dependent chain per hit (position -> table row -> `qp` multiply -> next
+position), and a class's list is sorted by p, so two consecutive primes have
+almost the same p and expected hits. `cross_off_medium_pairs` (erat_small.hpp,
+`-DERA_MED_PAIRS=1`, `make medpairs` builds `./eratostenes_medpairs`)
+interleaves two primes in one loop while both are inside the segment, drains
+each alone, and runs the odd prime through the plain loop -- process_big's
+pairs, which were -2%, on the medium tier. It pays only if the loop is
+latency-bound; it costs one more loop exit per pair.
+
+Dev PC, `BIN_B=./eratostenes_medpairs` A/B x2 against the plain kernel, same
+configuration:
+
+| threads | N, window | pairs vs plain |
+|---:|---|---:|
+| 1 | 1e13, 1e10 | +2.5% (4/4 worse) |
+| 1 | 1e12, 1e10 | +5.3% (4/4 worse) |
+| 2 | 1e13, 1e10 | +2.8% (overlap) |
+| 2 | 1e14, 1e10 | -4.1% (overlap) |
+| 12 | 1e13, 1e11 | +3.4% (4/4 worse) |
+| 12 | 1e12, 1e11 | +1.9% (overlap) |
+| 12 | 1e15, 1e11 | +1.2% (overlap) |
+
+Worse or noise everywhere: the medium loop is bound by its exit mispredict
+and the per-call fixed cost, not by the chain's latency, and the drains add
+exits. Same verdict as the bands from the other side. The knob stays for
+A/Bs on other cores; the default is the plain loop.
+
 ## wheel.hpp
 
 ### Wheel size: mod 6 vs. mod 30 vs. mod 210 (historical, pre-tiered-marking architecture)
@@ -2763,6 +2793,21 @@ at the 1e13 tail. The `make benchmark-mini` round there was unreadable
 on that kernel, so what the Ivy Bridge core does with the dense tiers --
 the segment sweep hinted at nothing, every width within the drift -- stays
 open until it can be counted.
+
+The tower's dense-regime round the same night (x3, auto vs `--l1-bytes
+32768`, last 9e10 below 1e11 and 1e11 below 1e12): +6.0% and +13.4%, every B
+above A -- but `--l1-bytes` also switches the topology step off, and with
+it the whole-L2 base rule, so B ran a 128 KiB segment with the 16 KiB
+sub-block: the two changes are confounded, and the sub-block alone needs
+`-s 7864320 --l1-bytes 32768`. `--tune sparse=1/4` at 1e12 (the primes from
+524K to 1e6, 2-4 hits per segment, to the bucket ring): +1.1%, overlapping
+-- a wash, so the dense loss there is not primesieve's EratBig split either.
+The sub-block alone (`-s 7864320 --l1-bytes 32768`: 16 KiB on the same
+256 KiB segment, x3): +1.7% at 1e11 (overlapping) and +3.7% at 1e12 (6/6
+worse). The whole-L1d sub-block is right on the Ivy Bridge too. So the
+tower's dense loss is not the ISA, not the cutoff, not the segment (128 KiB
+was worse) and not the sub-block; what is left to sweep there without
+counters is the small/med64 split and the medium prefetch.
 ### `run_parallel_chunks`: steals priced with the run's own measurements (kept, 2026-10-02)
 
 The fixed steal threshold (4 wheel indices per base prime) came from the dev

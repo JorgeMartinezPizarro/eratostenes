@@ -37,6 +37,11 @@
 #ifndef ERA_MED_BANDS
 #define ERA_MED_BANDS 0
 #endif
+// Medium tier two primes per iteration (erat_small.hpp::cross_off_medium_pairs):
+// -DERA_MED_PAIRS=1 for an A/B (`make medpairs` builds ./eratostenes_medpairs).
+#ifndef ERA_MED_PAIRS
+#define ERA_MED_PAIRS 0
+#endif
 constexpr double MEDIUM_BAND_FACTOR = 1.2;
 constexpr double MEDIUM_BAND_MAX_HITS = 8.0;
 
@@ -561,6 +566,10 @@ private:
             erat::cross_off_medium_banded<PR, NTA>(bytes, bytes_needed, medium_dyn_[PR].data(), medium_qd_[PR].data(),
                                                    medium_qp_base_[PR], bytes_needed, medium_bands_[PR].data(),
                                                    medium_bands_[PR].data() + medium_bands_[PR].size());
+        } else if constexpr (ERA_MED_PAIRS) {
+            erat::cross_off_medium_pairs<PR, NTA>(bytes, bytes_needed, medium_dyn_[PR].data(),
+                                                  medium_dyn_[PR].data() + medium_dyn_[PR].size(), medium_qd_[PR].data(),
+                                                  medium_qp_base_[PR], bytes_needed);
         } else {
             erat::cross_off_medium<PR, NTA>(bytes, bytes_needed, medium_dyn_[PR].data(),
                                             medium_dyn_[PR].data() + medium_dyn_[PR].size(), medium_qd_[PR].data(),

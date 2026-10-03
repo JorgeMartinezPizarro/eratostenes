@@ -22,6 +22,7 @@
 // what makes the masks constant); the other wheel configs in wheel.hpp
 // would need their own derivation.
 
+#include <algorithm>
 #include <cstdint>
 
 #include "wheel.hpp"
@@ -276,6 +277,75 @@ __attribute__((noinline)) void cross_off_medium(uint8_t* s, uint64_t end, uint32
         qp += *qds;
         while (pos < end) {
             uint32_t t = pack[w]; // mask | dm << 8 | corr << 16
+            s[pos] |= static_cast<uint8_t>(t);
+            pos += qp * ((t >> 8) & 0xff) + (t >> 16);
+            if (++w == 96) [[unlikely]] w = 48;
+        }
+        if (w >= 48) w -= 48;
+        *dyn = static_cast<uint32_t>(((pos - rebase) << 6) | w);
+    }
+}
+
+// Two primes per iteration (-DERA_MED_PAIRS=1, an A/B knob like the bands
+// below): the plain loop above is one dependent chain per hit (position ->
+// table row -> qp multiply -> next position), and a class's list is sorted
+// by p, so two consecutive primes have nearly the same p and the same
+// expected hits. Interleaving them in one loop while both are inside the
+// segment runs two independent chains, then each drains alone; the odd
+// prime at the end runs the plain loop. Same idea as process_big's pairs
+// (segment_sieve.hpp, -2% at the 1e15 tail). Costs one more loop exit per
+// pair (the drains), so it pays only where the loop is latency-bound, not
+// where the exit mispredict dominates -- which is what the A/B measures.
+template <int PR, bool NTA>
+__attribute__((noinline)) void cross_off_medium_pairs(uint8_t* s, uint64_t end, uint32_t* dyn, uint32_t* dyn_last,
+                                                      const uint8_t* qds, uint64_t qp_base, uint64_t rebase) {
+    const uint32_t* pack = big::PACK210[PR].data();
+    uint64_t qp = qp_base;
+    for (; dyn + 2 <= dyn_last; dyn += 2, qds += 2) {
+        if constexpr (NTA) {
+            __builtin_prefetch(dyn + MEDIUM_NTA_DIST, 0, 0);
+            __builtin_prefetch(qds + MEDIUM_NTA_DIST * 4, 0, 0);
+        }
+        const uint32_t d0 = dyn[0], d1 = dyn[1];
+        uint64_t pos0 = d0 >> 6, w0 = d0 & 63;
+        uint64_t pos1 = d1 >> 6, w1 = d1 & 63;
+        qp += qds[0];
+        const uint64_t qp0 = qp;
+        qp += qds[1];
+        const uint64_t qp1 = qp;
+        while (std::max(pos0, pos1) < end) {
+            const uint32_t t0 = pack[w0], t1 = pack[w1];
+            s[pos0] |= static_cast<uint8_t>(t0);
+            s[pos1] |= static_cast<uint8_t>(t1);
+            pos0 += qp0 * ((t0 >> 8) & 0xff) + (t0 >> 16);
+            pos1 += qp1 * ((t1 >> 8) & 0xff) + (t1 >> 16);
+            if (++w0 == 96) [[unlikely]] w0 = 48;
+            if (++w1 == 96) [[unlikely]] w1 = 48;
+        }
+        while (pos0 < end) {
+            const uint32_t t = pack[w0];
+            s[pos0] |= static_cast<uint8_t>(t);
+            pos0 += qp0 * ((t >> 8) & 0xff) + (t >> 16);
+            if (++w0 == 96) [[unlikely]] w0 = 48;
+        }
+        while (pos1 < end) {
+            const uint32_t t = pack[w1];
+            s[pos1] |= static_cast<uint8_t>(t);
+            pos1 += qp1 * ((t >> 8) & 0xff) + (t >> 16);
+            if (++w1 == 96) [[unlikely]] w1 = 48;
+        }
+        if (w0 >= 48) w0 -= 48;
+        if (w1 >= 48) w1 -= 48;
+        dyn[0] = static_cast<uint32_t>(((pos0 - rebase) << 6) | w0);
+        dyn[1] = static_cast<uint32_t>(((pos1 - rebase) << 6) | w1);
+    }
+    if (dyn != dyn_last) {
+        const uint32_t d = *dyn;
+        uint64_t pos = d >> 6;
+        uint64_t w = d & 63;
+        qp += *qds;
+        while (pos < end) {
+            const uint32_t t = pack[w];
             s[pos] |= static_cast<uint8_t>(t);
             pos += qp * ((t >> 8) & 0xff) + (t >> 16);
             if (++w == 96) [[unlikely]] w = 48;

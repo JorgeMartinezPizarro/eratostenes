@@ -50,7 +50,7 @@ NTH_OBJ := $(OBJ_DIR_RELEASE)/nth_prime.o
 OUT_DIR := $(CURDIR)/output
 COMPOSE := docker compose -f docker/docker-compose.yml
 
-.PHONY: all portable debug pgo clean fclean re docker run docker-pgo run-pgo nth-prime bands \
+.PHONY: all portable debug pgo clean fclean re docker run docker-pgo run-pgo nth-prime bands medpairs \
         test benchmark benchmark-io benchmark-tails benchmark-mini benchmark-ab docker-dev docker-test docker-benchmark \
         docker-benchmark-io docker-benchmark-tails docker-benchmark-mini docker-benchmark-ab
 
@@ -69,6 +69,13 @@ BIN_BANDS := eratostenes_bands
 $(BIN_BANDS): $(SRC_DIR)/main.cpp $(HEADERS)
 	$(CXX) $(CXXFLAGS_RELEASE) -DERA_MED_BANDS=1 -o $@ $(SRC_DIR)/main.cpp $(LDLIBS)
 bands: $(BIN_BANDS)
+
+# Variante con el tier medium a dos primos por iteracion (-DERA_MED_PAIRS=1,
+# ver erat_small.hpp): BIN_B=./eratostenes_medpairs make benchmark-ab.
+BIN_MEDPAIRS := eratostenes_medpairs
+$(BIN_MEDPAIRS): $(SRC_DIR)/main.cpp $(HEADERS)
+	$(CXX) $(CXXFLAGS_RELEASE) -DERA_MED_PAIRS=1 -o $@ $(SRC_DIR)/main.cpp $(LDLIBS)
+medpairs: $(BIN_MEDPAIRS)
 
 $(OBJ_DIR_RELEASE)/%.o: $(SRC_DIR)/%.cpp $(HEADERS) | $(OBJ_DIR_RELEASE)
 	$(CXX) $(CXXFLAGS_RELEASE) -c $< -o $@
@@ -151,7 +158,7 @@ $(OBJ_DIR_RELEASE) $(OBJ_DIR_PORTABLE) $(OBJ_DIR_DEBUG) $(OBJ_DIR_PGO):
 	mkdir -p $@
 
 clean:
-	rm -f $(BIN_BANDS); rm -rf obj
+	rm -f $(BIN_BANDS) $(BIN_MEDPAIRS); rm -rf obj
 
 fclean: clean
 	rm -f $(BIN) $(BIN)_debug $(NTH_BIN)
