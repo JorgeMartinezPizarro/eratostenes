@@ -2,15 +2,21 @@
 # Short diagnostic for a machine the auto-tuning has never seen (old or odd
 # hardware, a VM with a strange topology): what sysfs says about the caches,
 # what the CLI chose from it, and a sweep of the knobs that choice drives
-# (segment width, sparse cutoff, med64/medium prefetchnta), every run against
-# primesieve on the same window. One N, a short window, single runs: a
-# 3-minute answer to "is it the auto-tuning or the CPU?", compact enough to
-# photograph. It is NOT a table for BENCHMARK.md (benchmark_tails.sh is).
+# (segment width, sparse cutoff, med64/medium prefetchnta). Every
+# configuration is paired with its own primesieve run on the same window,
+# so a machine whose state drifts during the sweep (another load, a host
+# change, a thermal step) shows up as a drift in primesieve's times instead
+# of as a fake loss; the auto configuration is repeated at the end as the
+# control. One N, a short window, single runs: a few minutes' answer to "is
+# it the auto-tuning or the CPU?", compact enough to photograph. It is NOT
+# a table for BENCHMARK.md (benchmark_tails.sh is).
 #
 # Usage: make benchmark-mini   (or: bash scripts/benchmark_mini.sh)
 # Env overrides:
 #   N         top of the window, integer or 1eX (default: 1e13)
-#   WIDTH     window width, integer or 1eX (default: 1e10; both must fit 2^63)
+#   WIDTH     window width, integer or 1eX (default: 1e10; both must fit
+#             2^63). Pick it so a run lasts a few seconds: 1e10 on an old
+#             2-4 thread machine, 1e11 on a modern desktop or server.
 #   THREADS   thread count for both programs (default: nproc)
 #   SEGMENTS  -s values to sweep, in numbers (default: 128 KiB .. 1 MiB)
 set -euo pipefail
@@ -82,50 +88,53 @@ run_e() { # ENVSTRING ARGS... -> t_e, c_e, startup (the config lines of the log)
         | sed -E 's/^Starting [0-9]+ threads, limit=[0-9]+, (segment=[0-9]+), wheel mod [0-9]+ \([0-9]+ primes\), ([0-9]+ small[^,]*\(sub-block [^)]*\))?.*/\1 \2/')
 }
 ratio() { awk -v a="$1" -v b="$2" 'BEGIN{ if (b > 0) printf "%.2fx", a / b; else printf "?" }'; }
-check() { [ "$1" = "$c_p" ] && echo "ok" || echo "MISMATCH($1 vs $c_p)"; }
+less_than() { awk -v a="$1" -v b="$2" 'BEGIN{exit !(a < b)}'; }
 
 summary=()
-add_row() { summary+=("| $1 | ${2}s | ${t_p}s | $(ratio "$2" "$t_p") |"); }
+r=""
+# pair LABEL ENVSTRING ARGS...: one eratostenes run, then one primesieve run,
+# the ratio between the two -> r, plus a line on stdout and a summary row.
+pair() {
+    local label=$1 envs=$2; shift 2
+    run_e "$envs" "$@"
+    run_ps
+    local ok="ok"; [ "$c_e" = "$c_p" ] || ok="MISMATCH($c_e vs $c_p)"
+    r=$(ratio "$t_e" "$t_p")
+    echo "  $label: ${t_e}s vs ${t_p}s $r [$ok]"
+    summary+=("| $label | ${t_e}s | ${t_p}s | $r |")
+}
 
-echo "== primesieve, $THREADS threads"
-run_ps
-echo "  ${t_p}s ($c_p primes)"
-if awk -v t="$t_p" 'BEGIN{exit !(t < 2)}'; then
-    echo "  (runs this short are noise on this machine: use WIDTH=1e11, e.g. WIDTH=1e11 make benchmark-mini)"
-fi
-
-echo "== eratostenes auto"
-run_e ""
+echo "== eratostenes auto, then primesieve ($THREADS threads each)"
+pair "auto" ""
 echo "$startup" | sed 's/^ */    /'
-echo "  ${t_e}s $(ratio "$t_e" "$t_p") [$(check "$c_e")]"
-add_row "auto" "$t_e"
-best_t=$t_e; best_s=""; best_label="auto"
+if less_than "$t_p" 2; then
+    echo "  (runs this short are noise on this machine: use a wider window, e.g. WIDTH=1e11 make benchmark-mini)"
+fi
+best_r=$r; best_s=""; best_label="auto"
 
-echo "== segment sweep (-s, numbers per segment)"
+echo "== segment sweep (-s, numbers per segment), each paired with primesieve"
 for s in $SEGMENTS; do
-    run_e "" -s "$s"
     kib=$(( s / 30 / 1024 ))
-    extra=$(echo "$startup" | grep -E 'segment:' | sed -E 's/^ *segment: /; /' | head -1 || true)
-    echo "  -s $s (${kib} KiB): ${t_e}s $(ratio "$t_e" "$t_p") [$(check "$c_e")]${extra}"
-    add_row "-s $s (${kib} KiB)" "$t_e"
-    if awk -v a="$t_e" -v b="$best_t" 'BEGIN{exit !(a < b)}'; then best_t=$t_e; best_s=$s; best_label="-s $s"; fi
+    pair "-s $s (${kib} KiB)" "" -s "$s"
+    extra=$(echo "$startup" | grep -E 'segment:' | sed -E 's/^ *segment: /    -> /' | head -1 || true)
+    [ -n "$extra" ] && echo "$extra"
+    if less_than "${r%x}" "${best_r%x}"; then best_r=$r; best_s=$s; best_label="-s $s"; fi
 done
 
 seg_args=()
 [ -n "$best_s" ] && seg_args=(-s "$best_s")
-echo "== cutoff and prefetch, on the best segment so far ($best_label)"
+echo "== cutoff and prefetch on the best segment so far ($best_label), each paired with primesieve"
 for cfg in "--tune sparse=1/1" "--tune sparse=1/2" "--tune sparse=1/4" "--tune medium_nta=1" "--tune medium_nta=0"; do
     # shellcheck disable=SC2086
-    run_e "" "${seg_args[@]}" $cfg
-    echo "  $cfg: ${t_e}s $(ratio "$t_e" "$t_p") [$(check "$c_e")]"
-    add_row "$best_label $cfg" "$t_e"
+    pair "$best_label $cfg" "" "${seg_args[@]}" $cfg
 done
-run_e "ERATOSTENES_MED64_NTA=0" "${seg_args[@]}"
-echo "  ERATOSTENES_MED64_NTA=0: ${t_e}s $(ratio "$t_e" "$t_p") [$(check "$c_e")]"
-add_row "$best_label med64 NTA off" "$t_e"
+pair "$best_label med64 NTA off" "ERATOSTENES_MED64_NTA=0" "${seg_args[@]}"
+
+echo "== control: auto again (drift check against the first pair)"
+pair "auto (again)" ""
 
 echo
-echo "last ${WIDTH_IN} below ${N_IN}, $THREADS threads, single runs"
+echo "last ${WIDTH_IN} below ${N_IN}, $THREADS threads, single runs, each config paired with its own primesieve run"
 echo
 echo "| config | eratostenes | primesieve | ratio |"
 echo "|---|---:|---:|---:|"
