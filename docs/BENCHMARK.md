@@ -106,3 +106,15 @@ Hybrid, 2 P-cores with HT + 8 E-cores, 12 threads, 8 GB RAM (the 1e18 tail needs
 | 1e16 | 14.76s | 16.571s | 0.89x |
 | 1e17 | 17.88s | 21.703s | 0.82x |
 | 1e18 | N/A | N/A | N/A |
+## Intel Core i7-620M (2010 MacBook Pro)
+
+Intel Core i7 M620 @ 2.67GHz (Arrandale, 2010 MacBook Pro), 2 cores with HT, 4 threads, 32 KiB L1d and 256 KiB L2 per core, 4 MiB L3, 8 GB; Ubuntu on the metal (no container: Docker Desktop's VM reports a fake cache topology there, see RESEARCH.md), primesieve 12.12, 4 threads. The tails use a 1e10 window (`WIDTH=1e10`), a tenth of the other machines', so a run stays under half a minute; ratios are comparable within this table, not with the 1e11 tables (the startup both programs pay is a larger share of a 1e10 window from 1e16 up). Count table pending (`make benchmark`).
+
+| N | eratostenes | primesieve | ratio |
+|---|---:|---:|---:|
+| 1e13 | 6.67s | 7.017s | 0.95x |
+| 1e14 | 7.98s | 8.129s | 0.98x |
+| 1e15 | 9.46s | 9.315s | 1.02x |
+| 1e16 | 11.22s | 10.639s | 1.05x |
+| 1e17 | 14.19s | 13.477s | 1.05x |
+| 1e18 | 21.33s | 19.979s | 1.07x |

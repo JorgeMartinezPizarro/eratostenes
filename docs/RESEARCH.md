@@ -2608,6 +2608,21 @@ terms (6.48 s, -5% on auto's 6.83 / 6.81 s), single runs -- the same
 confirmed with repetitions before a rule is touched (on the i5-13500 at 20
 threads 1 MiB is 1.30x, so it would not be "4 x the share" in general).
 
+Its tails, native, `WIDTH=1e10 REPS=2 make benchmark-tails` (3a981b9, auto
+everywhere): 0.95 / 0.98 / 1.02 / 1.05 / 1.05 / 1.07x from 1e13 to 1e18
+(BENCHMARK.md, own section). The usual shape -- ahead where the dense tiers
+dominate, behind where the sparse tier does -- on a core with a 128-entry
+ROB and a 4 MiB L3 for two cores; every rep of the two agrees within 3%.
+
+The hint, interleaved (`B="-s 15728640 --tune sparse=1/2" make benchmark-ab`,
+scripts/benchmark_ab.sh, new today, 8d9a3ed, same window): auto 6.88, 6.96 s
+against 6.82, 6.69 s, -2.3%, every B run below every A run. Real, small,
+and not one knob: at 512 KiB the medium-tier prefetchnta gate also turns
+off (A "yes", B "no", same 131,072 medium primes), so B differs in segment,
+cutoff and prefetch at once. Not worth a rule for the 128 KiB-share class
+on one machine and one N -- the same "segment past the share" move is
+1.30x on the i5-13500 at 20 threads -- and left as measured.
+
 ### `run_parallel_chunks`: steals priced with the run's own measurements (kept, 2026-10-02)
 
 The fixed steal threshold (4 wheel indices per base prime) came from the dev
