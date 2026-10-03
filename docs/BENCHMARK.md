@@ -19,12 +19,12 @@ The last 1e11 numbers below N (`make benchmark-tails`):
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
-| 1e13 | 2.53s | 2.872s | 0.88x |
-| 1e14 | 3.68s | 3.997s | 0.92x |
-| 1e15 | 4.51s | 4.620s | 0.98x |
-| 1e16 | 5.08s | 5.307s | 0.96x |
-| 1e17 | 6.03s | 6.123s | 0.98x |
-| 1e18 | 7.74s | 7.972s | 0.97x |
+| 1e13 | 3.11s | 3.370s | 0.92x |
+| 1e14 | 3.82s | 4.013s | 0.95x |
+| 1e15 | 4.41s | 4.541s | 0.97x |
+| 1e16 | 5.10s | 5.162s | 0.99x |
+| 1e17 | 6.11s | 6.097s | 1.00x |
+| 1e18 | 7.68s | 7.991s | 0.96x |
 
 ## Intel Core i5-11400F
 
@@ -32,20 +32,20 @@ Intel Core i5-11400F (Rocket Lake, 2021), 6 cores / 12 threads, 48 KiB L1d and 5
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
-| 1e10 | 0.16s | 0.187s | 0.86x |
-| 1e11 | 1.89s | 2.303s | 0.82x |
-| 1e12 | 23.65s | 27.224s | 0.87x |
-| 1e13 | 308.81s | 363.157s | 0.85x |
+| 1e10 | 0.16s | 0.188s | 0.85x |
+| 1e11 | 1.87s | 2.290s | 0.82x |
+| 1e12 | 23.31s | 26.920s | 0.87x |
+| 1e13 | 302.73s | 368.547s | 0.82x |
 | 1e14 | 4185.20s | 5804.52s | 0.72x |
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
-| 1e13 | 3.44s | 4.318s | 0.80x |
-| 1e14 | 5.05s | 6.937s | 0.73x |
-| 1e15 | 7.09s | 9.580s | 0.74x |
-| 1e16 | 9.65s | 12.565s | 0.77x |
-| 1e17 | 12.84s | 15.819s | 0.81x |
-| 1e18 | 18.28s | 21.089s | 0.87x |
+| 1e13 | 3.37s | 4.165s | 0.81x |
+| 1e14 | 4.88s | 6.808s | 0.72x |
+| 1e15 | 6.88s | 9.368s | 0.73x |
+| 1e16 | 9.42s | 12.248s | 0.77x |
+| 1e17 | 12.03s | 15.431s | 0.78x |
+| 1e18 | 16.05s | 20.078s | 0.80x |
 
 ## Intel Xeon Emerald Rapids (claude.ai sandbox)
 
@@ -129,20 +129,20 @@ Intel Core i7 M620 @ 2.67GHz (Arrandale, 2010), 2 cores with HT, 4 threads, 32 K
 
 ## Intel Core i5-3470 (2012 desktop)
 
-Intel Core i5-3470 @ 3.20GHz (Ivy Bridge, 2012), 4 cores, 4 threads, 32 KiB L1d and 256 KiB L2 per core, 6 MiB L3, 8 GB RAM; Ubuntu (live USB), primesieve 12.12, 4 threads. Count table: single runs.
+Intel Core i5-3470 @ 3.20GHz (Ivy Bridge, 2012), 4 cores, 4 threads, 32 KiB L1d and 256 KiB L2 per core, 6 MiB L3, 8 GB RAM; Ubuntu (live USB), primesieve 12.12, 4 threads. Single runs of both programs in both tables (the live system drifts ~15% between runs; its A/Bs are interleaved).
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
-| 1e10 | 0.50s | 0.440s | 1.14x |
-| 1e11 | 6.06s | 5.555s | 1.09x |
-| 1e12 | 77.06s | 70.241s | 1.10x |
-| 1e13 | 1054.75s | 1002.202s | 1.05x |
+| 1e10 | 0.49s | 0.439s | 1.12x |
+| 1e11 | 6.36s | 5.575s | 1.14x |
+| 1e12 | 78.26s | 71.616s | 1.09x |
+| 1e13 | 1013.19s | 943.535s | 1.07x |
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
-| 1e13 | 11.62s | 11.552s | 1.01x |
-| 1e14 | 14.37s | 14.465s | 0.99x |
-| 1e15 | 17.55s | 17.545s | 1.00x |
-| 1e16 | 19.67s | 20.721s | 0.95x |
-| 1e17 | 22.39s | 24.284s | 0.92x |
-| 1e18 | 25.51s | 27.628s | 0.92x |
+| 1e13 | 10.95s | 10.732s | 1.02x |
+| 1e14 | 14.87s | 14.208s | 1.05x |
+| 1e15 | 16.84s | 16.925s | 0.99x |
+| 1e16 | 18.95s | 18.930s | 1.00x |
+| 1e17 | 21.47s | 23.550s | 0.91x |
+| 1e18 | 25.76s | 26.688s | 0.97x |
