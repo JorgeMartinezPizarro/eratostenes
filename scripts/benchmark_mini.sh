@@ -90,6 +90,9 @@ add_row() { summary+=("| $1 | ${2}s | ${t_p}s | $(ratio "$2" "$t_p") |"); }
 echo "== primesieve, $THREADS threads"
 run_ps
 echo "  ${t_p}s ($c_p primes)"
+if awk -v t="$t_p" 'BEGIN{exit !(t < 2)}'; then
+    echo "  (runs this short are noise on this machine: use WIDTH=1e11, e.g. WIDTH=1e11 make benchmark-mini)"
+fi
 
 echo "== eratostenes auto"
 run_e ""
