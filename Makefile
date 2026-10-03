@@ -51,8 +51,8 @@ OUT_DIR := $(CURDIR)/output
 COMPOSE := docker compose -f docker/docker-compose.yml
 
 .PHONY: all portable debug pgo clean fclean re docker run docker-pgo run-pgo nth-prime \
-        test benchmark benchmark-io benchmark-tails benchmark-mini docker-dev docker-test docker-benchmark \
-        docker-benchmark-io docker-benchmark-tails docker-benchmark-mini
+        test benchmark benchmark-io benchmark-tails benchmark-mini benchmark-ab docker-dev docker-test docker-benchmark \
+        docker-benchmark-io docker-benchmark-tails docker-benchmark-mini docker-benchmark-ab
 
 # --- release (default) ---
 all: $(BIN) $(NTH_BIN)
@@ -239,6 +239,12 @@ benchmark-tails: $(BIN)
 benchmark-mini: $(BIN)
 	bash scripts/benchmark_mini.sh
 
+# A/B intercalado de dos configuraciones de eratostenes sobre una cola (ver
+# scripts/benchmark_ab.sh): B="-s 15728640 --tune sparse=1/2" make benchmark-ab.
+# A (por defecto el automatico), B, N/WIDTH/THREADS/REPS como variables de entorno.
+benchmark-ab: $(BIN)
+	bash scripts/benchmark_ab.sh
+
 # --- run the same targets inside Docker (see docker/Dockerfile's `dev`
 # stage: gcc + libsqlite3-dev + libzstd-dev + primesieve). Each rebuilds
 # eratostenes/nth_prime with the container's own gcc against the
@@ -264,3 +270,6 @@ docker-benchmark-tails: docker-dev
 
 docker-benchmark-mini: docker-dev
 	$(COMPOSE) run --rm -e THREADS -e N -e WIDTH -e SEGMENTS dev make benchmark-mini
+
+docker-benchmark-ab: docker-dev
+	$(COMPOSE) run --rm -e THREADS -e N -e WIDTH -e REPS -e A -e B dev make benchmark-ab

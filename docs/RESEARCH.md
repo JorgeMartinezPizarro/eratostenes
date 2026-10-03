@@ -2510,6 +2510,104 @@ the Emerald Rapids); if 1 MiB holds, lift the ceiling to the whole L2 share
 when L2 <= 32 x L1d, which leaves the Emerald Rapids (2 MiB > 1.5 MiB) at
 its measured 1 MiB.
 
+### Base segment capped at 32 x L1d: a VM whose sysfs reports the host's L3 as L2 (kept, 2026-10-03)
+
+A 2010 MacBook Pro (Core i7 M620, Arrandale: 2 cores + HT, 32 KiB L1d,
+256 KiB L2 per core, 4 MiB L3, 8 GB) running the latest Ubuntu with Docker
+Desktop, which on Linux too runs the containers inside its own VM. What that
+VM's sysfs says, through `make docker-benchmark-mini` (scripts/benchmark_mini.sh,
+new today: sysfs listing, the CLI's own choice, a segment / cutoff / prefetch
+sweep, each run paired with its own primesieve run):
+
+```
+index0 L1 Data         32K      cpus 0
+index2 L2 Unified      4096K    cpus 0
+index3 L3 Unified      16384K   cpus 0-3
+4 threads (1 per core), 1.7 GiB of RAM
+```
+
+The host's L3 shows as a private 4 MiB L2 per vCPU, the L3 is invented, HT
+is invisible and the VM has 1.7 GiB of the 8. From that the CLI chose a
+2 MiB base segment (half of cpu0's "L2", arg_parser.hpp) that nothing
+bounded below the sparse regime, a whole-L1d sub-block ("4 threads <= 4
+cores") and, in the sparse regime, the 1/4 cutoff ("L2 per thread >= 1
+MiB"). Last 1e10 below 1e13, 4 threads, primesieve 11.0 (the image's),
+single runs:
+
+| config | eratostenes | primesieve | ratio |
+|---|---:|---:|---:|
+| auto (2 MiB, no sparse tier, 524,288 medium primes) | 17.06s | 7.987s | 2.14x |
+| `-s 3932160` (128 KiB) | 8.13s | 7.987s | 1.02x |
+| `-s 7864320` (256 KiB) | 8.08s | 7.987s | 1.01x |
+| `-s 15728640` (512 KiB) | 7.66s | 7.987s | 0.96x |
+| `-s 31457280` (1 MiB) | 8.56s | 7.987s | 1.07x |
+| 512 KiB, `--tune sparse=1/1` / `1/2` / `1/4` | 7.83 / 7.65 / 7.91s | | 0.98 / 0.96 / 0.99x |
+| 512 KiB, `--tune medium_nta=1` / `0` | 7.53 / 7.76s | | 0.94 / 0.97x |
+| 512 KiB, `ERATOSTENES_MED64_NTA=0` | 8.14s | | 1.02x |
+
+(An earlier manual round through `make run` had the same shape: 2 MiB
+14.78 s, 512 KiB 7.76 s, 256 KiB 8.12 s, 128 KiB 8.11 s against 7.62 s.)
+primesieve picked a 128 KiB sieve there. The 2x was the segment alone; the
+cutoff and the prefetch knobs are within single-run noise.
+
+Kept: the automatic base width is capped at 32 x L1d (main.cpp, before
+`sparse_regime` is evaluated, so the doubling and the sparse-regime ceiling
+see the capped width; `-s` and `--l2-bytes` are left alone; the startup log
+says when it applied and what sysfs claimed). Every real machine measured so
+far already sits at or under it -- Emerald Rapids 1.5 MiB = 32 x 48 KiB
+(the whole-L2 base rule's own bound), Xeon 2.80 1 MiB = 32 x 32 KiB, the HT
+machines at 256-640 KiB -- so only a lying topology reaches it. Verified on
+the dev PC: `-t 12` and `-t 2` unchanged (512 KiB), `--l1-bytes 4096` forces
+the cap (128 KiB instead of 256 KiB) and `-s` still bypasses it; `make test`
+green. On that VM the cap gives 1 MiB (1.07x), not the measured best 512 KiB
+(0.96x): no rule fed by that sysfs can tell this VM (fake 4 MiB L2, real
+256 KiB) from the Xeon 2.80 (real 1 MiB L2, 1 MiB measured best), which is
+the case for calibrating the width at startup on a short probe instead of
+deriving it from the topology.
+
+Same day, the i5-13500 through `WIDTH=1e11 make docker-benchmark-mini` (20
+threads, Docker Engine on the host kernel, real sysfs): auto 0.90x, 128 KiB
+0.90x, 256 KiB 0.97x, 512 KiB (= auto) 0.95x, 1 MiB 1.30x, every cutoff and
+prefetch knob 0.88-0.92x, the control pair 0.89x. Two things from it: the
+machine slows ~25% for both programs after the first pair in every round
+(2.55 / 2.825 s first, 3.1-3.6 s afterwards; the same at WIDTH=1e10), which
+the pairing absorbs -- the old single-reference version of the script had
+reported that drift as a 1.15x loss; and 128 KiB was the fastest eratostenes
+run within the slow regime in both 1e11 rounds (3.11 vs 3.24 s for 256/512
+KiB, and 3.03 vs 3.19-3.22 s), -4%, single runs: a proper interleaved A/B
+at 20 threads is pending (256 KiB was +5.2% cycles against 512 KiB on the
+P-cores alone at 1e14, 2026-09-28; 128 KiB was never tried).
+
+**Same laptop, native (g++ on the host's Ubuntu, primesieve 12.12, 3a981b9,
+`make benchmark-mini`, last 1e10 below 1e13, 4 threads).** Real sysfs now:
+L1d 32K `cpus 0-1`, L2 256K `cpus 0-1`, L3 4096K `cpus 0-3`, 2 threads per
+core, 7.2 GiB. The CLI chose 256 KiB (128 KiB base from the 256 KiB L2,
+doubled in the sparse regime), a 16 KiB sub-block, medium prefetchnta on
+and cutoff 1/1 -- the i5-11400F recipe, derived from the topology alone --
+and the pairs read:
+
+| config | eratostenes | primesieve | ratio |
+|---|---:|---:|---:|
+| auto (256 KiB) | 6.83s | 7.007s | 0.97x |
+| `-s 3932160` (128 KiB) | 7.07s | 7.289s | 0.97x |
+| `-s 7864320` (256 KiB) | 6.82s | 7.070s | 0.96x |
+| `-s 15728640` (512 KiB) | 6.77s | 7.348s | 0.92x |
+| `-s 31457280` (1 MiB) | 7.25s | 7.039s | 1.03x |
+| 512 KiB, `--tune sparse=1/1` / `1/2` / `1/4` | 6.57 / 6.48 / 6.73s | 6.957 / 7.354 / 6.999s | 0.94 / 0.88 / 0.96x |
+| 512 KiB, `--tune medium_nta=1` / `0` | 6.60 / 6.56s | 7.120 / 6.995s | 0.93 / 0.94x |
+| 512 KiB, `ERATOSTENES_MED64_NTA=0` | 6.50s | 7.018s | 0.93x |
+| auto (again) | 6.81s | 7.105s | 0.96x |
+
+primesieve's own runs spread 6.96-7.35 s (5.7%), so single-run ratios carry
++-0.04x: the 0.88x is one of its slow runs. What holds: auto is 0.96-0.97x
+on a 2010 Arrandale with no knob touched, the 2.14x of the morning was the
+Docker Desktop VM's sysfs and nothing else, and 512 KiB (4 x the 128 KiB L2
+share) with the cutoff at 1/2 was the fastest eratostenes run in absolute
+terms (6.48 s, -5% on auto's 6.83 / 6.81 s), single runs -- the same
+"segment past the L2 share pays under HT" shape as the dev PC, to be
+confirmed with repetitions before a rule is touched (on the i5-13500 at 20
+threads 1 MiB is 1.30x, so it would not be "4 x the share" in general).
+
 ### `run_parallel_chunks`: steals priced with the run's own measurements (kept, 2026-10-02)
 
 The fixed steal threshold (4 wheel indices per base prime) came from the dev

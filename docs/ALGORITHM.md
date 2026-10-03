@@ -291,7 +291,10 @@ overrides for when detection can't be trusted) rather than a fixed guess:
   on a 2-vCPU Xeon) the doubling otherwise fills the whole L2, 4-9% slower on
   the top-of-range tails, and the ceiling lands on 1 MiB; on a 1 MiB-L2 Xeon
   the ceiling is the whole L2, 2-5% faster than half of it; the dev PC and
-  the i5-13500 (256 KiB per thread under HT) are below it and unchanged. Below the
+  the i5-13500 (256 KiB per thread under HT) are below it and unchanged. Whatever
+  sysfs claims, the automatic base width never exceeds 32 x L1d: Docker
+  Desktop's VM reports the host's L3 as a private L2 per vCPU and chose a
+  2 MiB segment on a 256 KiB-L2 core, 2.14x primesieve. Below the
   sparse regime, when each thread has a core to itself (no SMT, or `-t` at
   or below the core count), the base segment is the **whole** L2 share (within
   32 x L1d) rather than half: the half is the hyperthread sibling's share, and

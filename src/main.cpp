@@ -889,6 +889,30 @@ int main(int argc, char** argv) {
     for (uint64_t s : topo.l2_share)
         if (s && (min_l2_share == 0 || s < min_l2_share)) min_l2_share = s;
 
+    // Cap on the automatic base width: 32 x L1d, whatever sysfs claims for
+    // the L2. The base is half of cpu0's L2 (arg_parser.hpp), and below the
+    // sparse regime nothing else bounds it. Docker Desktop runs containers
+    // in its own VM (also on Linux): on a 2010 MacBook Pro (i7 M620, Ubuntu
+    // host) its sysfs reports a 4 MiB L2 per vCPU (the host's L3 -- the
+    // real L2 is 256 KiB) and the base came out as 2 MiB: 2.14x primesieve on the
+    // last 1e10 below 1e13, against 1.07x with 1 MiB and 0.96x with
+    // 512 KiB (make benchmark-mini, 2026-10-03). Every real machine
+    // measured so far already sits at or under this cap (Emerald Rapids
+    // 1.5 MiB = 32 x 48 KiB, Xeon 2.80 1 MiB = 32 x 32 KiB, the HT
+    // machines far below), so only a lying topology reaches it. Applied
+    // before sparse_regime is evaluated, so the doubling and the ceiling
+    // below see the capped width. -s and --l2-bytes are left alone. See
+    // docs/RESEARCH.md#base-segment-capped-at-32-x-l1d-a-vm-whose-sysfs-reports-the-hosts-l3-as-l2-kept-2026-10-03.
+    uint64_t seg_l1_capped_k = 0; // startup log: the width before this cap, 0 if it didn't apply
+    if (!opt.segment_width_set && !opt.l2_bytes_override) {
+        const uint64_t cap_k = 32 * l1_max * 8 / 64 * 64;
+        if (seg_k_width > cap_k) {
+            seg_l1_capped_k = seg_k_width;
+            seg_k_width = cap_k;
+            opt.segment_width = seg_k_width * WHEEL_MOD / WHEEL_SIZE; // keep the startup log's "segment=" accurate
+        }
+    }
+
     // Once some base prime would be sparse (isqrt(N) >= seg_k_width), use
     // the whole per-thread L2 share instead of half: every medium/med64
     // prime pays a fixed cost per segment (state load/store, loop exit
@@ -1207,6 +1231,11 @@ int main(int argc, char** argv) {
     if (whole_l2_base)
         std::fprintf(stderr, "  segment: whole L2 per thread (%u threads <= %u cores, no sparse tier)\n",
                      opt.threads, l1_big_cores);
+    if (seg_l1_capped_k)
+        std::fprintf(stderr, "  segment: %llu KiB instead of %llu KiB (cap: 32 x L1d; sysfs reports %llu KiB of L2 per thread)\n",
+                     static_cast<unsigned long long>(seg_k_width / 8 / 1024),
+                     static_cast<unsigned long long>(seg_l1_capped_k / 8 / 1024),
+                     static_cast<unsigned long long>(min_l2_share / 1024));
     if (seg_uncapped_k)
         std::fprintf(stderr, "  segment: %llu KiB instead of %llu KiB (ceiling: the L2 per thread, 16-32 x L1d)\n",
                      static_cast<unsigned long long>(seg_k_width / 8 / 1024),
