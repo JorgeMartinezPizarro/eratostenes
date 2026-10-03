@@ -2375,6 +2375,34 @@ Rapids hosts 1.92x / 1.88x and 1.98x / 1.97x. Two real cores on all three
 VMs, so that loss is not a shared physical core. At `-t 1` the ratios are
 1.04x (Xeon 2.80), 1.02x and 0.95x (Emerald Rapids): the same as at `-t 2`.
 
+**Validation of the ceiling change (0192744, `REPS=3 make benchmark-tails`,
+best of 3, same day):** the Xeon 2.80 host, auto now 1 MiB, against its
+691509d table (512 KiB, best of 2):
+
+| N | 691509d | 0192744 | all 3 reps | primesieve 691509d / 0192744 |
+|---|---:|---:|---|---:|
+| 1e13 | 14.13 | 14.19 (+0.4%) | 14.61, 14.19, 14.81 | 13.58 / 13.91 |
+| 1e14 | 18.18 | 17.69 (-2.7%) | 17.72, 17.69, 18.13 | 16.21 / 16.27 |
+| 1e15 | 20.84 | 20.80 (-0.2%) | 21.17, 20.80, 21.17 | 19.79 / 18.94 |
+| 1e16 | 24.52 | 24.07 (-1.8%) | 24.07, 24.68, 24.33 | 21.89 / 21.80 |
+| 1e17 | 28.89 | 28.56 (-1.1%) | 29.26, 28.85, 28.56 | 24.88 / 27.08 |
+| 1e18 | 34.32 | 33.57 (-2.2%) | 34.28, 33.57, 33.82 | 33.71 / 32.59 |
+
+primesieve within 2% of its previous best at every N but 1e17 (host), so the
+host state is comparable. 1e13 unchanged, as it should be (no sparse tier
+there, the whole-L2 base rule already gave 1 MiB). 1e14 and 1e18: every rep
+below both 691509d reps; 1e16 and 1e17: the best rep below, the spread
+overlapping; 1e15: flat, as in the `-s` sweep (-0.7% there). Smaller than
+the `-s 31457280` runs promised (-2..-5%), the sign is the same in all four
+tails where it was expected. Ratios 1.02 / 1.09 / 1.10 / 1.10 / 1.05 / 1.03x
+(BENCHMARK.md updated); the 1e15 1.10x is primesieve's fast run, not a
+regression. The two Emerald Rapids operators ran the same commit with the
+same effective binary: 1.00 / 0.95 / 0.99 / 1.01 / 1.02 / 1.01x on the host
+in its fast state, 0.91 / 0.98 / 0.93 / 1.01 / 0.93 / 0.97x on a host 10%
+slower that day for both programs -- the host-to-host spread again; the
+BENCHMARK.md table there stays on the 691509d round, which was faster in
+every tail.
+
 ### Whole-L2 base segment: one thread per core, no sparse tier (kept, 2026-10-03)
 
 The base segment is half the L2 share so the segment, the tiers' state and a
