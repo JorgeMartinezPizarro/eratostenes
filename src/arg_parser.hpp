@@ -17,6 +17,8 @@
 #include <algorithm>
 #include <vector>
 
+#include <zstd.h>
+
 #include "cpu_cache.hpp"
 #include "wheel.hpp"
 
@@ -29,7 +31,7 @@ struct Options {
     // format, anything else is plain text.
     std::string output;
     // Numeric width per segment (must be even). 0 means "auto": half the
-    // detected L2 (see parse_args), adjusted in main.cpp (smallest per-CPU
+    // detected L2 (see parse_args), adjusted in tuning.hpp (smallest per-CPU
     // L2 share on hybrids, doubled once the sparse tier exists, power of 2
     // in bytes for the sparse ring). An explicit -s is used as given.
     uint64_t segment_width = 0;
@@ -51,7 +53,7 @@ struct Options {
     // guaranteed everywhere -- a container runtime, an unusual kernel, or
     // a hybrid P-core/E-core topology can all make it fail silently and
     // fall back to a conservative default sized for a small machine (see
-    // where these are used in main.cpp/parse_args below), which costs
+    // where these are used in tuning.hpp/parse_args below), which costs
     // real speed on a bigger machine without saying so anywhere. These
     // flags are the escape hatch when that happens: safe to try because
     // neither touches anything on the per-segment hot path, only how
@@ -76,7 +78,7 @@ struct Options {
     };
     Fraction tune_small;  // small/med64 cutoff, default 1/4
     Fraction tune_med64;  // med64/medium cutoff, default 1/12 (0 = no med64 tier)
-    Fraction tune_sparse; // medium/sparse cutoff, default 1/1 or 1/2 (main.cpp); lowering only
+    Fraction tune_sparse; // medium/sparse cutoff, default 1/1, 1/2 or 1/4 (tuning.hpp); in (0, 1]
     bool big2310 = true; // sparse tier on the mod-2310 wheel (false: mod-210)
     int medium_nta = -1; // medium-tier prefetchnta: -1 auto (L3 gate), 1 on, 0 off
     uint64_t minsegs = 1;    // smallest chunk, in segments (main.cpp's MIN_SEGS_PER_CHUNK)
@@ -150,6 +152,22 @@ inline uint64_t parse_size(const std::string& raw) {
     return static_cast<uint64_t>(mant);
 }
 
+// Strict signed integer for --zstd-level, within zstd's own range
+// (ZSTD_minCLevel()..ZSTD_maxCLevel(), negative levels being zstd's fast
+// modes): std::stoi took "abc" as an exception named "stoi" and let any
+// integer through to the compressor.
+inline int parse_zstd_level(const std::string& v) {
+    const size_t digits = v.size() - (!v.empty() && v[0] == '-' ? 1 : 0);
+    if (digits == 0 || digits > 7 ||
+        !std::all_of(v.begin() + (v.size() - digits), v.end(), [](char c) { return std::isdigit(static_cast<unsigned char>(c)); }))
+        throw std::runtime_error("invalid zstd level: " + v);
+    const int level = std::stoi(v);
+    if (level < ZSTD_minCLevel() || level > ZSTD_maxCLevel())
+        throw std::runtime_error("zstd level out of range: " + v + " (" + std::to_string(ZSTD_minCLevel()) + ".." +
+                                 std::to_string(ZSTD_maxCLevel()) + ")");
+    return level;
+}
+
 // Strict unsigned count for -t: std::stoul accepts "-1" and wraps it to
 // ULONG_MAX threads.
 inline unsigned parse_threads(const std::string& v) {
@@ -188,7 +206,14 @@ inline void parse_tune(Options& opt, const std::string& kv) {
     const std::string k = kv.substr(0, eq), v = kv.substr(eq + 1);
     if (k == "small") opt.tune_small = parse_fraction(k, v);
     else if (k == "med64") opt.tune_med64 = parse_fraction(k, v);
-    else if (k == "sparse") opt.tune_sparse = parse_fraction(k, v);
+    else if (k == "sparse") {
+        // Lowering only: the dense tiers' state is sized for p < the segment
+        // width (SegmentSieve's constructor), so a/b above 1 can't be honoured,
+        // and 0 would send every base prime to the bucket ring.
+        opt.tune_sparse = parse_fraction(k, v);
+        if (opt.tune_sparse.num == 0 || opt.tune_sparse.num > opt.tune_sparse.den)
+            throw std::runtime_error("--tune sparse: expected a fraction in (0, 1], not '" + v + "'");
+    }
     else if (k == "big2310") opt.big2310 = parse_switch(k, v, "1", "0");
     else if (k == "medium_nta") opt.medium_nta = parse_switch(k, v, "1", "0") ? 1 : 0;
     else if (k == "minsegs") { opt.minsegs = parse_fraction(k, v).num; if (opt.minsegs < 1) throw std::runtime_error("--tune minsegs: at least 1"); }
@@ -238,8 +263,8 @@ inline void print_usage(const char* prog) {
         "Fine tuning (--tune key=value, repeatable; see docs/RESEARCH.md):\n"
         "      small=a/b          Small/med64 cutoff (default 1/4 of the segment)\n"
         "      med64=a/b          med64/medium cutoff (default 1/12; 0 = no med64)\n"
-        "      sparse=a/b         Medium/sparse cutoff, lowering only\n"
-        "                         (default 1/1, or 1/2 with >= 512 KiB L2 per thread)\n"
+        "      sparse=a/b         Medium/sparse cutoff, in (0, 1] (default 1/1;\n"
+        "                         1/2 from 512 KiB and 1/4 from 1 MiB of L2 per thread)\n"
         "      big2310=1|0        Sparse tier on the mod-2310 (default 1) or mod-210 wheel\n"
         "      medium_nta=1|0     Force medium-tier prefetchnta on/off (default:\n"
         "                         on once its state outgrows the L3 share)\n"
@@ -281,7 +306,7 @@ inline Options parse_args(int argc, char** argv) {
         } else if (a == "--db-block-size") {
             opt.db_block_size = parse_size(need_value(i, a.c_str()));
         } else if (a == "--zstd-level") {
-            opt.zstd_level = std::stoi(need_value(i, a.c_str()));
+            opt.zstd_level = parse_zstd_level(need_value(i, a.c_str()));
         } else if (a == "--l2-bytes") {
             opt.l2_bytes_override = parse_size(need_value(i, a.c_str()));
         } else if (a == "--l1-bytes") {
@@ -319,6 +344,11 @@ inline Options parse_args(int argc, char** argv) {
     constexpr uint64_t MAX_LIMIT = UINT64_MAX - 16 * (uint64_t{1} << 32);
     if (opt.limit > MAX_LIMIT)
         throw std::runtime_error("N too large: at most " + std::to_string(MAX_LIMIT) + " (2^64 - 2^32 * 16)");
+    // A --start at or past N used to be dropped silently and the whole
+    // [0, N] sieved instead.
+    if (opt.start >= opt.limit && opt.start != 0)
+        throw std::runtime_error("--start must be below N (" + std::to_string(opt.start) + " >= " +
+                                 std::to_string(opt.limit) + ")");
     if (opt.threads == 0) {
         opt.threads = std::max(1u, std::thread::hardware_concurrency());
     }
@@ -345,7 +375,7 @@ inline Options parse_args(int argc, char** argv) {
     // The segment stays L2-sized (it is also the medium/sparse tier
     // cutoff); L1 residency for the small primes -- the bulk of all marks
     // -- comes from crossing them off one L1d-sized sub-block of the
-    // segment at a time instead (see main.cpp's SUB_BLOCK_BYTES and
+    // segment at a time instead (see tuning.hpp's sub-block sizing and
     // SegmentSieve::sieve_and_emit), which keeps those two roles decoupled.
     if (opt.segment_width < 64) opt.segment_width = 64;
     if (opt.segment_width % 2 != 0) opt.segment_width += 1; // must be even

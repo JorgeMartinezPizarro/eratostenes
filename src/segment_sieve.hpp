@@ -1,7 +1,7 @@
 #pragma once
 // Segmented sieve on a compile-time wheel (see wheel.hpp), bit-packed into
 // uint64_t words. Four prime tiers by expected hits per segment -- small,
-// med64, medium, sparse (cutoffs computed in main.cpp) -- mirroring
+// med64, medium, sparse (cutoffs computed in tuning.hpp) -- mirroring
 // primesieve's own EratSmall/EratMedium/EratBig split, plus this project's
 // own med64 sub-band. See docs/ALGORITHM.md §6 for how and why each tier
 // works the way it does, and docs/RESEARCH.md for every tried-and-reverted
@@ -64,7 +64,7 @@ public:
     // has_sparse: true when this run actually has any sparse-tier primes.
     // The new EratBig-style tier below needs seg_k_width/8 (the segment
     // width in BYTES) to be a power of 2 so its bucket-slot math is a
-    // shift/mask instead of a division -- main.cpp is responsible for
+    // shift/mask instead of a division -- tuning.hpp is responsible for
     // flooring seg_k_width to the nearest power of 2 (in bytes) whenever
     // has_sparse is true; this constructor just verifies that was done.
     SegmentSieve(uint64_t seg_k_width, uint64_t base_prime_max, const Presieve& presieve,
@@ -182,7 +182,7 @@ public:
             for (auto& v : m64_nxt_) v.reserve(per_list);
             med64_reserved_ = true;
         }
-        activate_dense(small_primes, next_small_idx_, small_, true, high_n, low_n, k_low);
+        activate_dense(small_primes, next_small_idx_, small_, high_n, low_n, k_low);
         activate_med64(med64_primes, next_med64_idx_, m64_cur_.data(), high_n, low_n, k_low);
         activate_medium(medium_primes, next_medium_idx_, medium_dyn_, medium_qd_, medium_qp_base_, medium_qp_last_,
                         medium_bands_, seg_k_width_ / 8, high_n, low_n, k_low);
@@ -227,7 +227,6 @@ public:
         uint64_t count = (k_high > k_low) ? (k_high - k_low) : 0;
         if (count == 0) return;
 
-        size_t words_needed = (count + 63) / 64;
         uint64_t bytes_needed = (count + 7) / 8;
 
         activate(k_low, k_high, small_primes, med64_primes, medium_primes, sparse_primes);
@@ -278,7 +277,7 @@ public:
         // residue class so PR is a compile-time template parameter in
         // cross_off_medium<PR>, same reasoning as the small tier's
         // cross_off_class<PR> calls just above; NTA picked per TierSet (see
-        // main.cpp's MEDIUM_NTA_MIN_PRIMES).
+        // tuning.hpp's SieveConfig::medium_nta_min_primes).
         if (medium_nta_) run_medium<true>(bytes, bytes_needed);
         else run_medium<false>(bytes, bytes_needed);
 
@@ -295,57 +294,68 @@ public:
         }
         ++cur_segment_;
 
-        // Extraction: bit=0 => prime candidate. Accumulated locally and
-        // added to prime_count once at the end, instead of read-modify-
-        // writing through the reference every word (count-only) or every
-        // single prime (value extraction) -- prime_count is a reference
-        // into the caller's frame, so the compiler can't always prove
-        // nothing else aliases it and keep it in a register across this
-        // loop; a local can't be aliased by anything, so it stays in a
-        // register for the whole function.
-        uint64_t local_prime_count = 0;
-        // count-only (NullSink): a plain popcount over the full words, four
-        // independent accumulators, and the partial last word masked once
-        // after the loop. The generic loop below checked "last word?" and
-        // "zero word?" on every word, which GCC kept as a cmove chain on the
-        // running sum: ~13 instructions per word instead of ~4, ~60% of
-        // sieve_chunk's own cycles on the i5-13500 (perf annotate, 1e14 tail).
-        if constexpr (!Writer::WANTS_VALUES) {
-            const uint64_t* wp = words_.data();
-            const size_t full = count / 64;
-            uint64_t c0 = 0, c1 = 0, c2 = 0, c3 = 0;
-            size_t w = 0;
-            for (; w + 4 <= full; w += 4) {
-                c0 += static_cast<uint64_t>(__builtin_popcountll(wp[w]));
-                c1 += static_cast<uint64_t>(__builtin_popcountll(wp[w + 1]));
-                c2 += static_cast<uint64_t>(__builtin_popcountll(wp[w + 2]));
-                c3 += static_cast<uint64_t>(__builtin_popcountll(wp[w + 3]));
-            }
-            for (; w < full; ++w) c0 += static_cast<uint64_t>(__builtin_popcountll(wp[w]));
-            // bit = 0 => prime: zeros among the full words, then the partial word's.
-            uint64_t primes = full * 64 - (c0 + c1 + c2 + c3);
-            if (const uint64_t rem = count % 64)
-                primes += static_cast<uint64_t>(__builtin_popcountll(~wp[full] & ((uint64_t{1} << rem) - 1)));
-            prime_count += primes;
-            return;
+        // Extraction: bit=0 => prime candidate. Three paths, by what the
+        // sink can take (see below).
+        if constexpr (!Writer::WANTS_VALUES) prime_count += count_primes(count);
+        else if constexpr (requires { out.write_k(uint64_t{0}); }) prime_count += emit_indices(k_low, count, out);
+        else prime_count += emit_values(k_low, count, out);
+    }
+
+private:
+    // count-only (NullSink): a plain popcount over the full words, four
+    // independent accumulators, and the partial last word masked once
+    // after the loop. A generic loop that checked "last word?" and "zero
+    // word?" on every word was kept by GCC as a cmove chain on the running
+    // sum: ~13 instructions per word instead of ~4, ~60% of sieve_chunk's
+    // own cycles on the i5-13500 (perf annotate, 1e14 tail).
+    uint64_t count_primes(uint64_t count) const {
+        const uint64_t* wp = words_.data();
+        const size_t full = count / 64;
+        uint64_t c0 = 0, c1 = 0, c2 = 0, c3 = 0;
+        size_t w = 0;
+        for (; w + 4 <= full; w += 4) {
+            c0 += static_cast<uint64_t>(__builtin_popcountll(wp[w]));
+            c1 += static_cast<uint64_t>(__builtin_popcountll(wp[w + 1]));
+            c2 += static_cast<uint64_t>(__builtin_popcountll(wp[w + 2]));
+            c3 += static_cast<uint64_t>(__builtin_popcountll(wp[w + 3]));
         }
-        // Sinks that take wheel indices (GapBlockSink::write_k): a prime's
-        // index is just k_low + its bit position, no value to rebuild.
-        if constexpr (requires { out.write_k(uint64_t{0}); }) {
-            for (size_t w = 0; w < words_needed; ++w) {
-                uint64_t bits = ~words_[w];
-                uint64_t remaining = count - w * 64ULL; // >= 1 for every w < words_needed
-                if (remaining < 64) bits &= (1ULL << remaining) - 1ULL;
-                const uint64_t k_word = k_low + w * 64ULL;
-                while (bits) {
-                    out.write_k(k_word + static_cast<uint64_t>(__builtin_ctzll(bits)));
-                    ++local_prime_count;
-                    bits &= bits - 1;
-                }
+        for (; w < full; ++w) c0 += static_cast<uint64_t>(__builtin_popcountll(wp[w]));
+        // bit = 0 => prime: zeros among the full words, then the partial word's.
+        uint64_t primes = full * 64 - (c0 + c1 + c2 + c3);
+        if (const uint64_t rem = count % 64)
+            primes += static_cast<uint64_t>(__builtin_popcountll(~wp[full] & ((uint64_t{1} << rem) - 1)));
+        return primes;
+    }
+
+    // Sinks that take wheel indices (GapBlockSink::write_k): a prime's index
+    // is k_low plus its bit position, no value to rebuild. The count is
+    // accumulated in a local and returned (a reference into the caller's
+    // frame could alias the sink's state; a local stays in a register).
+    template <typename Writer>
+    uint64_t emit_indices(uint64_t k_low, uint64_t count, Writer& out) const {
+        const size_t words_needed = (count + 63) / 64;
+        uint64_t n = 0;
+        for (size_t w = 0; w < words_needed; ++w) {
+            uint64_t bits = ~words_[w];
+            uint64_t remaining = count - w * 64ULL; // >= 1 for every w < words_needed
+            if (remaining < 64) bits &= (1ULL << remaining) - 1ULL;
+            const uint64_t k_word = k_low + w * 64ULL;
+            while (bits) {
+                out.write_k(k_word + static_cast<uint64_t>(__builtin_ctzll(bits)));
+                ++n;
+                bits &= bits - 1;
             }
-            prime_count += local_prime_count;
-            return;
         }
+        return n;
+    }
+
+    // Value sinks: invert each word, decompose into (q, r) = (k / WHEEL_SIZE,
+    // k % WHEEL_SIZE) once per word, then walk the set bits with ctz +
+    // clear-lowest-bit, stepping (q, r) by the bit distance.
+    template <typename Writer>
+    uint64_t emit_values(uint64_t k_low, uint64_t count, Writer& out) const {
+        const size_t words_needed = (count + 63) / 64;
+        uint64_t n = 0;
         for (size_t w = 0; w < words_needed; ++w) {
             uint64_t bits = ~words_[w];
             uint64_t base_idx = w * 64ULL;
@@ -375,29 +385,25 @@ public:
 
                 uint64_t value = q * WHEEL_MOD + WHEEL_R[r];
                 out.write_uint64(value);
-                ++local_prime_count;
+                ++n;
                 bits &= bits - 1; // clear the lowest set bit
             }
         }
-        prime_count += local_prime_count;
+        return n;
     }
 
-private:
-    // Activates (appends state for) every prime in `primes` from `next`
-    // on whose square falls below this segment's end; `primes` is sorted,
-    // so this touches each prime exactly once per chunk. by_class: the
-    // small tier -- byte positions, and one output list per residue class
-    // (state[pr]).
+    // Small tier: activates (appends state for) every prime in `primes`
+    // from `next` on whose square falls below this segment's end; `primes`
+    // is sorted, so this touches each prime exactly once per chunk. Byte
+    // positions, one output list per residue class (state[pr]).
     __attribute__((noinline)) static void activate_dense(const std::vector<uint64_t>& primes, size_t& next,
-                               std::vector<erat::DenseState>* state, bool by_class,
+                               std::vector<erat::DenseState>* state,
                                uint64_t high_n, uint64_t low_n, uint64_t k_low) {
         while (next < primes.size()) {
             uint64_t p = primes[next];
             if (p * p >= high_n) break;
             uint64_t start_val = std::max(p * p, low_n);
             uint64_t pr = static_cast<uint64_t>(WHEEL_POS[p % WHEEL_MOD]);
-            (void)by_class; // small tier only now; kept for call-site symmetry with activate_medium
-
             // Small tier: smallest m coprime with WHEEL_MOD (30) with
             // p*m >= start_val -- byte position, (qp<<6)|(pr<<3)|j
             // packing (erat_small.hpp::cross_off_class).
@@ -507,7 +513,7 @@ private:
     // at the same phase w -- a well-predicted jump instead of a per-prime
     // dispatch. Runs over the WHOLE segment (bytes_needed), not sub-blocked
     // like the small tier: this tier's population is bounded by
-    // small_limit/med64_limit (see main.cpp), not chasing L1 residency.
+    // small_limit/med64_limit (see tuning.hpp), not chasing L1 residency.
     // Each entry is read from m64_cur_, stepped, and re-filed into m64_nxt_
     // keyed by its NEW exit phase and rebased by bytes_needed --
     // sieve_and_emit clears m64_cur_ and swaps the two buffers once every
@@ -547,27 +553,27 @@ private:
 
     // Medium tier over the whole segment, one call per residue class; the
     // rebase is the segment's own width, like process_med64's.
+    // One call per residue class PR (a compile-time template parameter in
+    // erat_small.hpp's kernels, like cross_off_class<PR> for the small tier).
+    template <bool NTA, int PR>
+    void run_medium_class(uint8_t* bytes, uint64_t bytes_needed) {
+        if constexpr (ERA_MED_BANDS) {
+            erat::cross_off_medium_banded<PR, NTA>(bytes, bytes_needed, medium_dyn_[PR].data(), medium_qd_[PR].data(),
+                                                   medium_qp_base_[PR], bytes_needed, medium_bands_[PR].data(),
+                                                   medium_bands_[PR].data() + medium_bands_[PR].size());
+        } else {
+            erat::cross_off_medium<PR, NTA>(bytes, bytes_needed, medium_dyn_[PR].data(),
+                                            medium_dyn_[PR].data() + medium_dyn_[PR].size(), medium_qd_[PR].data(),
+                                            medium_qp_base_[PR], bytes_needed);
+        }
+    }
+    template <bool NTA, int... PR>
+    void run_medium_all(uint8_t* bytes, uint64_t bytes_needed, std::integer_sequence<int, PR...>) {
+        (run_medium_class<NTA, PR>(bytes, bytes_needed), ...);
+    }
     template <bool NTA>
     void run_medium(uint8_t* bytes, uint64_t bytes_needed) {
-        if constexpr (ERA_MED_BANDS) {
-            erat::cross_off_medium_banded<0, NTA>(bytes, bytes_needed, medium_dyn_[0].data(), medium_qd_[0].data(), medium_qp_base_[0], bytes_needed, medium_bands_[0].data(), medium_bands_[0].data() + medium_bands_[0].size());
-            erat::cross_off_medium_banded<1, NTA>(bytes, bytes_needed, medium_dyn_[1].data(), medium_qd_[1].data(), medium_qp_base_[1], bytes_needed, medium_bands_[1].data(), medium_bands_[1].data() + medium_bands_[1].size());
-            erat::cross_off_medium_banded<2, NTA>(bytes, bytes_needed, medium_dyn_[2].data(), medium_qd_[2].data(), medium_qp_base_[2], bytes_needed, medium_bands_[2].data(), medium_bands_[2].data() + medium_bands_[2].size());
-            erat::cross_off_medium_banded<3, NTA>(bytes, bytes_needed, medium_dyn_[3].data(), medium_qd_[3].data(), medium_qp_base_[3], bytes_needed, medium_bands_[3].data(), medium_bands_[3].data() + medium_bands_[3].size());
-            erat::cross_off_medium_banded<4, NTA>(bytes, bytes_needed, medium_dyn_[4].data(), medium_qd_[4].data(), medium_qp_base_[4], bytes_needed, medium_bands_[4].data(), medium_bands_[4].data() + medium_bands_[4].size());
-            erat::cross_off_medium_banded<5, NTA>(bytes, bytes_needed, medium_dyn_[5].data(), medium_qd_[5].data(), medium_qp_base_[5], bytes_needed, medium_bands_[5].data(), medium_bands_[5].data() + medium_bands_[5].size());
-            erat::cross_off_medium_banded<6, NTA>(bytes, bytes_needed, medium_dyn_[6].data(), medium_qd_[6].data(), medium_qp_base_[6], bytes_needed, medium_bands_[6].data(), medium_bands_[6].data() + medium_bands_[6].size());
-            erat::cross_off_medium_banded<7, NTA>(bytes, bytes_needed, medium_dyn_[7].data(), medium_qd_[7].data(), medium_qp_base_[7], bytes_needed, medium_bands_[7].data(), medium_bands_[7].data() + medium_bands_[7].size());
-            return;
-        }
-        erat::cross_off_medium<0, NTA>(bytes, bytes_needed, medium_dyn_[0].data(), medium_dyn_[0].data() + medium_dyn_[0].size(), medium_qd_[0].data(), medium_qp_base_[0], bytes_needed);
-        erat::cross_off_medium<1, NTA>(bytes, bytes_needed, medium_dyn_[1].data(), medium_dyn_[1].data() + medium_dyn_[1].size(), medium_qd_[1].data(), medium_qp_base_[1], bytes_needed);
-        erat::cross_off_medium<2, NTA>(bytes, bytes_needed, medium_dyn_[2].data(), medium_dyn_[2].data() + medium_dyn_[2].size(), medium_qd_[2].data(), medium_qp_base_[2], bytes_needed);
-        erat::cross_off_medium<3, NTA>(bytes, bytes_needed, medium_dyn_[3].data(), medium_dyn_[3].data() + medium_dyn_[3].size(), medium_qd_[3].data(), medium_qp_base_[3], bytes_needed);
-        erat::cross_off_medium<4, NTA>(bytes, bytes_needed, medium_dyn_[4].data(), medium_dyn_[4].data() + medium_dyn_[4].size(), medium_qd_[4].data(), medium_qp_base_[4], bytes_needed);
-        erat::cross_off_medium<5, NTA>(bytes, bytes_needed, medium_dyn_[5].data(), medium_dyn_[5].data() + medium_dyn_[5].size(), medium_qd_[5].data(), medium_qp_base_[5], bytes_needed);
-        erat::cross_off_medium<6, NTA>(bytes, bytes_needed, medium_dyn_[6].data(), medium_dyn_[6].data() + medium_dyn_[6].size(), medium_qd_[6].data(), medium_qp_base_[6], bytes_needed);
-        erat::cross_off_medium<7, NTA>(bytes, bytes_needed, medium_dyn_[7].data(), medium_dyn_[7].data() + medium_dyn_[7].size(), medium_qd_[7].data(), medium_qp_base_[7], bytes_needed);
+        run_medium_all<NTA>(bytes, bytes_needed, std::make_integer_sequence<int, 8>{});
     }
 
     // Processes exactly the sparse-tier entries due this segment: mark,

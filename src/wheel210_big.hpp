@@ -60,7 +60,7 @@ constexpr std::array<uint8_t, 211> make_next() {
 }
 inline constexpr std::array<uint8_t, 211> NEXT_W = make_next();
 
-// Mod-2310 multiplier wheel for the sparse tier (default, see main.cpp's BIG_2310): 11
+// Mod-2310 multiplier wheel for the sparse tier (default, see SieveConfig::big2310 in tuning.hpp): 11
 // is presieved too (presieve.hpp), so multipliers that are multiples of 11
 // only re-mark composites the presieve pattern already has -- 480/2310 phases
 // instead of 48/210, ~9.1% fewer sparse hits.

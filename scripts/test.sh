@@ -20,6 +20,12 @@
 #      mod 2310 y mod 210; sin med64; cortes rebajados, combinados), y
 #      --start sobre varios tramos (el recuento es pi(N) - pi(N0 - 1)),
 #      uno de ellos por encima de 2^53 (parseo exacto de N).
+#   6. Limites pequenos (N < 2, N < 7) en los tres modos, argumentos que deben
+#      rechazarse, y las reglas de ajuste del segmento leidas en el log de
+#      arranque con --l1-bytes/--l2-bytes forzados (deterministas).
+#   7. Un tramo del regimen sparse real (ultima 1e8 bajo 1e15) contra
+#      primecount, y los errores que nth_prime debe detectar (.blk truncado
+#      o ausente, posiciones fuera de rango).
 # Los valores esperados en 1, 2, 3 y 5 salen de primecount, no de constantes
 # hardcodeadas -- necesita estar instalado (Debian/Ubuntu: paquete
 # primecount-bin; ver docker/Dockerfile, etapa "dev").
@@ -261,6 +267,125 @@ else
     printf "OK   %-40s rechazado\n" "--start con -o"
 fi
 
+
+# --- 6: limites pequenos, rechazos y reglas de ajuste (todo instantaneo) ---
+
+# N < 2 y N < 7 (los caminos cortos de main) y un N normal pequeno, en
+# conteo, .txt y .db; el ultimo primo del .db contra la ultima linea del .txt.
+check_tiny() {
+    local n="$1" expected="$2" out c lines dbc
+    out=$("$BIN" "$n" 2>&1)
+    c=$(echo "$out" | sed -nE 's/.*Done\. ([0-9]+) prime.*/\1/p')
+    [ "$c" == "$expected" ] || { printf "FAIL tiny N=%-4s conteo=%s esperado=%s\n" "$n" "$c" "$expected"; fail=1; return; }
+    "$BIN" "$n" -o "$WORKDIR/tiny.txt" >/dev/null 2>&1
+    lines=$(grep -c . "$WORKDIR/tiny.txt" || true)
+    [ "$lines" == "$expected" ] || { printf "FAIL tiny N=%-4s txt=%s esperado=%s\n" "$n" "$lines" "$expected"; fail=1; return; }
+    "$BIN" "$n" -o "$WORKDIR/tiny.db" >/dev/null 2>&1
+    dbc=$("$NTH_BIN" "$WORKDIR/tiny.db" --count 2>&1)
+    [ "$dbc" == "$expected" ] || { printf "FAIL tiny N=%-4s db=%s esperado=%s\n" "$n" "$dbc" "$expected"; fail=1; return; }
+    if [ "$expected" -gt 0 ]; then
+        local last want
+        last=$("$NTH_BIN" "$WORKDIR/tiny.db" "$expected" 2>&1)
+        want=$(tail -1 "$WORKDIR/tiny.txt")
+        [ "$last" == "$want" ] || { printf "FAIL tiny N=%-4s db[%s]=%s txt=%s\n" "$n" "$expected" "$last" "$want"; fail=1; return; }
+    fi
+    printf "OK   tiny N=%-4s pi(N)=%-3s (conteo, txt, db)\n" "$n" "$expected"
+}
+check_tiny 0 0
+check_tiny 1 0
+check_tiny 2 1
+check_tiny 6 3
+check_tiny 7 4
+check_tiny 30 10
+check_tiny 100 25
+
+# Argumentos que deben rechazarse antes de cribar nada.
+expect_reject() {
+    local label="$1"; shift
+    if "$BIN" "$@" >/dev/null 2>&1; then
+        printf "FAIL %-40s deberia rechazarse\n" "$label"; fail=1
+    else
+        printf "OK   %-40s rechazado\n" "$label"
+    fi
+}
+expect_reject "--start = N"              1000000 --start 1000000
+expect_reject "--start > N"              1000000 --start 2000000
+expect_reject "N > MAX_LIMIT"            18446744073709551615
+expect_reject "N = 1e20"                 1e20
+expect_reject "N = 2.5 (no entero)"      2.5
+expect_reject "sin N"                    -t 2
+expect_reject "segundo N posicional"     1000 2000
+expect_reject "-t -1"                    1000 -t -1
+expect_reject "-s sin valor"             1000 -s
+expect_reject "opcion desconocida"       1000 --bogus
+expect_reject "--tune desconocido"       1000 --tune foo=1
+expect_reject "--tune sparse=2/1"        1000 --tune sparse=2/1
+expect_reject "--tune sparse=0"          1000 --tune sparse=0
+expect_reject "--tune big2310=2"         1000 --tune big2310=2
+expect_reject "--zstd-level abc"         1000 --zstd-level abc
+expect_reject "--zstd-level 99"          1000 --zstd-level 99
+
+# Reglas de ajuste del segmento, leidas en el log de arranque sobre una cola
+# de 1e6 (instantanea): con --l1-bytes/--l2-bytes forzados las decisiones no
+# dependen de la maquina. Lo que sysfs decide (cuota real de L2, hilos por
+# nucleo) no se comprueba aqui.
+expect_log() {
+    local label="$1" pattern="$2"; shift 2
+    local out
+    out=$("$BIN" "$@" 2>&1 >/dev/null)
+    if echo "$out" | grep -qE "$pattern"; then
+        printf "OK   %-40s %s\n" "$label" "$pattern"
+    else
+        printf "FAIL %-40s no aparece '%s'\n" "$label" "$pattern"
+        echo "$out" | grep -E "^Starting|^  " | sed 's/^/     /'
+        fail=1
+    fi
+}
+T13="10000000000000 --start 9999999000000 -t 2"
+T15="1000000000000000 --start 999999999000000 -t 2"
+# base 4 MiB from an 8 MiB L2, capped to 32 x 4 KiB = 128 KiB (3932160 numbers)
+expect_log "cap 32 x L1d (sysfs mentiroso)"  "cap: 32 x L1d"                   $T13 --l1-bytes 4096 --l2-bytes 8388608
+expect_log "cap: segmento de 128 KiB"         "segment=3932160,"                $T13 --l1-bytes 4096 --l2-bytes 8388608
+# 1 MiB base from a 2 MiB L2, doubled in the sparse regime, back to the L2 (1 MiB) by the ceiling
+expect_log "tope: L2 por hilo en regimen sparse" "ceiling: the L2 per thread"   $T15 --l1-bytes 32768 --l2-bytes 2097152
+expect_log "tope: segmento de 1 MiB"          "segment=31457280,"               $T15 --l1-bytes 32768 --l2-bytes 2097152
+# an explicit 1.5 MiB -s rounded down to the power of 2 the sparse tier needs
+expect_log "-s redondeado a potencia de 2"    "a power of 2 for the sparse tier" $T15 -s 47185920
+expect_log "-s redondeado: 1 MiB"             "segment=31457280,"               $T15 -s 47185920
+expect_log "-s respetado sin tier sparse"     "segment=47185920,"               $T13 -s 47185920
+expect_log "--tune sparse en el log"          "sparse cutoff: 1/2 of the segment \(--tune sparse\)" $T15 --tune sparse=1/2
+expect_log "--tune medium_nta forzado"        "medium-tier prefetchnta: no \(forced" $T13 --tune medium_nta=0
+
+# --- 7: un tramo del regimen sparse real (la ultima 1e8 bajo 1e15, 1.8M
+# primos base, el corte automatico de esta maquina) contra primecount, y los
+# errores que nth_prime debe detectar ---
+check_start 1000000000000000 999999900000000 -t 2
+
+DB7="$WORKDIR/n1e5.db"
+"$BIN" 100000 -o "$DB7" >/dev/null 2>&1
+count7=$("$NTH_BIN" "$DB7" --count)
+expect_nth_reject() {
+    local label="$1"; shift
+    if "$NTH_BIN" "$@" >/dev/null 2>&1; then
+        printf "FAIL nth_prime %-30s deberia fallar\n" "$label"; fail=1
+    else
+        printf "OK   nth_prime %-30s rechazado\n" "$label"
+    fi
+}
+expect_nth_reject "N=0"                 "$DB7" 0
+expect_nth_reject "N > total"           "$DB7" $((count7 + 1))
+expect_nth_reject "N no numerico"       "$DB7" abc
+cp "$WORKDIR/n1e5.blk" "$WORKDIR/n1e5.blk.orig"
+truncate -s -1 "$WORKDIR/n1e5.blk"
+expect_nth_reject ".blk truncado"       "$DB7" 1
+mv "$WORKDIR/n1e5.blk" "$WORKDIR/n1e5.blk.gone"
+expect_nth_reject ".blk ausente"        "$DB7" 1
+mv "$WORKDIR/n1e5.blk.orig" "$WORKDIR/n1e5.blk"
+if [ "$("$NTH_BIN" "$DB7" "$count7")" == "99991" ]; then
+    printf "OK   nth_prime %-30s 99991\n" "ultimo primo < 1e5"
+else
+    printf "FAIL nth_prime %-30s\n" "ultimo primo < 1e5"; fail=1
+fi
 if [ "$fail" -eq 0 ]; then
     echo "Todas las pruebas OK."
 else

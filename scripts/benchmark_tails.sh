@@ -49,19 +49,7 @@ fi
 
 # Numbers stay decimal strings: N goes up to 2^64 - 1, and bash arithmetic
 # stops at 2^63 - 1 (1e19 overflowed it).
-to_dec() { # "1e19" / "100000" -> plain digits
-    local d
-    if [[ "$1" =~ ^([0-9]+)[eE]([0-9]+)$ ]]; then
-        d=${BASH_REMATCH[1]}$(printf '%*s' "${BASH_REMATCH[2]}" '' | tr ' ' 0)
-    elif [[ "$1" =~ ^[0-9]+$ ]]; then
-        d=$1
-    else
-        echo "valor no valido: $1 (usa un entero o 1eX)" >&2
-        return 1
-    fi
-    d=$(echo "$d" | sed 's/^0*//')
-    echo "${d:-0}"
-}
+source scripts/lib.sh # to_dec, num_lt
 dec_sub() { # a - b, in 9-digit limbs; fails when b > a
     local a=$1 b=$2 len i x y borrow=0 out="" limb
     len=$(( ${#a} > ${#b} ? ${#a} : ${#b} ))

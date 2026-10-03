@@ -8,7 +8,7 @@
 // rows (the blocks used to go through it as BLOBs: docs/RESEARCH.md).
 //
 // No separate counting pre-pass feeds this any more (see gap_block_sink.hpp
-// and main.cpp's is_db_output block): every block arrives with a
+// and main.cpp's run_db): every block arrives with a
 // chunk-relative start_index and its chunk_id, and finish() corrects
 // start_index up to the true global offset with one UPDATE per chunk
 // (fix_offsets, called from finish before the start_index index is built)
@@ -113,7 +113,7 @@ public:
     //
     // chunk_offset[i]: how many primes precede chunk i globally (a prefix
     // sum over each chunk's real count, computed by the caller once every
-    // chunk has finished sieving -- see main.cpp's is_db_output block).
+    // chunk has finished sieving -- see main.cpp's run_db).
     // chunk_offset[0] is always 0 by construction. Empty is fine (e.g.
     // write_tiny_db's single implicit chunk 0, already at the right
     // offset) -- fix_offsets then has nothing to correct.

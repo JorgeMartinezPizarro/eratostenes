@@ -18,7 +18,7 @@
 //
 // start_index here is always CHUNK-RELATIVE (starts at 0), unlike before --
 // there is no separate counting pre-pass any more to hand this sink its
-// true global offset up front (see main.cpp's is_db_output block). Each
+// true global offset up front (see main.cpp's run_db). Each
 // block instead carries chunk_id, and SqlitePrimeStore::finish() corrects
 // every block's start_index up to its real global value with a handful of
 // cheap UPDATEs (one per chunk, not per block) once every chunk's actual

@@ -224,7 +224,7 @@ sparse, then extraction.
   is -4..-8% on the 1e15-1e18 tails, see RESEARCH.md); hits are byte marks stepped with
   `big::TABLE2310` (mod-2310, §2; each entry one 64-bit word, class/phase index |
   byte position << 12 | qp << 36); the slot is `byte position >> log2(segment bytes)`,
-  so whenever any prime is sparse `main.cpp` floors the segment to a power of 2
+  so whenever any prime is sparse `tuning.hpp` floors the segment to a power of 2
   bytes. The next block of a chain is prefetched once per block, since pooled
   blocks are scattered in memory. [RESEARCH.md](RESEARCH.md#segment_sievehpp)
   has the history of the earlier designs.
@@ -269,7 +269,7 @@ count, which is what the byte-position change went after. The medium tier's
 population is capped by π(seg_k_width); past N ≈ seg_k_width² (~4.4e12 here) the
 rest of the base primes go sparse.
 
-## 7. Cache auto-tuning (`cpu_cache.hpp`, `main.cpp`)
+## 7. Cache auto-tuning (`cpu_cache.hpp`, `tuning.hpp`)
 
 Two sizes are auto-tuned from the machine's real, detected cache sizes (read from
 `/sys/devices/system/cpu/...` on Linux by `cpu_cache.hpp`, with `--l1-bytes`/`--l2-bytes`

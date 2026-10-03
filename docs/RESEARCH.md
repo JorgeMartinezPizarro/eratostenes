@@ -1954,6 +1954,24 @@ would waste ~half a page per block via internal fragmentation (this was the
 dominant overhead in an early prototype before it was tracked down).
 
 ## main.cpp
+2026-10-03: the sizing and tier decisions (segment width in its six steps,
+sub-block, cutoffs, prefetch gate, steal threshold, the tier split and the
+startup log) moved out of `main()` into `src/tuning.hpp` (`plan_sieve`,
+`print_plan`), unchanged; the entries below name `main.cpp` as they were
+written. `main.cpp` keeps the flow: arguments, base primes, chunking, the
+three output passes.
+
+Same day, the refactor measured on the dev PC (i5-11400F, 12 threads). A/B
+against the committed binary, 3 interleaved reps: 1e13 tail 3.40-3.45 s both,
+1e15 tail 7.28-7.62 s before vs 6.97-7.22 s after. Then `REPS=3` of both
+benchmarks: counts 0.86 / 0.81 / 0.87 / 0.86x (1e13: 303.69 s vs 352.756 s;
+the table's round had 308.81 vs 363.157 s), tails 1e13-1e17 0.81 / 0.73 /
+0.72 / 0.76 / 0.79x (3.39 / 4.96 / 6.74 / 9.22 / 12.07 s against primesieve
+4.171 / 6.789 / 9.383 / 12.135 / 15.371 s; the table's 0.80 / 0.73 / 0.74 /
+0.77 / 0.81x). Both programs 1-6% under the table's day, so the host; the
+ratios equal or a hundredth or two better. 1e18 not measured: the host ran
+out of memory on that tail (~5 GB per program at 12 threads) and the run was
+killed, so BENCHMARK.md's dev tables stay on their complete round.
 
 ### `SUB_BLOCK_BYTES`: per-thread vs. machine-wide sizing (kept, uniform-with-margin wins)
 

@@ -256,7 +256,7 @@ inline void cross_off_class(uint8_t* s, uint64_t end, DenseState* first, DenseSt
 // and the segment stays there. Only pays once the medium state no longer
 // fits the per-thread L3 share (dev PC: +0.8% at 1e12 with ~0.5 MB/thread,
 // -6.1% at 1e13 and -12.1% at 1e14 on top of SoA) -- chosen per TierSet in
-// main.cpp, see MEDIUM_NTA_MIN_PRIMES.
+// tuning.hpp, see SieveConfig::medium_nta_min_primes.
 constexpr uint64_t MEDIUM_NTA_DIST = 32;
 constexpr uint64_t MEDIUM_POS_LIMIT = uint64_t{1} << 26;
 

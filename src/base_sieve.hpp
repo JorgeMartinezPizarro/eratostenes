@@ -67,7 +67,7 @@ inline void sieve_odd_range(uint64_t lo, uint64_t hi, const std::vector<uint64_t
     }
 }
 
-// The sparse tier's primes (main.cpp's classify): the run [k_begin, k_end) of
+// The sparse tier's primes (tuning.hpp's classify): the run [k_begin, k_end) of
 // a BasePrimes bitmap, which SegmentSieve's activation walks in increasing
 // order.
 struct SparsePrimes {

@@ -37,19 +37,7 @@ if [ ! -x "$BIN" ]; then
     exit 1
 fi
 
-to_dec() { # "1e13" / "100000" -> plain digits
-    local d
-    if [[ "$1" =~ ^([0-9]+)[eE]([0-9]+)$ ]]; then
-        d=${BASH_REMATCH[1]}$(printf '%*s' "${BASH_REMATCH[2]}" '' | tr ' ' 0)
-    elif [[ "$1" =~ ^[0-9]+$ ]]; then
-        d=$1
-    else
-        echo "valor no valido: $1 (usa un entero o 1eX)" >&2
-        return 1
-    fi
-    d=$(echo "$d" | sed 's/^0*//')
-    echo "${d:-0}"
-}
+source scripts/lib.sh # to_dec, num_lt
 N=$(to_dec "$N_IN")
 WIDTH=$(to_dec "$WIDTH_IN")
 if (( N <= WIDTH )); then echo "WIDTH=$WIDTH_IN no cabe por debajo de N=$N_IN" >&2; exit 1; fi
@@ -88,7 +76,6 @@ run_e() { # ENVSTRING ARGS... -> t_e, c_e, startup (the config lines of the log)
         | sed -E 's/^Starting [0-9]+ threads, limit=[0-9]+, (segment=[0-9]+), wheel mod [0-9]+ \([0-9]+ primes\), ([0-9]+ small[^,]*\(sub-block [^)]*\))?.*/\1 \2/')
 }
 ratio() { awk -v a="$1" -v b="$2" 'BEGIN{ if (b > 0) printf "%.2fx", a / b; else printf "?" }'; }
-less_than() { awk -v a="$1" -v b="$2" 'BEGIN{exit !(a < b)}'; }
 
 summary=()
 r=""
@@ -107,7 +94,7 @@ pair() {
 echo "== eratostenes auto, then primesieve ($THREADS threads each)"
 pair "auto" ""
 echo "$startup" | sed 's/^ */    /'
-if less_than "$t_p" 2; then
+if num_lt "$t_p" 2; then
     echo "  (runs this short are noise on this machine: use a wider window, e.g. WIDTH=1e11 make benchmark-mini)"
 fi
 best_r=$r; best_s=""; best_label="auto"
@@ -118,7 +105,7 @@ for s in $SEGMENTS; do
     pair "-s $s (${kib} KiB)" "" -s "$s"
     extra=$(echo "$startup" | grep -E 'segment:' | sed -E 's/^ *segment: /    -> /' | head -1 || true)
     [ -n "$extra" ] && echo "$extra"
-    if less_than "${r%x}" "${best_r%x}"; then best_r=$r; best_s=$s; best_label="-s $s"; fi
+    if num_lt "${r%x}" "${best_r%x}"; then best_r=$r; best_s=$s; best_label="-s $s"; fi
 done
 
 seg_args=()

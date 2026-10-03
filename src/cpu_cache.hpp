@@ -14,49 +14,14 @@
 
 #include "wheel.hpp"
 
-// Best-effort cache size (bytes) for a given level (1 = L1 data, 2 = L2), Linux
-// sysfs (also visible inside a Docker container, since containers share
-// the host kernel's /sys). Returns 0 on any failure (non-Linux, sysfs
-// unavailable, unexpected format) -- callers must fall back to a sane
-// default rather than divide by it directly. Scans
-// /sys/devices/system/cpu/cpu0/cache/index*/ for the matching "level" file
-// (index numbering isn't standardized -- e.g. index0 is L1d and index2 is
-// L2 on this project's own dev machine, but that's not guaranteed
-// elsewhere).
-inline uint64_t detect_cache_bytes(int target_level) {
-    for (int idx = 0; idx < 8; ++idx) {
-        std::string base = "/sys/devices/system/cpu/cpu0/cache/index" + std::to_string(idx);
-        std::ifstream level_f(base + "/level");
-        if (!level_f) break; // no more indices to check
-        int level = 0;
-        level_f >> level;
-        if (level != target_level) continue;
-        // L1 is split into Data and Instruction entries; only data counts.
-        std::ifstream type_f(base + "/type");
-        std::string type;
-        if (type_f >> type && type == "Instruction") continue;
-
-        std::ifstream size_f(base + "/size");
-        std::string size_str;
-        if (!(size_f >> size_str) || size_str.empty()) continue;
-
-        uint64_t mult = 1;
-        char suffix = size_str.back();
-        if (suffix == 'K' || suffix == 'k') { mult = 1024; size_str.pop_back(); }
-        else if (suffix == 'M' || suffix == 'm') { mult = 1024 * 1024; size_str.pop_back(); }
-        if (size_str.empty()) continue;
-
-        try {
-            size_t pos = 0;
-            uint64_t value = std::stoull(size_str, &pos);
-            if (pos != size_str.size()) continue;
-            return value * mult;
-        } catch (const std::exception&) {
-            continue;
-        }
-    }
-    return 0;
-}
+// Best-effort cache size (bytes) of cpu0's cache at a given level (1 = L1
+// data, 2 = L2, 3 = L3), from Linux sysfs (also visible inside a Docker
+// container running on the host kernel -- Docker Desktop's own VM reports
+// a made-up topology instead, see docs/RESEARCH.md). 0 on any failure
+// (non-Linux, sysfs unavailable, unexpected format): callers fall back to
+// a sane default rather than divide by it. The cpu0 case of
+// detect_cpu_cache_info below.
+inline uint64_t detect_cache_bytes(int target_level);
 inline uint64_t detect_l2_cache_bytes() { return detect_cache_bytes(2); }
 inline uint64_t detect_l1d_cache_bytes() { return detect_cache_bytes(1); }
 
@@ -102,8 +67,8 @@ inline int count_cpu_list(const std::string& s) {
 // detect_cache_bytes).
 // A logical CPU's own cache-level total size (bytes) and how many
 // logical CPUs share that instance (its "shared_cpu_list" cardinality).
-// Returns {0, 0} on any failure (same fallback contract as
-// detect_cache_bytes).
+// {0, 0} when the level isn't there or sysfs can't be read; sharers alone
+// is 0 when the size was read but the sharing list wasn't.
 struct CpuCacheInfo {
     uint64_t total_bytes = 0;
     int sharers = 0;
@@ -138,15 +103,17 @@ inline CpuCacheInfo detect_cpu_cache_info(int cpu_id, int target_level) {
             continue;
         }
 
+        // shared_cpu_list unreadable or malformed: the size still counts,
+        // the share (total / sharers) doesn't -- sharers stays 0.
         std::ifstream shared_f(base + "/shared_cpu_list");
         std::string shared_list;
-        if (!(shared_f >> shared_list)) continue;
-        int sharers = count_cpu_list(shared_list);
-        if (sharers <= 0) continue;
+        int sharers = (shared_f >> shared_list) ? count_cpu_list(shared_list) : 0;
         return {total_bytes, sharers};
     }
     return {};
 }
+
+inline uint64_t detect_cache_bytes(int target_level) { return detect_cpu_cache_info(0, target_level).total_bytes; }
 
 // A logical CPU's own EFFECTIVE share (bytes) of a given cache level:
 // that cache instance's total size divided by how many logical CPUs
@@ -177,12 +144,12 @@ inline uint64_t detect_cpu_cache_share(int cpu_id, int target_level) {
 // logical thread is actually running, not a strict half held aside up
 // front -- and this project's own tuning already settled on using the
 // RAW detected L1d size directly with no halving for the single-value
-// fallback (see main.cpp's SUB_BLOCK_BYTES comment); l1_raw keeps that
+// fallback (see tuning.hpp's sub-block comment); l1_raw keeps that
 // same, already-validated philosophy per CPU instead of inventing a new
 // one, only splitting by CPU to catch a P-core/E-core L1d size difference
 // if there is one, not to model HT sharing a second, different way.
 // l1_sharers is used for one thing only: counting physical cores (SMT
-// siblings share one L1d), so main.cpp can give the sub-block the whole
+// siblings share one L1d), so tuning.hpp can give the sub-block the whole
 // L1d instead of half when there are no more threads than cores.
 struct CpuCacheTopology {
     std::vector<uint64_t> l1_raw;   // index = logical CPU id, 0 = undetected
@@ -205,7 +172,7 @@ inline CpuCacheTopology detect_cpu_cache_topology() {
 
 // Wheel-index segment width (word-aligned to 64, ready for SegmentSieve)
 // that fills half of `l2_bytes` -- same derivation as the auto -s formula
-// below, but returning k-width directly. Also used in main.cpp's
+// below, but returning k-width directly. Also used in tuning.hpp's
 // per-CPU-minimum step, deliberately applying this same /2 margin even on
 // top of an already-per-thread L2 share -- counterintuitive, see
 // docs/RESEARCH.md#seg_k_width_from_l2_bytess-extra-2-margin-applied-on-top-of-an-already-per-thread-l2-share-kept-counterintuitive.
@@ -218,7 +185,7 @@ inline uint64_t seg_k_width_from_l2_bytes(uint64_t l2_bytes) {
 }
 
 // L1-sized sub-block (bytes, word-aligned to 8) for the small tier -- same
-// derivation as main.cpp's SUB_BLOCK_BYTES, callable per-CPU with a RAW
+// derivation as tuning.hpp's sub-block sizing, callable per-CPU with a RAW
 // (undivided -- see CpuCacheTopology's comment on l1_raw) L1d size. 0
 // falls back to the same conservative 32KiB the global path uses.
 // Half the L1d, not all of it: leaves room in L1 for the small tier's own

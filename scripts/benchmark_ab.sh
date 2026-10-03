@@ -33,19 +33,7 @@ if [ ! -x "$BIN" ]; then
     exit 1
 fi
 
-to_dec() { # "1e13" / "100000" -> plain digits
-    local d
-    if [[ "$1" =~ ^([0-9]+)[eE]([0-9]+)$ ]]; then
-        d=${BASH_REMATCH[1]}$(printf '%*s' "${BASH_REMATCH[2]}" '' | tr ' ' 0)
-    elif [[ "$1" =~ ^[0-9]+$ ]]; then
-        d=$1
-    else
-        echo "valor no valido: $1 (usa un entero o 1eX)" >&2
-        return 1
-    fi
-    d=$(echo "$d" | sed 's/^0*//')
-    echo "${d:-0}"
-}
+source scripts/lib.sh # to_dec, num_lt
 N=$(to_dec "$N_IN")
 WIDTH=$(to_dec "$WIDTH_IN")
 if (( N <= WIDTH )); then echo "WIDTH=$WIDTH_IN no cabe por debajo de N=$N_IN" >&2; exit 1; fi
