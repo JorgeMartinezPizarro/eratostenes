@@ -51,8 +51,8 @@ OUT_DIR := $(CURDIR)/output
 COMPOSE := docker compose -f docker/docker-compose.yml
 
 .PHONY: all portable debug pgo clean fclean re docker run docker-pgo run-pgo nth-prime \
-        test benchmark benchmark-io benchmark-tails docker-dev docker-test docker-benchmark \
-        docker-benchmark-io docker-benchmark-tails
+        test benchmark benchmark-io benchmark-tails benchmark-mini docker-dev docker-test docker-benchmark \
+        docker-benchmark-io docker-benchmark-tails docker-benchmark-mini
 
 # --- release (default) ---
 all: $(BIN) $(NTH_BIN)
@@ -232,13 +232,21 @@ benchmark-io:
 benchmark-tails: $(BIN)
 	bash scripts/benchmark_tails.sh
 
+# Diagnostico corto para una maquina nueva o vieja (ver scripts/benchmark_mini.sh):
+# cachés según sysfs, lo que eligió el automático y un barrido de segmento,
+# corte sparse y prefetch sobre la ultima 1e10 bajo 1e13, contra primesieve.
+# N/WIDTH/THREADS/SEGMENTS como variables de entorno.
+benchmark-mini: $(BIN)
+	bash scripts/benchmark_mini.sh
+
 # --- run the same targets inside Docker (see docker/Dockerfile's `dev`
 # stage: gcc + libsqlite3-dev + libzstd-dev + primesieve). Each rebuilds
 # eratostenes/nth_prime with the container's own gcc against the
 # container's own CPU, so these work the same regardless of what's
 # installed/compiled on the host. THREADS/SEGMENT/WRITE_PATH/KEEP_DB/REPS
 # are forwarded from the host environment when set, same as running the
-# scripts directly (e.g. THREADS=8 make docker-benchmark).
+# scripts directly (e.g. THREADS=8 make docker-benchmark); N/WIDTH/SEGMENTS
+# likewise for docker-benchmark-mini.
 docker-dev:
 	$(COMPOSE) build dev
 
@@ -252,4 +260,7 @@ docker-benchmark-io: docker-dev
 	$(COMPOSE) run --rm -e THREADS -e SEGMENT -e WRITE_PATH -e KEEP_DB dev make benchmark-io
 
 docker-benchmark-tails: docker-dev
-	$(COMPOSE) run --rm -e THREADS -e REPS -e NS -e WIDTH dev make benchmark-tails
+	$(COMPOSE) run --rm -e THREADS -e REPS -e NS -e WIDTH -e SEGMENT dev make benchmark-tails
+
+docker-benchmark-mini: docker-dev
+	$(COMPOSE) run --rm -e THREADS -e N -e WIDTH -e SEGMENTS dev make benchmark-mini

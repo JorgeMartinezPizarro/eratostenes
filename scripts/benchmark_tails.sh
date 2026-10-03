@@ -27,6 +27,7 @@
 #            pi(sqrt N) in both programs, per thread: ~1.2 GB each at 1e19
 #            (152M base primes), ~0.4 GB at 1e18.
 #   WIDTH    window width, integer or 1eX (default: 1e11)
+#   SEGMENT  forced -s for eratostenes (default: unset, the CLI's auto width)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -35,6 +36,7 @@ THREADS="${THREADS:-$(nproc)}"
 REPS="${REPS:-1}"
 NS="${NS:-1e13 1e14 1e15 1e16 1e17 1e18}"
 WIDTH="${WIDTH:-1e11}"
+SEGMENT="${SEGMENT:-}"   # forced -s for eratostenes (default: the CLI's own auto width)
 
 if ! command -v primesieve >/dev/null 2>&1; then
     echo "primesieve no esta en el PATH -- instalalo (apt-get install primesieve)." >&2
@@ -86,7 +88,9 @@ width=$(to_dec "$WIDTH")
 
 run_era() { # stop start -> sets t_e, c_e
     local out
-    out=$("$BIN" "$1" --start "$2" -t "$THREADS" 2>&1) || { echo "$out" >&2; exit 1; }
+    seg_args=()
+    [ -n "$SEGMENT" ] && seg_args=(-s "$SEGMENT")
+    out=$("$BIN" "$1" --start "$2" -t "$THREADS" "${seg_args[@]}" 2>&1) || { echo "$out" >&2; exit 1; }
     t_e=$(echo "$out" | sed -nE 's/.*total: *([0-9.]+)s.*/\1/p')
     c_e=$(echo "$out" | sed -nE 's/.*Done\. ([0-9,]+) primes.*/\1/p' | tr -d ',')
 }
