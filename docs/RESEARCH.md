@@ -2641,6 +2641,65 @@ cutoff and prefetch at once. Not worth a rule for the 128 KiB-share class
 on one machine and one N -- the same "segment past the share" move is
 1.30x on the i5-13500 at 20 threads -- and left as measured.
 
+### One thread per core: the medium tier's per-call cost, and the sparse cutoff by active threads (2026-10-03, evening)
+
+`perf record` (instructions:u, cycles:u, by symbol) of both programs on the
+last 1e10 below 1e13 at `-t 1`, dev PC (i5-11400F, 512 KiB segment, no
+sparse tier: isqrt(1e13) = 3.16M < seg_k_width 4.19M; primesieve's sieve
+256 KiB, EratBig from ~786K):
+
+| | eratostenes | primesieve |
+|---|---:|---:|
+| instructions / cycles / IPC | 15.39G / 9.61G / 1.60 | 17.00G / 8.22G / 2.07 |
+| wall | 2.30 s | 1.95 s (1.18x) |
+| small tier (p < 6K / < 9.8K) | 2.91G instr, 1.66G cyc | EratSmall 3.10G, 1.92G |
+| p >= 6K | med64 4.28G / 3.24G + medium 7.62G / 4.28G = 11.9G / 7.52G | EratMedium 6.47G / 3.97G + EratBig 6.93G / 1.93G = 13.4G / 5.90G |
+| presieve | 0.42G / 0.32G | 0.06G / 0.05G (AVX-512, partly unsymbolized) |
+
+Fewer instructions than primesieve (-9.5%), 17% more cycles, and the whole
+gap sits above p = 6K: 11% fewer instructions there for 27% more cycles.
+The medium tier is 197,708 primes walked every one of the 636 segments,
+126M calls at ~60 instructions and ~34 cycles each (state load, loop entry,
+1-4 hits, the loop-exit mispredict, state store); EratBig takes the same
+primes above 786K at IPC 3.6 with no per-segment cost for a prime that does
+not hit. (The "+8.8% instructions at -t 1" of an earlier note isn't what
+this window shows; the deficit is IPC, i.e. the call count.)
+
+So the medium/sparse cutoff, again -- but this time at N below the sparse
+regime, where the automatic cutoff is 1/1 and no sparse tier exists at all,
+and on a thread count the gate (per-thread L2 share, 256 KiB here -> 1/1)
+never looked at. `--tune sparse` vs auto, last 1e10 below N, interleaved
+A/B x2 (scripts/benchmark_ab.sh), dev PC:
+
+| threads | N | 1/2 | 1/4 |
+|---:|---|---:|---:|
+| 1 | 1e13 | -7.3% (4/4) | -10.5% (4/4) |
+| 1 | 1e14 | -10.1% (4/4) | -12.4% (4/4) |
+| 2 | 1e12 | | +1.0% (noise) |
+| 2 | 1e13 | +0.8% (noise) | -7.6% (4/4) |
+| 2 | 1e14 | -19.9% (4/4) | -13.8% (4/4) |
+| 6 | 1e13 | -10.9% (4/4) | -3.8% (overlap) |
+| 6 | 1e14 | +2.9% (overlap) | -1.5% (overlap) |
+| 6 | 1e15 | | +3.3% (4/4 worse) |
+| 12 | 1e13 | | +13.9% (4/4 worse) |
+| 12 | 1e14 | | +13.0% (4/4 worse) |
+
+Lowering the cutoff pays a lot with 1-2 active threads, fades at 6 and
+hurts at 12 (the known shared-resource wall: bucket traffic against the L3
+and memory bandwidth every active thread shares). Every machine where we
+lose is a 1-2-thread-per-L3 machine (the 2-vCPU Xeons), and every
+measured optimum fits an "L3 per active thread" reading: dev 12 MiB / 2 =
+6 MiB -> 1/4, / 6 = 2 MiB -> 1/2 at 1e13 and no better than 1/1 at 1e15,
+/ 12 = 1 MiB -> 1/1; i5-13500 24 MiB / 20 = 1.2 MiB with 640 KiB L2 -> 1/2
+(the L2 gate); Xeon 2.80 33 MiB / 2 -> 1/4 (measured best); i7-620M 4 MiB
+/ 4 = 1 MiB -> 1/1 (auto; 512 KiB with 1/2 was -2.3%). Candidate rule:
+den = max(L2-share gate, L3-per-active-thread gate) with 1/4 from ~4 MiB
+and 1/2 from ~3 MiB per active thread, applied below the sparse regime too
+(a lowered cutoff creates the sparse tier; the power-of-2 fixup already
+handles it). To be measured on the 2-vCPU Xeons at 1e13 (`--tune
+sparse=1/4` vs auto: the below-the-regime half of the rule), on the Ivy
+Bridge tower at 4 and 2 threads, and on the i5-13500 (where it must stay
+at 1/2) before the rule goes in.
 ### `run_parallel_chunks`: steals priced with the run's own measurements (kept, 2026-10-02)
 
 The fixed steal threshold (4 wheel indices per base prime) came from the dev

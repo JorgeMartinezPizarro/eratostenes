@@ -11,12 +11,16 @@
 #
 # Usage: B="-s 15728640 --tune sparse=1/2" make benchmark-ab
 #        A="--tune sparse=1/1" B="--tune sparse=1/2" REPS=3 make benchmark-ab
-# Env: A (default: auto), B (required), N (default 1e13), WIDTH (default
-#      1e10), THREADS (default nproc), REPS (default 2)
+#        BIN_B=./eratostenes_bands make benchmark-ab   (two binaries, same config)
+# Env: A (default: auto), B (required unless BIN_B differs), BIN_B (the binary
+#      B runs on; default the same as A. `make bands` builds ./eratostenes_bands,
+#      and a missing BIN_B is built with make), N (default 1e13), WIDTH
+#      (default 1e10), THREADS (default nproc), REPS (default 2)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 BIN=./eratostenes
+BIN_B="${BIN_B:-$BIN}"
 THREADS="${THREADS:-$(nproc)}"
 REPS="${REPS:-2}"
 N_IN="${N:-1e13}"
@@ -24,13 +28,16 @@ WIDTH_IN="${WIDTH:-1e10}"
 A_CFG="${A:-}"
 B_CFG="${B:-}"
 
-if [ -z "$B_CFG" ]; then
-    echo "Falta B: la configuracion a comparar, p.ej. B=\"-s 15728640 --tune sparse=1/2\" make benchmark-ab" >&2
+if [ -z "$B_CFG" ] && [ "$BIN_B" = "$BIN" ]; then
+    echo "Falta B: la configuracion a comparar, p.ej. B=\"-s 15728640 --tune sparse=1/2\" make benchmark-ab (o BIN_B=otro binario)" >&2
     exit 1
 fi
 if [ ! -x "$BIN" ]; then
     echo "No existe $BIN -- compila antes (make)." >&2
     exit 1
+fi
+if [ ! -x "$BIN_B" ]; then
+    make -s "$BIN_B" || { echo "No existe $BIN_B y make no sabe construirlo." >&2; exit 1; }
 fi
 
 source scripts/lib.sh # to_dec, num_lt
@@ -47,10 +54,11 @@ split_cfg() { # CFG -> sets envs, args (arrays)
         if [ ${#args[@]} -eq 0 ] && [[ "$w" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then envs+=("$w"); else args+=("$w"); fi
     done
 }
-run_cfg() { # CFG -> t (total seconds), c (count)
+run_cfg() { # BIN CFG -> t (total seconds), c (count)
+    local bin=$1; shift
     split_cfg "$1"
     local out
-    out=$(env "${envs[@]}" "$BIN" "$N" --start "$START" -t "$THREADS" "${args[@]}" 2>&1) || { echo "$out" >&2; exit 1; }
+    out=$(env "${envs[@]}" "$bin" "$N" --start "$START" -t "$THREADS" "${args[@]}" 2>&1) || { echo "$out" >&2; exit 1; }
     t=$(echo "$out" | sed -nE 's/.*total: *([0-9.]+)s.*/\1/p')
     c=$(echo "$out" | sed -nE 's/.*Done\. ([0-9,]+) primes.*/\1/p' | tr -d ',')
     startup=$(echo "$out" | grep -E '^Starting|^  (segment|sub-block|sparse cutoff|medium-tier prefetchnta)' \
@@ -59,15 +67,15 @@ run_cfg() { # CFG -> t (total seconds), c (count)
 }
 
 bash scripts/machine_info.sh "$THREADS" "last ${WIDTH_IN} below ${N_IN}, A/B x$REPS"
-echo "A: ${A_CFG:-auto}"
-echo "B: $B_CFG"
+echo "A: ${A_CFG:-auto} ($BIN)"
+echo "B: ${B_CFG:-auto} ($BIN_B)"
 
 ta=(); tb=(); ca=""; cb=""
 for ((r = 1; r <= REPS; r++)); do
-    run_cfg "$A_CFG"; ta+=("$t"); ca=$c
+    run_cfg "$BIN" "$A_CFG"; ta+=("$t"); ca=$c
     [ $r -eq 1 ] && echo "  A config: $startup"
     echo "  A rep $r: ${t}s"
-    run_cfg "$B_CFG"; tb+=("$t"); cb=$c
+    run_cfg "$BIN_B" "$B_CFG"; tb+=("$t"); cb=$c
     [ $r -eq 1 ] && echo "  B config: $startup"
     echo "  B rep $r: ${t}s"
 done
@@ -77,7 +85,7 @@ mean() { printf '%s\n' "$@" | awk '{s += $1} END {printf "%.2f", s / NR}'; }
 ma=$(mean "${ta[@]}"); mb=$(mean "${tb[@]}")
 echo
 echo "A ${A_CFG:-auto}: ${ta[*]} -> mean ${ma}s"
-echo "B $B_CFG: ${tb[*]} -> mean ${mb}s"
+echo "B ${B_CFG:-auto}: ${tb[*]} -> mean ${mb}s"
 awk -v a="$ma" -v b="$mb" 'BEGIN { printf "B vs A: %+.1f%%\n", (b - a) / a * 100 }'
 # every B run below every A run (or above): the sign is solid even at REPS=2
 awk -v A="${ta[*]}" -v B="${tb[*]}" 'BEGIN {
