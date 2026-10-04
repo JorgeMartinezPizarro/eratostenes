@@ -46,7 +46,7 @@ Intel Core i5-13500 (Raptor Lake, 2023), 64 GB.
 
 ## Intel Core i5-1235U
 
-Intel Core i5-1235U (Alder Lake, 2022), 8 GB. PL1 15 W with a 32 s window, PL2 55 W: measured in the sustained regime, after a 70 s warm-up.
+Intel Core i5-1235U (Alder Lake, 2022), 8 GB.
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|

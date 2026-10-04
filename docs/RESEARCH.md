@@ -4690,11 +4690,13 @@ Consequences for the tables:
   and are the more stable ones.
 - Rows measured in different regimes are not comparable (the server 1e12
   21.37 vs 22.83, the tower's 1e14-1e16 tails, the laptop's whole table).
-- Proposal: a warm-up of ~45 s of all-core load before the first measured
-  run in both scripts (`WARMUP=0` to skip), so every table is "sustained",
-  and a line in BENCHMARK.md saying so. Read the limits with
-  `grep . /sys/class/powercap/intel-rapl/intel-rapl:0/constraint_*` to
-  document PL1/PL2/tau per machine.
+- Decision (user, 2026-10-04): the benchmarks ignore the power windows.
+  No warm-up, no RAPL in the tables. Both scripts run interleaved pairs
+  alternating the order, both programs REPS times, and print each one's
+  mean: with reps the means converge on the sustained speed by
+  themselves, which is the one a count of hours sees. The power mechanism
+  stays here as the reading rule for cross-session differences, not as a
+  benchmark parameter.
 
 Measured on the i5-1235U (`/sys/class/powercap/intel-rapl/intel-rapl:0`):
 PL1 15 W with a 32 s window, PL2 55 W (2.4 ms window), peak 70 W. Cold,

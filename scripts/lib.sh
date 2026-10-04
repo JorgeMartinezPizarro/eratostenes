@@ -29,21 +29,3 @@ mean_of() {
     printf '%s\n' "$@" | awk '{s += $1; n++} END{printf "%.2f", s / n}'
 }
 
-# warm_up SECONDS BIN THREADS: SECONDS of all-core load before the first
-# measured run, so the table reads the sustained power regime (PL1) and not
-# the turbo budget a machine spends in its first seconds from idle
-# (docs/RESEARCH.md, "Two power regimes on every machine"). 0 = none.
-# A 1e14 count never finishes within the window on any machine, so the
-# load is steady until timeout kills it.
-warm_up() {
-    (( $1 > 0 )) || return 0
-    echo "  calentamiento: ${1}s de carga en $3 hilos" >&2
-    # Background job killed by hand, not `timeout`: a non-interactive bash
-    # says nothing about a background job dying by signal, so the log stays
-    # clean.
-    "$2" 1e14 -t "$3" >/dev/null 2>&1 &
-    local pid=$!
-    sleep "$1"
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
-}

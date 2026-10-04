@@ -22,9 +22,7 @@
 #   REPS     runs per program and N, as interleaved pairs alternating which
 #            one goes first (era/ps, ps/era, ...); the table shows each
 #            one's mean (default: 1). See benchmark.sh for why pairs and
-#            means: the two power regimes.
-#   WARMUP   seconds of all-core load before the first measured run
-#            (default: 0, none)
+#            means.
 #   NS       space-separated N list, integers or 1eX, up to 2^64 - 1 (~1.8e19)
 #            (default: "1e13 1e14 1e15 1e16 1e17 1e18"). Memory grows with
 #            pi(sqrt N) in both programs, per thread: ~1.2 GB each at 1e19
@@ -52,7 +50,7 @@ fi
 
 # Numbers stay decimal strings: N goes up to 2^64 - 1, and bash arithmetic
 # stops at 2^63 - 1 (1e19 overflowed it).
-source scripts/lib.sh # to_dec, num_lt, mean_of, warm_up
+source scripts/lib.sh # to_dec, num_lt, mean_of
 dec_sub() { # a - b, in 9-digit limbs; fails when b > a
     local a=$1 b=$2 len i x y borrow=0 out="" limb
     len=$(( ${#a} > ${#b} ? ${#a} : ${#b} ))
@@ -92,7 +90,6 @@ run_ps() { # stop start -> sets t_p, c_p
     c_p=$(echo "$out" | grep -oE '^[0-9]+$' | head -1 || true)
 }
 declare -A MEAN_E MEAN_P COUNT
-warm_up "$WARMUP" "$BIN" "$THREADS"
 for n in $NS; do
     stop=$(to_dec "$n")
     # Both programs keep every base prime in each thread's bucket ring (8
@@ -131,7 +128,7 @@ for n in $NS; do
 done
 
 echo
-bash scripts/machine_info.sh "$THREADS" "last $WIDTH below N, mean of $REPS, pairs interleaved$( (( WARMUP > 0 )) && echo ", ${WARMUP}s warm-up")"
+bash scripts/machine_info.sh "$THREADS" "last $WIDTH below N, mean of $REPS, pairs interleaved"
 echo
 # Same layout as README.md's tail table: the window width goes in the header
 # line above, the counts (checked above) stay in the progress lines.

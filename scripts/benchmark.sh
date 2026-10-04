@@ -37,24 +37,14 @@
 #            one goes first (era/ps, ps/era, ...); the table shows each
 #            one's mean (default: 1). Note that at N=1e13 each primesieve
 #            run costs minutes too.
-#   WARMUP   seconds of all-core load before the first measured run
-#            (default: 0, none)
 #
-# Why pairs and means, not "primesieve once, then the best of REPS": every
-# machine has two power regimes (docs/RESEARCH.md, "Two power regimes on
-# every machine"): a turbo budget (PL2) for a window of seconds to half a
-# minute from idle, then the sustained limit (PL1). A run shorter than that
-# window from idle is all burst (the i5-13500 does 1e11 in 1.49 s cold vs
-# 1.88 s sustained; the i5-1235U at 15 W drops 40%), and whichever program
-# ran first took it. Interleaving the pairs and alternating the order
-# shares what is left of the budget evenly, and the mean of REPS reads the
-# regime the pairs actually ran in instead of picking the one burst run.
-# The regime that matters is the sustained one (a 1e15 count runs for
-# hours), so WARMUP=45 or so before a table is the honest setting; it is
-# off by default to keep a quick single run quick. Reps run back to back:
-# a pause leaves the cores idle and the next run pays the ramp-up from
-# idle (~0.19 s vs ~0.13 s at 1e10 on the i5-13500), the opposite effect
-# at the 0.1 s scale.
+# Pairs and means, not "primesieve once, then the best of REPS": the first
+# seconds of a run from an idle machine are faster than its sustained
+# speed, and whichever program ran first took them. Interleaving the pairs
+# and alternating the order shares that evenly, and the mean of REPS
+# converges on the sustained speed, which is what a count of hours sees
+# (docs/RESEARCH.md, "Two power regimes on every machine"). Reps run back
+# to back, with no pause between them.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -62,7 +52,6 @@ BIN=./eratostenes
 THREADS="${THREADS:-$(nproc)}"
 SEGMENT="${SEGMENT:-}"
 REPS="${REPS:-1}"
-WARMUP="${WARMUP:-0}"
 
 if ! command -v primesieve >/dev/null 2>&1; then
     echo "primesieve no esta en el PATH -- instalalo (apt-get install primesieve)" >&2
@@ -73,7 +62,7 @@ fi
 echo "Reconstruyendo eratostenes..." >&2
 make re >/tmp/benchmark_build.log 2>&1 || { cat /tmp/benchmark_build.log >&2; exit 1; }
 
-source scripts/lib.sh # warm_up, mean_of
+source scripts/lib.sh # mean_of
 
 NS=(1e10 1e11 1e12 1e13)
 # pi(N) for each N above, in the same order -- known values, used to catch
@@ -106,7 +95,6 @@ run_ps() { # n expected -> sets t_p
 
 declare -A ERATO_TIME PRIMESIEVE_TIME
 
-warm_up "$WARMUP" "$BIN" "$THREADS"
 for i in "${!NS[@]}"; do
     n="${NS[$i]}"
     expected="${EXPECTED[$i]}"
@@ -122,7 +110,7 @@ for i in "${!NS[@]}"; do
 done
 
 echo >&2
-bash scripts/machine_info.sh "$THREADS" "mean of $REPS, pairs interleaved$( (( WARMUP > 0 )) && echo ", ${WARMUP}s warm-up")"
+bash scripts/machine_info.sh "$THREADS" "mean of $REPS, pairs interleaved"
 echo
 echo "| N | eratostenes | primesieve | ratio |"
 printf "|---|---:|---:|---:|\n"
