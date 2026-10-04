@@ -54,6 +54,11 @@ constexpr double MEDIUM_BAND_MAX_HITS = 8.0;
 #ifndef ERA_BIG_LOOP
 #define ERA_BIG_LOOP 0
 #endif
+// Sparse tier: also prefetch the push target (the tail block of the slot the
+// entry's next hit files into) ERA_BIG_PF entries ahead. -DERA_BIG_PFPUSH=1.
+#ifndef ERA_BIG_PFPUSH
+#define ERA_BIG_PFPUSH 0
+#endif
 // Sparse tier: with one thread per core the bucket arenas are 2 MiB regions
 // advised MADV_HUGEPAGE (SegmentSieve's huge_arenas, decided in tuning.hpp),
 // so the ring's active write set (slots x block: 4 MiB at the 1e18 tail, a
@@ -751,6 +756,16 @@ private:
                                     uint64_t pe;
                                     std::memcpy(&pe, it + ERA_BIG_PF + k, sizeof(uint64_t));
                                     __builtin_prefetch(s + ((pe >> 12) & 0xffffff), 1, 3);
+                                    if constexpr (ERA_BIG_PFPUSH) {
+                                        // The push target too: the tail block of the
+                                        // slot the entry's NEXT hit files into (its
+                                        // table row and step, computed early), for
+                                        // the regime where the ring's write set is
+                                        // past L2 (1e17-1e18 tails).
+                                        const uint64_t t2 = big::TABLE2310[pe & 4095];
+                                        const uint64_t np = ((pe >> 12) & 0xffffff) + (pe >> 36) * ((t2 >> 8) & 0xff) + ((t2 >> 16) & 15);
+                                        __builtin_prefetch(tails[(cur + (np >> log2sb)) & bmask], 1, 3);
+                                    }
                                 }
                             }
                         }

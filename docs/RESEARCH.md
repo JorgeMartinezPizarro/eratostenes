@@ -3127,6 +3127,23 @@ structure that lets it overlap is worth more than L1 residency. Kept as
 `--tune med64s=a/b` (default 0 = off) for other cores; the default is the
 whole-segment med64.
 
+### Activation at the top of N: the integer division is not the cost (tried, reverted, 2026-10-04)
+
+`--debug-idle` prints the activation cost per base prime. Dev PC, 1e18 tail
+(50.8M base primes), 2 threads: 12.6 ns per prime, 0.64 s per thread -- 19%
+of a 1e10 window, 2% of the standard 1e11 one, and presumably 2-3x that on
+a core with a slow 64-bit divider (Nehalem, Ivy Bridge, Cascade Lake). The
+obvious target was the `ceil(start / p)` integer division per prime in
+file_sparse / activate_medium / activate_med64, replaced by a double
+division with a +-1 fixup (~5 cycles of throughput against ~40): 16.6 ns
+per prime instead of 12.6 (+32%), counts identical. On Rocket Lake the
+divider is already fast and the 40 cycles per prime are the push of the
+entry into a random ring slot (the first hit of consecutive primes lands
+anywhere in the ring: a cache miss per prime), not arithmetic. Reverted.
+The measurement that would say whether the division matters on an old
+core is `--debug-idle` on the i5-3470 or i7-620M at the 1e18 tail; the
+push cost is structural (primesieve's storeSievingPrime pays it too).
+
 ### Sparse ring arenas as 2 MiB huge pages, with one thread per core (kept, 2026-10-04)
 
 Where the one-thread-per-core machines lose most is the 1e16-1e18 tails,
@@ -3161,6 +3178,13 @@ threads 1e17 `huge=0` +3.3% (4/4), 12 threads 1e18 `huge=1` -1.0%
 (overlapping). The i7-620M and i5-3470 (512-entry STLBs) and the 2-vCPU
 Xeons are the machines it is meant for; unmeasured there yet.
 
+Prefetching the push target as well (`ERA_BIG_PFPUSH`: the tail block of
+the slot the entry 16 positions ahead will file into, from its table row
+and step computed early): dev PC, 1e11 windows, 2 threads +8.9% at 1e18
+and +10.7% at 1e17 (4/4 worse), 12 threads noise. The extra table row per
+entry and a prefetch of a line that is written only once cost more than the
+push miss; the segment-byte prefetch stays alone. Knob kept, default off.
+
 The three Emerald Rapids operators (b38faee, 2 vCPU one per core, so the
 automatic choice is the huge pages; `--tune huge=0` as B, 1e17 tail, 1e11
 windows, x3): +6.5% (3/3, the host with the tightest reps: 27.27-27.47 s
@@ -3170,6 +3194,29 @@ gate off) measured auto against `huge=0`, i.e. itself: +1.5%, its noise
 floor; its real cases (`huge=1` at 4 threads, auto at 2) are pending.
 benchmark_ab.sh and benchmark_mini.sh now print the `sparse ring` and
 `med64:` startup lines in the config, which the operators missed.
+
+The i5-13500 (20 threads, HT pairs, the gate off) with `--tune huge=1`
+forced, x3: +20.4%, every B run above every A run (25.48 / 23.41 / 19.44 s
+against 19.07 / 18.91 / 18.79 s), the B runs falling from one rep to the
+next -- the cost of 2 MiB pages under 20 threads is partly the kernel
+finding and zeroing them (compaction on first touch), and partly the HT
+pairs. The gate (one thread per core only) is right on both ends: -1..-6%
+where it is on, +10..+20% where it would have been on by default.
+
+The i5-3470 (b38faee): at 4 threads (one per core, so auto already has the
+huge pages) `huge=1` against auto is itself, -2.3% / -2.0% overlapping at
+1e17 / 1e18 -- that machine's noise floor. At 2 threads, auto (on) against
+`--tune huge=0`: +4.1% for turning them off, 6/6, the tightest groups
+that machine has produced (37.63-37.81 s against 39.18-39.33 s). The
+512-entry STLB reads as expected.
+
+The i7-620M (b38faee, 512-entry STLB, HT): at 4 threads, where the gate
+is off, `--tune huge=1` is -0.8% at 1e17 and -1.3% at 1e18 (6/6 both); at
+2 threads, where it is on, `huge=0` is +0.9% (6/6). The huge pages help
+that core under HT too, by about a point: its TLB is a third of the newer
+cores' and the HT conflict that costs 10-20% on the i5-11400F and i5-13500
+doesn't dominate there. Not worth a rule (sysfs doesn't say the STLB size,
+so it would be one by CPU family); `--tune huge=1` is the way to take it.
 
 ### Sparse tier: marking a prime's further hits in the same segment in a loop before re-filing it (tried, reverted, 2026-10-04)
 
