@@ -59,6 +59,20 @@ constexpr double MEDIUM_BAND_MAX_HITS = 8.0;
 #ifndef ERA_BIG_PFPUSH
 #define ERA_BIG_PFPUSH 0
 #endif
+// Sparse activation experiments (--debug-idle prints the per-prime cost):
+// ERA_FPDIV=1 computes the first multiplier with a double division plus an
+// exact fixup instead of a 64-bit integer division (slow on pre-Ice-Lake
+// cores: ~40-90 cycles on Nehalem/Ivy Bridge, ~15 on Rocket Lake, where it
+// was neutral-to-slower). ERA_ACT_BATCH=1 stages the activation's pushes
+// in a per-thread buffer and flushes them grouped by ring slot (64 slots at
+// a time), so the ring's 4096 tail lines are touched in L1-sized groups
+// instead of one random RFO per prime. -DERA_FPDIV=1 / -DERA_ACT_BATCH=1.
+#ifndef ERA_FPDIV
+#define ERA_FPDIV 0
+#endif
+#ifndef ERA_ACT_BATCH
+#define ERA_ACT_BATCH 0
+#endif
 // Sparse tier: with one thread per core the bucket arenas are 2 MiB regions
 // advised MADV_HUGEPAGE (SegmentSieve's huge_arenas, decided in tuning.hpp),
 // so the ring's active write set (slots x block: 4 MiB at the 1e18 tail, a
@@ -152,7 +166,13 @@ public:
         while (num_buckets_ < ahead * 2) num_buckets_ <<= 1; // power of 2, 2x margin
         head_.assign(num_buckets_, nullptr);
         tail_.assign(num_buckets_, nullptr);
+        if (ERA_ACT_BATCH) act_buf_.reserve(ACT_BATCH);
     }
+
+    // Wheel indices below k are marked composite before extraction (the
+    // number 1, and the numbers below a --start that split_ranges rounded
+    // down to). Default 1.
+    void set_skip_below_k(uint64_t k) { skip_below_k_ = std::max<uint64_t>(k, 1); }
 
     // Must be called once before the first sieve_and_emit call for a new,
     // independent run of consecutive segments in increasing k order (a
@@ -251,6 +271,7 @@ public:
             if (reached) break;
             next_sparse_k_ = word_end;
         }
+        flush_activation(); // ERA_ACT_BATCH: everything staged lands before this segment is sieved
         return next_small_idx_ + next_med64_idx_ + next_medium_idx_ - before + sparse_activated;
     }
 
@@ -290,8 +311,15 @@ public:
             // The sub-blocked med64 band, while the sub-block is still in L1.
             if (m64s_count_) run_med64s(bytes, se, rebase);
         }
-        // Wheel index 0 is the number 1: not prime, and nothing marks it.
-        if (k_low == 0) words_[0] |= 1;
+        // Wheel indices below skip_below_k_ are not part of the range: index
+        // 0 (the number 1, nothing marks it) and, with --start, the head of
+        // the first word (split_ranges rounds the start down to a multiple
+        // of 64 indices; without this the primes in it were counted -- 3
+        // extra at the 2e16 tail from 19999900000000000, found 2026-10-04).
+        if (k_low < skip_below_k_) {
+            for (uint64_t k = k_low; k < std::min(skip_below_k_, k_high); ++k)
+                words_[(k - k_low) >> 6] |= uint64_t{1} << ((k - k_low) & 63);
+        }
 
         // med64 tier (see docs/RESEARCH.md and this class's header comment
         // for why this is scoped to a bounded sub-band rather than the
@@ -872,7 +900,15 @@ private:
     // byte position (shift/mask, no division).
     void file_sparse(uint64_t p, uint64_t low_n, uint64_t k_low) {
         uint64_t start_val = std::max(p * p, low_n);
+#if ERA_FPDIV
+        // ceil(start_val / p) via a double quotient (53 bits: off by a unit
+        // or two at 1e18) made exact by the two fixups.
+        uint64_t m = static_cast<uint64_t>(static_cast<double>(start_val) / static_cast<double>(p));
+        while (m * p < start_val) ++m;
+        while (m > 0 && (m - 1) * p >= start_val) --m;
+#else
         uint64_t m = (start_val + p - 1) / p;
+#endif
         if (big2310_) {
             // Packed as one word: idx (ri * 480 + w) in bits 0-11, pos
             // in 12-35, qp in 36-63 -- see process_big<true>.
@@ -892,7 +928,7 @@ private:
                            ((p / WHEEL_MOD) << 36);
             erat::DenseState e;
             std::memcpy(&e, &ent, sizeof(e));
-            push_sparse_entry(static_cast<uint32_t>((cur_segment_ + ahead) & (num_buckets_ - 1)), e);
+            stage_sparse_entry(static_cast<uint32_t>((cur_segment_ + ahead) & (num_buckets_ - 1)), e);
             return;
         }
         uint64_t t = m / 210, sres = m % 210;
@@ -910,7 +946,37 @@ private:
                 "bucket sieve: a sparse prime's step exceeds the bucket ring's margin "
                 "(sizing bug in SegmentSieve's constructor)");
         }
-        push_sparse_entry(static_cast<uint32_t>((cur_segment_ + ahead) & (num_buckets_ - 1)), e);
+        stage_sparse_entry(static_cast<uint32_t>((cur_segment_ + ahead) & (num_buckets_ - 1)), e);
+    }
+
+    // Activation push: straight into the ring, or (ERA_ACT_BATCH) staged in
+    // act_buf_ and flushed in slot groups by flush_activation().
+    void stage_sparse_entry(uint32_t slot, erat::DenseState e) {
+#if ERA_ACT_BATCH
+        act_buf_.push_back({slot, e});
+        if (act_buf_.size() == ACT_BATCH) flush_activation();
+#else
+        push_sparse_entry(slot, e);
+#endif
+    }
+
+    // ERA_ACT_BATCH: partitions the staged entries by slot >> 6 (a counting
+    // pass over <= num_buckets_/64 groups, sequential reads and 64-way
+    // sequential writes), then pushes group by group, so each group's 64
+    // tail lines and 8 lines of tail_ stay in L1 while it is pushed.
+    void flush_activation() {
+#if ERA_ACT_BATCH
+        const size_t n = act_buf_.size();
+        if (n == 0) return;
+        const size_t ngroups = static_cast<size_t>(std::max<uint64_t>(1, num_buckets_ >> 6));
+        act_count_.assign(ngroups + 1, 0);
+        for (const ActEnt& a : act_buf_) ++act_count_[(a.slot >> 6) + 1];
+        for (size_t g = 0; g < ngroups; ++g) act_count_[g + 1] += act_count_[g];
+        act_part_.resize(n);
+        for (const ActEnt& a : act_buf_) act_part_[act_count_[a.slot >> 6]++] = a;
+        for (const ActEnt& a : act_part_) push_sparse_entry(a.slot, a.e);
+        act_buf_.clear();
+#endif
     }
 
     // Blocks are BLK_BYTES-aligned: a tail pointer that lands exactly on a
@@ -1015,6 +1081,14 @@ private:
     uint64_t m64s_limit_ = 0;
     size_t m64s_count_ = 0;
 
+    // ERA_ACT_BATCH staging (see stage_sparse_entry): 32K entries x 12 B.
+    struct ActEnt { uint32_t slot; erat::DenseState e; };
+    static constexpr size_t ACT_BATCH = 32768;
+    std::vector<ActEnt> act_buf_;
+    std::vector<ActEnt> act_part_;
+    std::vector<uint32_t> act_count_;
+
+    uint64_t skip_below_k_ = 1; // first wheel index that counts (set_skip_below_k)
     uint32_t log2_sb_ = 0; // log2(segment width in bytes) -- see constructor
     uint64_t num_buckets_ = 1;
     uint64_t cur_segment_ = 0;

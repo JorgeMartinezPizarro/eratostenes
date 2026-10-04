@@ -266,6 +266,11 @@ check_start 100000000 7 -t 2 --tune big2310=0 -s 20000
 # Por encima de 2^53 (~9.007e15): 9007199254740997 es primo y = 1 mod 4, asi
 # que leerlo via double lo redondeaba a ...996 y el tramo perdia ese primo.
 check_start 9007199254740997 9007199254739761 -t "$THREADS"
+# Arranque no alineado a 64 indices de la rueda (19999900000000000 = 10 mod 30):
+# split_ranges redondea hacia abajo y los primos de esa cabecera no cuentan
+# (3 de mas hasta 2026-10-04).
+check_start 20000000000000000 19999900000000000 -t 2
+check_start 20000000000000000 19999900000000000 -t 1 --tune big2310=0
 if "$BIN" 1000000 --start 1000 -o "$WORKDIR/start.txt" >/dev/null 2>&1; then
     printf "FAIL %-40s deberia rechazarse\n" "--start con -o"
     fail=1

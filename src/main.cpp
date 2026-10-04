@@ -195,6 +195,7 @@ static void sieve_chunk(ChunkRange range, const TierSet& t, uint64_t base_prime_
                                                      cfg.med64s_limit, !t.sparse.empty(),
                                                      t.medium.size() >= cfg.medium_nta_min_primes, cfg.big2310,
                                                      cfg.huge_arenas);
+        slot->sieve->set_skip_below_k(cfg.skip_below_k);
         slot->tiers = &t;
         slot->next_k = UINT64_MAX;
     }

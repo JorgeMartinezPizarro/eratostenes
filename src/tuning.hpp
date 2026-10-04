@@ -54,6 +54,9 @@ struct SieveConfig {
     // per core (-2.9..-3.5% on the 1e17/1e18 tails, dev PC at 2 threads),
     // not with HT pairs (+10.5% at 12). --tune huge=1|0 forces it.
     bool huge_arenas = false;
+    // First wheel index the count includes: 1 (the number 1 is not prime),
+    // or with --start the index of the first number >= start.
+    uint64_t skip_below_k = 1;
 };
 
 struct ChunkRange {
@@ -103,6 +106,7 @@ inline SievePlan plan_sieve(Options& opt, const BasePrimes& base, uint64_t base_
     SievePlan P;
     SieveConfig& cfg = P.cfg;
     cfg.debug_idle = opt.debug_idle;
+    cfg.skip_below_k = opt.start ? std::max<uint64_t>(wheel_count_upto(opt.start - 1), 1) : 1;
     cfg.big2310 = opt.big2310;
 
     // --segment-width is a numeric width (so the option keeps meaning the

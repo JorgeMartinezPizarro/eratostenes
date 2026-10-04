@@ -68,6 +68,8 @@ throughout below).
   - [med64: re-filing without `std::vector::push_back` (tried, reverted, 2026-09-29)](#med64-re-filing-without-stdvectorpush_back-tried-reverted-2026-09-29)
   - [med64: `prefetchnta` on the state stream (kept, 2026-09-29)](#med64-prefetchnta-on-the-state-stream-kept-2026-09-29)
   - [Sparse tier: mod-2310 multiplier wheel (kept, 2026-09-30)](#sparse-tier-mod-2310-multiplier-wheel-kept-2026-09-30)
+  - [Activation at the top of N on old cores: 83 ns per prime on Nehalem, two flags to split it (open, 2026-10-04)](#activation-at-the-top-of-n-on-old-cores-83-ns-per-prime-on-nehalem-two-flags-to-split-it-open-2026-10-04)
+  - [i5-3470 profile at 1e12: the med64 tier over the whole-L2 segment is 59% of the cycles (open, 2026-10-04)](#i5-3470-profile-at-1e12-the-med64-tier-over-the-whole-l2-segment-is-59-of-the-cycles-open-2026-10-04)
 - [gap_encoding.hpp](#gap_encodinghpp)
   - [Gap encoding: wheel-index deltas](#gap-encoding-wheel-index-deltas)
   - [`.db` extraction in wheel indices: `GapBlockSink::write_k` (kept, 2026-10-01)](#db-extraction-in-wheel-indices-gapblocksinkwrite_k-kept-2026-10-01)
@@ -87,6 +89,7 @@ throughout below).
   - [Cache-topology sizing: per-CPU-minimum step (kept)](#cache-topology-sizing-per-cpu-minimum-step-kept)
   - [Medium/sparse cutoff raised above `seg_k_width` (tried, reverted, 2026-09-27)](#mediumsparse-cutoff-raised-above-seg_k_width-tried-reverted-2026-09-27)
   - [EratBig-style sparse tier: forcing a power-of-2 segment width, and `sparse_limit = seg_k_width/4` (all attempts reverted)](#eratbig-style-sparse-tier-forcing-a-power-of-2-segment-width-and-sparse_limit--seg_k_width4-all-attempts-reverted)
+  - [`--start`: the primes in the rounded-down head of the first word were counted (bug, fixed 2026-10-04)](#--start-the-primes-in-the-rounded-down-head-of-the-first-word-were-counted-bug-fixed-2026-10-04)
 - [arg_parser.hpp](#arg_parserhpp)
   - [`--zstd-level` default: 1 (kept, 2026-09-28)](#--zstd-level-default-1-kept-2026-09-28)
   - [Sub-block size: half the L1d, not all of it (kept, 2026-09-27)](#sub-block-size-half-the-l1d-not-all-of-it-kept-2026-09-27)
@@ -3144,6 +3147,68 @@ The measurement that would say whether the division matters on an old
 core is `--debug-idle` on the i5-3470 or i7-620M at the 1e18 tail; the
 push cost is structural (primesieve's storeSievingPrime pays it too).
 
+### Activation at the top of N on old cores: 83 ns per prime on Nehalem, two flags to split it (open, 2026-10-04)
+
+The measurement above, taken: i7-620M (Nehalem, 2010), 1e18 tail, 1e11
+window: **83.0 ns per prime at 2 threads, 128.7 at 4** (HT pairs), against
+11.6-12.6 on the i5-11400F -- 7x, not the 2-3x a slow divider alone would
+give, and growing with the thread count, which is the signature of the
+memory side (the ring's ~4096 tail lines plus the `tail_` array do not fit
+a 256 KiB L2; at 4 threads the two HT siblings share one). At 50.8M primes
+that is 4.2 s per thread at -t 2 and 6.5 s at -t 4: 3-5% of the Mac's
+120-134 s tails, most of its 1.10x there. Two compile-time flags split
+the two suspects, both default off, both leaving counts identical on the
+1e18 tail and on a mod-210 (`--tune big2310=0`) 2e16 tail:
+
+- `-DERA_FPDIV=1`: the first multiplier via a double division plus an
+  exact fixup (`file_sparse` only; the dense tiers' activation is cheap).
+  Dev PC (fast divider): 16.2 ns per prime instead of 11.6 -- the reverted
+  result above, now kept as a knob for the old cores.
+- `-DERA_ACT_BATCH=1`: the activation's pushes staged in a per-thread
+  buffer of 32K entries and flushed grouped by `slot >> 6` (one counting
+  pass, then 64 slots at a time, so a group's 64 tail lines and 8 lines of
+  `tail_` stay in L1). Dev PC: 12.1 ns per prime (neutral, as expected
+  where the tail lines already fit the 512 KiB L2).
+
+`make variant DEFS=-DERA_FPDIV=1` and `BIN_B=./eratostenes_variant make
+benchmark-ab` at the 1e18 tail on the i7-620M and the i5-3470 decide
+which one, if any, becomes the default below some L2 size.
+
+### i5-3470 profile at 1e12: the med64 tier over the whole-L2 segment is 59% of the cycles (open, 2026-10-04)
+
+First PMU profile of a dense-regime loss on a one-thread-per-core machine
+(Ubuntu live USB, `perf stat`/`perf record -e cycles:u`, 1e12, 4 threads,
+primesieve 12.12 with its 128 KiB sieve):
+
+| | eratostenes | primesieve |
+|---|---:|---:|
+| cycles:u | 1008 G | 952 G |
+| instructions:u | 1159 G | 1359 G |
+| IPC | 1.15 | 1.43 |
+| branch-misses:u | 7.6 G | 10.1 G |
+| L1-dcache-load-misses:u | 119.6 G | 106.2 G |
+| wall | 82.15 s | 76.50 s |
+
+We retire 15% fewer instructions and 25% fewer mispredicts and still lose
+6% of cycles: the gap is memory, not work. By symbol: `run_med64` 29.7%
+plus `process_med64<0..3>` 29.4% (the other four classes are inlined into
+`run_med64`) = **59% of our cycles in the med64 tier**, small tier
+(`cross_off<PR>`) 21%, presieve 4.9%, medium under 2.4% per class.
+primesieve: EratMedium 55.7%, EratSmall 23.9%, EratBig 11.9%, presieve
+5.6%. The tiers do not line up: here the med64 tier takes the primes from
+~3.8K (526 small primes) to ~350K and runs over the whole 256 KiB segment
+(the whole-L2 base rule), so every one of its ~1e11 hits is an L1 miss
+(that is where the 119.6 G come from) served by an L2 that also streams
+the 470 KB of double-buffered med64 state and the medium state every
+segment -- on Ivy Bridge, with a 168-entry ROB, that latency is not
+hidden the way the i5-11400F hides it. primesieve's EratSmall covers up
+to ~23K (0.175 x its sieve size) and runs L1-blocked, so the 3.8K-23K
+band that costs us ~6 cycles per hit costs it under one. The sub-blocked
+med64 band (`--tune med64s=a/b`, refuted on Rocket Lake, see above) is
+exactly that band on our side; the i5-3470 is the machine it was built
+for. Pending: `--tune med64s=1/4|1/2|1` A/B at 1e12 there, and `perf
+stat` with the L2 request events to confirm the L2 misses.
+
 ### Sparse ring arenas as 2 MiB huge pages, with one thread per core (kept, 2026-10-04)
 
 Where the one-thread-per-core machines lose most is the 1e16-1e18 tails,
@@ -3943,6 +4008,23 @@ a genuinely bigger working set living in the bucket ring. Three strikes now
 regressing at 1e13 specifically. Don't re-propose `sparse_limit` independent of
 `seg_k_width` without a fundamentally different fix for the population's memory
 footprint itself, not just how it's grouped into blocks.
+
+### `--start`: the primes in the rounded-down head of the first word were counted (bug, fixed 2026-10-04)
+
+`split_ranges` rounds a `--start` down to a multiple of 64 wheel indices
+(the dense tiers need word-aligned segments), and nothing removed the
+primes between that boundary and the start from the count: up to 63
+indices (~240 numbers) of head. Every benchmark tail starts at a multiple
+of 10^k (`999999990000000000`, ...) whose index happens to be a multiple
+of 64, and the test suite's unaligned start (`9999000001`) rounds down by
+exactly one index to a composite, so it never showed; it did at
+`--start 19999900000000000` (10 mod 30, 44 indices of head): 3 extra
+primes (...923, ...929, ...971) against primesieve and primecount. Fix:
+`SieveConfig::skip_below_k` (the index of the first number >= start, 1
+without `--start`) and `SegmentSieve::set_skip_below_k`; `sieve_and_emit`
+marks the indices below it composite before extraction, which also covers
+the old "index 0 is the number 1" line. Test: that 2e16 tail on both wheel
+paths against primecount.
 
 ## arg_parser.hpp
 
