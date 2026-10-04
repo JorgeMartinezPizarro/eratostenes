@@ -46,6 +46,10 @@ struct SieveConfig {
     // pays one activation of every base prime for it, so the piece must
     // take longer to sieve than that.
     uint64_t steal_min_k = 0;
+    // med64 primes below this are crossed off one L1 sub-block at a time
+    // (SegmentSieve::process_med64s); 0 = off. About 2 x the sub-block, so
+    // every prime in the band has 14+ hits per sub-block.
+    uint64_t med64s_limit = 0;
 };
 
 struct ChunkRange {
@@ -386,6 +390,22 @@ inline SievePlan plan_sieve(Options& opt, const BasePrimes& base, uint64_t base_
     uint64_t med64_num = 1, med64_den = 6;
     if (opt.tune_med64.den) { med64_num = opt.tune_med64.num; med64_den = opt.tune_med64.den; }
     uint64_t med64_limit = seg_k_width * med64_num / med64_den;
+    // The sub-blocked med64 band (SegmentSieve::process_med64s), off by
+    // default: --tune med64s=a/b puts the med64 primes below a/b of the
+    // sub-block the run will use (the whole L1d with one thread per core,
+    // finish_threads; half of it otherwise) on the per-sub-block path. Tried
+    // as the default at 2/1 (14+ hits per sub-block) and measured 10-25%
+    // slower on the i5-11400F at 1-12 threads: the whole-segment med64 misses
+    // L1 on 0.81 of its hits but overlaps them, and the per-sub-block entry
+    // copies and kernel entries cost more than those misses. See
+    // docs/RESEARCH.md#med64-tier-crossed-off-per-l1-sub-block-tried-reverted-2026-10-04.
+    {
+        const uint64_t sub_block_run = cfg.sub_block_bytes * (one_per_core ? 2 : 1);
+        uint64_t m64s_num = 0, m64s_den = 1; // off: measured 10-25% SLOWER on the i5-11400F, see RESEARCH.md
+        if (opt.tune_med64s.den) { m64s_num = opt.tune_med64s.num; m64s_den = opt.tune_med64s.den; }
+        cfg.med64s_limit = std::min(sub_block_run * m64s_num / m64s_den, med64_limit);
+        if (cfg.med64s_limit <= small_limit) cfg.med64s_limit = 0;
+    }
     uint64_t sparse_limit = seg_k_width * sparse_num / sparse_den;
 
     // Primes also covered by the pre-sieve pattern (see presieve.hpp) are
@@ -550,6 +570,11 @@ inline void print_plan(const SievePlan& P, const Options& opt, unsigned actual_t
                      : P.sparse_den_auto == 4 ? " (L2 per thread >= 1 MiB)"
                      : P.sparse_den_auto == 2 ? " (L2 per thread >= 512 KiB)" : "");
     if (!cfg.big2310 && !P.wide.sparse.empty()) std::fprintf(stderr, "  sparse tier on the mod-210 wheel (--tune big2310=0)\n");
+    if (cfg.med64s_limit)
+        std::fprintf(stderr, "  med64: primes below %s crossed off per L1 sub-block%s\n",
+                     format_thousands(cfg.med64s_limit).c_str(), opt.tune_med64s.den ? " (--tune med64s)" : "");
+    else if (opt.tune_med64s.den)
+        std::fprintf(stderr, "  med64: no sub-blocked band (--tune med64s)\n");
     if (P.narrow_early) {
         unsigned narrow_chunks = 0;
         for (const auto& r : ranges) narrow_chunks += r.high <= P.narrow_k_end;

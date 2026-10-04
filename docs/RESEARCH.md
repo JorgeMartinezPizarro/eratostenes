@@ -3093,6 +3093,40 @@ The i5-13500 at 20 threads is still unmeasured (its 1e14 full run of
   tables, and dropping coverage was measured worse than the fill it saves
   (each prime removed costs ~8x its share of the fill in small-tier hits).
 
+### med64 tier crossed off per L1 sub-block (tried, reverted, 2026-10-04)
+
+With the cutoffs of 2026-10-03 (sparse 1/4 at 1-2 threads, med64 1/6) the
+med64 tier became the dominant one in the dense regime: `perf record` on the
+dev PC, last 1e10 below 1e13, one thread, 44% of the cycles and 67% of the
+program's L1 data misses -- 0.94G misses for 1.16G hits, 0.81 per hit, 3.2
+cycles per hit against the small tier's 1.16, which marks inside an
+L1-resident sub-block. The obvious move: cross the band's lower part off
+per sub-block too (`process_med64s`: the same kernel and (class, phase)
+lists, swapped once per sub-block, the entry rebased on the segment's last
+sub-block; primes below 2 x the sub-block, 14+ hits each per sub-block, 64%
+of the med64 hits for 17% of its primes). `--tune med64s=0` as B against
+the band on, same window, interleaved:
+
+| threads | N, window | band off vs on |
+|---:|---|---:|
+| 1 | 1e13, 1e10 | -13.5% (4/4) |
+| 1 | 1e12, 1e10 | -20.7% (4/4) |
+| 2 | 1e13, 1e10 | -11.3% (4/4) |
+| 6 | 1e13, 1e11 | -9.4% (4/4) |
+| 12 | 1e12, 1e11 (x3) | -24.6% (6/6) |
+| 12 | 1e13, 1e11 (x3) | -16.0% (6/6) |
+| 12 | 1e15, 1e11 | -10.5% (4/4) |
+
+The band is 10-25% slower at every thread count. The L1 misses the
+whole-segment med64 takes are overlapped (independent RMWs, a store per
+~3 cycles), and what the sub-blocked path adds -- one list-entry copy and
+one kernel entry per prime per sub-block, eight times the state traffic per
+segment -- costs more than those misses ever did. Same lesson as the
+sparse tier's re-file: a miss that overlaps is not a cost, and the stream
+structure that lets it overlap is worth more than L1 residency. Kept as
+`--tune med64s=a/b` (default 0 = off) for other cores; the default is the
+whole-segment med64.
+
 ### Sparse tier: marking a prime's further hits in the same segment in a loop before re-filing it (tried, reverted, 2026-10-04)
 
 The one structural difference left against EratBig after the pairs, the

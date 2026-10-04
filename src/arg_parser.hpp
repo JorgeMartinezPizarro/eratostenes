@@ -79,6 +79,7 @@ struct Options {
     Fraction tune_small;  // small/med64 cutoff, default 1/4
     Fraction tune_med64;  // med64/medium cutoff, default 1/6 (0 = no med64 tier)
     Fraction tune_sparse; // medium/sparse cutoff, default 1/1, 1/2 or 1/4 (tuning.hpp); in (0, 1]
+    Fraction tune_med64s; // sub-blocked med64 band, as a/b of the sub-block (default 0 = off)
     bool big2310 = true; // sparse tier on the mod-2310 wheel (false: mod-210)
     int medium_nta = -1; // medium-tier prefetchnta: -1 auto (L3 gate), 1 on, 0 off
     uint64_t minsegs = 1;    // smallest chunk, in segments (main.cpp's MIN_SEGS_PER_CHUNK)
@@ -216,8 +217,9 @@ inline void parse_tune(Options& opt, const std::string& kv) {
     }
     else if (k == "big2310") opt.big2310 = parse_switch(k, v, "1", "0");
     else if (k == "medium_nta") opt.medium_nta = parse_switch(k, v, "1", "0") ? 1 : 0;
+    else if (k == "med64s") opt.tune_med64s = parse_fraction(k, v);
     else if (k == "minsegs") { opt.minsegs = parse_fraction(k, v).num; if (opt.minsegs < 1) throw std::runtime_error("--tune minsegs: at least 1"); }
-    else throw std::runtime_error("--tune: unknown key '" + k + "' (small, med64, sparse, big2310, medium_nta, minsegs)");
+    else throw std::runtime_error("--tune: unknown key '" + k + "' (small, med64, med64s, sparse, big2310, medium_nta, minsegs)");
 }
 
 inline void print_usage(const char* prog) {
@@ -263,6 +265,8 @@ inline void print_usage(const char* prog) {
         "Fine tuning (--tune key=value, repeatable; see docs/RESEARCH.md):\n"
         "      small=a/b          Small/med64 cutoff (default 1/4 of the segment)\n"
         "      med64=a/b          med64/medium cutoff (default 1/6; 0 = no med64)\n"
+        "      med64s=a/b         med64 primes below a/b of the L1 sub-block are\n"
+        "                         crossed off per sub-block (default 0 = off; 2/1 to try)\n"
         "      sparse=a/b         Medium/sparse cutoff, in (0, 1] (default 1/1;\n"
         "                         1/2 from 512 KiB and 1/4 from 1 MiB of L2 per\n"
         "                         thread, or 1/2 from 1.5 MiB and 1/4 from 4 MiB of\n"

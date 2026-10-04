@@ -78,14 +78,17 @@ public:
     // shift/mask instead of a division -- tuning.hpp is responsible for
     // flooring seg_k_width to the nearest power of 2 (in bytes) whenever
     // has_sparse is true; this constructor just verifies that was done.
+    // m64s_limit: med64 primes below it are crossed off one L1 sub-block at
+    // a time (process_med64s), like the small tier; 0 turns that band off.
     SegmentSieve(uint64_t seg_k_width, uint64_t base_prime_max, const Presieve& presieve,
-                 uint64_t sub_block_bytes, bool has_sparse, bool medium_nta, bool big2310)
+                 uint64_t sub_block_bytes, uint64_t m64s_limit, bool has_sparse, bool medium_nta, bool big2310)
         : words_((seg_k_width + 63) / 64 + 1, 0), // +1 word: s[bytes_needed] is the banded medium tier's spare byte
           seg_k_width_(seg_k_width),
           sub_block_bytes_(sub_block_bytes),
           medium_nta_(medium_nta),
           big2310_(big2310),
-          presieve_(presieve) {
+          presieve_(presieve),
+          m64s_limit_(m64s_limit) {
         // The byte-addressed dense tiers (erat_small.hpp) need every
         // segment to start on a byte (k multiple of 8) and to stay a whole
         // number of words; callers align chunk starts to 64 too.
@@ -148,6 +151,9 @@ public:
         for (auto& v : small_) v.clear();
         for (auto& v : m64_cur_) v.clear();
         for (auto& v : m64_nxt_) v.clear();
+        for (auto& v : m64s_cur_) v.clear();
+        for (auto& v : m64s_nxt_) v.clear();
+        m64s_count_ = 0;
         for (auto& v : medium_dyn_) v.clear();
         for (auto& v : medium_qd_) v.clear();
         for (auto& v : medium_bands_) v.clear();
@@ -191,10 +197,13 @@ public:
             size_t per_list = med64_primes.size() / 384 * 2 + 16;
             for (auto& v : m64_cur_) v.reserve(per_list);
             for (auto& v : m64_nxt_) v.reserve(per_list);
+            for (auto& v : m64s_cur_) v.reserve(per_list);
+            for (auto& v : m64s_nxt_) v.reserve(per_list);
             med64_reserved_ = true;
         }
         activate_dense(small_primes, next_small_idx_, small_, high_n, low_n, k_low);
-        activate_med64(med64_primes, next_med64_idx_, m64_cur_.data(), high_n, low_n, k_low);
+        activate_med64(med64_primes, next_med64_idx_, m64_cur_.data(), m64s_cur_.data(), m64s_limit_, m64s_count_,
+                       high_n, low_n, k_low);
         activate_medium(medium_primes, next_medium_idx_, medium_dyn_, medium_qd_, medium_qp_base_, medium_qp_last_,
                         medium_bands_, seg_k_width_ / 8, high_n, low_n, k_low);
 
@@ -261,6 +270,8 @@ public:
             erat::cross_off_class<5>(bytes, se, small_[5].data(), small_[5].data() + small_[5].size(), rebase);
             erat::cross_off_class<6>(bytes, se, small_[6].data(), small_[6].data() + small_[6].size(), rebase);
             erat::cross_off_class<7>(bytes, se, small_[7].data(), small_[7].data() + small_[7].size(), rebase);
+            // The sub-blocked med64 band, while the sub-block is still in L1.
+            if (m64s_count_) run_med64s(bytes, se, rebase);
         }
         // Wheel index 0 is the number 1: not prime, and nothing marks it.
         if (k_low == 0) words_[0] |= 1;
@@ -438,8 +449,11 @@ private:
     // cross_off_checked210<PR> call in one inner loop shares entry phase w.
     // (A mod-30 version with 64 lists was the default until 2026-09-30; see
     // docs/RESEARCH.md.)
+    // Primes below m64s_limit go to the sub-blocked band's lists (state384s)
+    // instead, counted in m64s_count.
     __attribute__((noinline)) static void activate_med64(const std::vector<uint64_t>& primes, size_t& next,
                                    std::vector<erat::DenseState>* state384,
+                                   std::vector<erat::DenseState>* state384s, uint64_t m64s_limit, size_t& m64s_count,
                                    uint64_t high_n, uint64_t low_n, uint64_t k_low) {
         while (next < primes.size()) {
             uint64_t p = primes[next];
@@ -452,8 +466,10 @@ private:
             if (w == 48) { ++t; w = 0; }
             uint64_t m = t * 210 + big::M210[w];
             uint64_t pos = (p * m) / WHEEL_MOD - k_low / 8;
-            state384[pr * 48 + w].push_back({static_cast<uint32_t>(((p / WHEEL_MOD) << 6) | w),
-                                             static_cast<uint32_t>(pos)});
+            std::vector<erat::DenseState>* target = state384;
+            if (p < m64s_limit) { target = state384s; ++m64s_count; }
+            target[pr * 48 + w].push_back({static_cast<uint32_t>(((p / WHEEL_MOD) << 6) | w),
+                                           static_cast<uint32_t>(pos)});
             ++next;
         }
     }
@@ -560,6 +576,45 @@ private:
         process_med64<5>(bytes, bytes_needed);
         process_med64<6>(bytes, bytes_needed);
         process_med64<7>(bytes, bytes_needed);
+    }
+
+    // The sub-blocked med64 band: the same kernel and the same (class, phase)
+    // lists as process_med64, run once per L1 sub-block [.., se) right after
+    // the small tier, so every one of its marks lands in a sub-block that is
+    // still L1-resident. Measured on the i5-11400F at one thread (1e13 tail,
+    // perf): the whole-segment med64 took 0.81 L1 misses per hit, 3.2 cycles
+    // per hit against the small tier's 1.16 -- 44% of the cycles and 67% of
+    // the program's L1 misses once the cutoffs moved. Primes below
+    // m64s_limit_ (about 2 x the sub-block: 14+ hits per sub-block, 64% of
+    // the med64 hits for 17% of its primes) pay one list entry copy per
+    // sub-block instead of one per segment; `rebase` is bytes_needed on the
+    // segment's last sub-block (the entry's pos becomes relative to the next
+    // segment), 0 before. An entry whose next hit is past `se` just passes
+    // through (one compare, one push).
+    template <int PR>
+    void process_med64s(uint8_t* bytes, uint64_t se, uint64_t rebase) {
+        for (int w = 0; w < 48; ++w) {
+            for (erat::DenseState& st : m64s_cur_[PR * 48 + w]) {
+                uint64_t i = st.pos;
+                uint64_t qp = st.qw >> 6;
+                uint32_t ww = st.qw & 63;
+                erat::cross_off_checked210<PR>(bytes, se, qp, i, ww);
+                m64s_nxt_[PR * 48 + ww].push_back(
+                    {static_cast<uint32_t>((qp << 6) | ww), static_cast<uint32_t>(i - rebase)});
+            }
+        }
+    }
+    __attribute__((noinline)) void run_med64s(uint8_t* bytes, uint64_t se, uint64_t rebase) {
+        process_med64s<0>(bytes, se, rebase);
+        process_med64s<1>(bytes, se, rebase);
+        process_med64s<2>(bytes, se, rebase);
+        process_med64s<3>(bytes, se, rebase);
+        process_med64s<4>(bytes, se, rebase);
+        process_med64s<5>(bytes, se, rebase);
+        process_med64s<6>(bytes, se, rebase);
+        process_med64s<7>(bytes, se, rebase);
+        for (auto& v : m64s_cur_) v.clear();
+        std::swap(m64s_cur_, m64s_nxt_);
     }
 
     // Medium tier over the whole segment, one call per residue class; the
@@ -920,6 +975,14 @@ private:
     std::array<std::vector<erat::DenseState>, 384> m64_cur_{};
     std::array<std::vector<erat::DenseState>, 384> m64_nxt_{};
     bool med64_reserved_ = false;
+    // The sub-blocked med64 band (p < m64s_limit_, see process_med64s): the
+    // same (class, phase) lists, swapped once per SUB-BLOCK instead of once
+    // per segment. m64s_count_: entries activated so far in the chunk, so
+    // the sub-block loop skips the band's calls while it is empty.
+    std::array<std::vector<erat::DenseState>, 384> m64s_cur_{};
+    std::array<std::vector<erat::DenseState>, 384> m64s_nxt_{};
+    uint64_t m64s_limit_ = 0;
+    size_t m64s_count_ = 0;
 
     uint32_t log2_sb_ = 0; // log2(segment width in bytes) -- see constructor
     uint64_t num_buckets_ = 1;
