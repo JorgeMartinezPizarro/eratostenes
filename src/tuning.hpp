@@ -80,7 +80,9 @@ struct SievePlan {
     uint64_t small_limit = 0, med64_limit = 0, sparse_limit = 0;
     uint64_t sparse_num = 1, sparse_den = 1, sparse_den_auto = 1;
     bool sparse_l3_gate = false;   // the 1/4 came from the L3 per active thread
-    bool med64_l2_gate = false;    // med64 1/2 came from the small-L2 rule
+    bool med64_l2_gate = false;    // med64 = the whole segment, from the small-L2 rule
+    bool half_l2_few_primes = false; // base kept at half the L2: small L2, few base primes
+    uint64_t base_count = 0;         // startup log
     uint64_t l3_per_thread = 0;    // bytes, 0 = undetected
     bool sparse_regime = false;
     TierSet wide, narrow;        // narrow: unused unless narrow_k_end > 0
@@ -236,10 +238,26 @@ inline SievePlan plan_sieve(Options& opt, const BasePrimes& base, uint64_t base_
     const bool one_per_core = l1_big_cores && opt.threads <= l1_big_cores;
     cfg.huge_arenas = opt.huge >= 0 ? opt.huge != 0 : one_per_core;
     bool whole_l2_base = false; // startup log
+    // A core with an L2 of 256 KiB or less (i5-3470) and few base primes:
+    // keep the base at half the L2. The whole-L2 segment fills all 8 ways
+    // of every L2 set, so the state streams evict the hot sieve lines in a
+    // cascade (1.78 G L2 misses at 1e11, 8x primesieve's); half the L2
+    // leaves 4 ways for the streams. Halving the segment also doubles the
+    // per-segment visit of every med64 entry, which wins as long as the
+    // base primes are few: `-s 3932160 --tune med64=1/1` vs the whole-L2
+    // auto, x3 each: -8.7% at 1e10, -4.8% at 1e11, -1.4% at 2e11, +1.2%
+    // at 3e11, +1.9% at 5e11, +5.5% at 1e12 -- the crossover is ~40K base
+    // primes (sqrt(N) ~ 500K). Only matters with the whole-L2 rule below.
+    // docs/RESEARCH.md#i5-3470-profile-at-1e12-the-med64-tier-over-the-whole-l2-segment-is-59-of-the-cycles-open-2026-10-04
+    constexpr uint64_t SMALL_L2_BYTES = 256 * uint64_t{1024};
+    constexpr uint64_t HALF_L2_MAX_BASE_PRIMES = 40000;
+    const uint64_t l2_core = opt.l2_bytes_override ? opt.l2_bytes_override : detect_l2_cache_bytes();
+    const bool small_l2_core = l2_core && l2_core <= SMALL_L2_BYTES;
+    const bool half_l2_few_primes = small_l2_core && base.count <= HALF_L2_MAX_BASE_PRIMES;
     if (!opt.segment_width_set && sparse_regime) {
         seg_k_width *= 2;
         opt.segment_width = seg_k_width * WHEEL_MOD / WHEEL_SIZE; // keep the startup log's "segment=" accurate
-    } else if (!opt.segment_width_set && !opt.l2_bytes_override && one_per_core && min_l2_share) {
+    } else if (!opt.segment_width_set && !opt.l2_bytes_override && one_per_core && min_l2_share && !half_l2_few_primes) {
         // No sparse tier and a core to itself: the base segment is the
         // thread's whole L2 share, not half of it, within 32 x L1d. The
         // medium tier pays a fixed cost per prime per segment, and here
@@ -397,23 +415,19 @@ inline SievePlan plan_sieve(Options& opt, const BasePrimes& base, uint64_t base_
     // 1/12 was
     // jointly re-tuned with small_limit's own divisor above -- see
     // docs/RESEARCH.md#small_limit-re-tuned-jointly-with-med64_limit-kept-2026-09-26.
-    // 1/2 on a core whose L2 is 256 KiB or less (i5-3470, Ivy Bridge: the
-    // medium tier's generic per-prime stepping is what that core pays,
-    // -5.9% at 1e12 and -4.5% at the 1e13 tail, 3/3 each; the whole segment
-    // measured the same, -6.7%). The modern cores rank the two tiers the
+    // The whole segment on a core whose L2 is 256 KiB or less (i5-3470, Ivy
+    // Bridge: the medium tier's generic per-prime stepping is what that core
+    // pays; 1/2 was -5.9% at 1e12 and -4.5% at the 1e13 tail, 3/3 each, and
+    // the whole segment -6.7% at 1e12 and a tie with 1/2 at 1e13). The modern cores rank the two tiers the
     // other way (i5-11400F +7.7%/+11.5%, i5-13500 +7.6%/+3.2%, the Xeon
     // VMs within noise), hence the gate on the physical L2 as the proxy for
     // an old core -- unmeasured on Skylake-class clients, which have 256
     // KiB too. --l2-bytes counts as the L2 here, --tune med64 overrides.
     // docs/RESEARCH.md#i5-3470-profile-at-1e12-the-med64-tier-over-the-whole-l2-segment-is-59-of-the-cycles-open-2026-10-04
-    constexpr uint64_t MED64_SMALL_L2 = 256 * uint64_t{1024};
     uint64_t med64_num = 1, med64_den = 6;
     bool med64_l2_gate = false;
     if (opt.tune_med64.den) { med64_num = opt.tune_med64.num; med64_den = opt.tune_med64.den; }
-    else {
-        const uint64_t l2_core = opt.l2_bytes_override ? opt.l2_bytes_override : detect_l2_cache_bytes();
-        if (l2_core && l2_core <= MED64_SMALL_L2) { med64_den = 2; med64_l2_gate = true; }
-    }
+    else if (small_l2_core) { med64_den = 1; med64_l2_gate = true; }
     uint64_t med64_limit = seg_k_width * med64_num / med64_den;
     // The sub-blocked med64 band (SegmentSieve::process_med64s), off by
     // default: --tune med64s=a/b puts the med64 primes below a/b of the
@@ -531,6 +545,8 @@ inline SievePlan plan_sieve(Options& opt, const BasePrimes& base, uint64_t base_
     P.sparse_den_auto = sparse_den_auto;
     P.sparse_l3_gate = sparse_l3_gate;
     P.med64_l2_gate = med64_l2_gate;
+    P.half_l2_few_primes = half_l2_few_primes && !opt.segment_width_set;
+    P.base_count = base.count;
     P.l3_per_thread = l3_per_thread;
     P.sparse_regime = sparse_regime;
     P.wide = std::move(wide);
@@ -600,8 +616,11 @@ inline void print_plan(const SievePlan& P, const Options& opt, unsigned actual_t
         std::fprintf(stderr, "  sparse ring: %s arenas%s\n",
                      cfg.huge_arenas ? "2 MiB huge-page" : "1 MiB",
                      opt.huge >= 0 ? " (--tune huge)" : cfg.huge_arenas ? " (one thread per core)" : "");
+    if (P.half_l2_few_primes)
+        std::fprintf(stderr, "  segment: half the L2 (L2 of 256 KiB or less, %s base primes <= 40,000)\n",
+                     format_thousands(P.base_count).c_str());
     if (P.med64_l2_gate)
-        std::fprintf(stderr, "  med64 cutoff: 1/2 of the segment (L2 of 256 KiB or less)\n");
+        std::fprintf(stderr, "  med64 cutoff: the whole segment (L2 of 256 KiB or less)\n");
     if (cfg.med64s_limit)
         std::fprintf(stderr, "  med64: primes below %s crossed off per L1 sub-block%s\n",
                      format_thousands(cfg.med64s_limit).c_str(), opt.tune_med64s.den ? " (--tune med64s)" : "");

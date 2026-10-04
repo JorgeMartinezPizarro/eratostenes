@@ -3363,6 +3363,52 @@ i5-1235U and the Xeon VMs before choosing the gate (L2 <= 256 KiB is the
 candidate proxy for "old core", with the caveat that Skylake-class
 clients have 256 KiB too and are unmeasured).
 
+The rest of the fleet, `med64=1/2` x3 (1e12 / 1e13 tails): i5-13500
++7.6% / +3.2% (both overlapping, the host drifting); i5-1235U +4.5%
+(overlap) / -2.6% (3/3, but confounded: the auto had the medium-tier NTA
+on and the 1/2 run, with fewer medium primes, had it off); Xeon
+@2.80GHz 1 MiB L2 -3.4% / -2.3% (overlap); Xeon @2.10GHz identical at
+1e12 (1/6 of its 1 MiB segment already takes every prime) and -1.1%
+(overlap) at 1e13; Xeon @2.80GHz 2 MiB L2 +3.1% (3/3, by 0.02 s) /
+-1.8% (overlap). Only the i5-3470 moves clearly, only the i5-11400F
+clearly the other way. **Kept as a gate on the physical L2: 1/2 when it
+is 256 KiB or less** (tuning.hpp, `med64 cutoff:` startup line; `--tune
+med64` overrides; `--l2-bytes` counts). 1/2 over the whole segment (1/1)
+because 1/2 is the one measured in both regimes on the i5-3470. Pending
+there: the new auto against `--tune med64=1/6` and a fresh table.
+
+Validated on the i5-3470 (62fc592, x3): the new auto against
+`--tune med64=1/6` **-5.4% (3/3)** at the 1e12 tail and **-5.6% (3/3)**
+at 1e13; `1/1` against the new auto at 1e13 +0.1% (overlap), so 1/2 and
+the whole segment are the same there and 1/2 stays. Fresh tables
+(REPS=2): counts 1.12 / 1.06 / 1.02 / 1.01x (were 1.12 / 1.14 / 1.09 /
+1.07), tails 0.98 / 0.91 / 0.82 / 0.85 / 0.92 / 0.91x (were 1.02 / 1.05 /
+0.99 / 1.00 / 0.91 / 0.97). The whole-L2 segment plus this cutoff turned
+the tower's dense regime from a 7-14% loss into a tie, and its 1e14-1e16
+tails gained 9-17%. Left there: 1e10 (0.49 vs 0.44 s: 50 ms of startup,
+unprofiled) and 1e11 (1.06x: the only range where half the L2 measured a
+gain, -4% in cycles, before the cutoff moved).
+
+1e10 profiled: nothing to see -- med64 59%, small tier 32%, presieve 7%,
+thread start 2.4%; the 50 ms are the same per-segment shape as 1e11.
+Half the L2 with every prime in med64 (`-s 3932160 --tune med64=1/1`,
+x3): **-4.8% (3/3)** on 1e11 (9e10 window), **+5.5% (3/3)** on the 1e12
+tail. The crossover sits between 27K and 78K base primes; the candidate
+rule is half L2 on a 256 KiB core while the base primes are few, and the
+threshold needs the 2e11-5e11 points.
+
+The points (x3, 1e11 windows, `-s 3932160 --tune med64=1/1` vs the auto):
+1e10 **-8.7% (3/3)**, 2e11 -1.4% (3/3), 3e11 +1.2% (3/3), 5e11 +1.9%
+(overlap); with 1e11 -4.8% and 1e12 +5.5% the crossover is ~2.5e11, i.e.
+~40K base primes. **Rule (tuning.hpp): on a core with an L2 of 256 KiB or
+less, the base segment stays at half the L2 while the base primes are at
+most 40,000, and the med64 tier takes the whole segment** (the 1/2 gate
+became 1/1: a tie with 1/2 at 1e13, -6.7% vs -5.9% at 1e12, and it makes
+the half-L2 case simple). Startup lines `segment: half the L2 (...)` and
+`med64 cutoff: the whole segment (...)`; test.sh checks both with forced
+caches. Expected on the i5-3470: 1e10 1.12x -> ~1.02x, 1e11 1.06x ->
+~1.01x, nothing else changes; the modern machines never see either line.
+
 ### Sparse ring arenas as 2 MiB huge pages, with one thread per core (kept, 2026-10-04)
 
 Where the one-thread-per-core machines lose most is the 1e16-1e18 tails,

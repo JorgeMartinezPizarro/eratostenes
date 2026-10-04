@@ -9,7 +9,7 @@ A segmented, parallel, wheel-based Sieve of Eratosthenes writen in C++. It is de
 Requires a C++20 compiler, POSIX `pwrite`/`ftruncate` (Linux or WSL; does not build as-is with MSVC/native Windows), and the SQLite3 and zstd development libraries (for `.db` output):
 
 ```sh
-sudo apt-get install libsqlite3-dev libzstd-dev   # Debian/Ubuntu/WSL
+sudo apt-get install build-essential libsqlite3-dev libzstd-dev   # Debian/Ubuntu/WSL
 ```
 
 `make test` additionally needs [primecount](https://github.com/kimwalisch/primecount) on `PATH` -- it's the source of truth:
