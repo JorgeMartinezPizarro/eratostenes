@@ -23,9 +23,11 @@ to_dec() {
 # fraction): exit status 0 when true.
 num_lt() { awk -v a="$1" -v b="$2" 'BEGIN{exit !(a < b)}'; }
 
-# Mean of its arguments (seconds with a fraction), two decimals, as the
-# benchmark tables print it.
+# mean_of DECIMALS t1 t2 ...: the mean of the times, printed with that many
+# decimals (2 for eratostenes' own `total:`, 3 for primesieve's `Seconds:`,
+# as the tables have always shown them).
 mean_of() {
-    printf '%s\n' "$@" | awk '{s += $1; n++} END{printf "%.2f", s / n}'
+    local prec=$1; shift
+    printf '%s\n' "$@" | awk -v p="$prec" '{s += $1; n++} END{printf "%." p "f", s / n}'
 }
 

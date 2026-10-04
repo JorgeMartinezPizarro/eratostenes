@@ -122,8 +122,8 @@ for n in $NS; do
         times_e+=("$t_e"); times_p+=("$t_p")
         echo "  N=$n rep=$r eratostenes=${t_e}s primesieve=${t_p}s ($count primos) [ok]" >&2
     done
-    MEAN_E[$n]=$(mean_of "${times_e[@]}")
-    MEAN_P[$n]=$(mean_of "${times_p[@]}")
+    MEAN_E[$n]=$(mean_of 2 "${times_e[@]}")
+    MEAN_P[$n]=$(mean_of 3 "${times_p[@]}")
     COUNT[$n]="$count"
 done
 
