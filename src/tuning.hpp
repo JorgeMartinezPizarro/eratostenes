@@ -80,6 +80,7 @@ struct SievePlan {
     uint64_t small_limit = 0, med64_limit = 0, sparse_limit = 0;
     uint64_t sparse_num = 1, sparse_den = 1, sparse_den_auto = 1;
     bool sparse_l3_gate = false;   // the 1/4 came from the L3 per active thread
+    bool med64_l2_gate = false;    // med64 1/2 came from the small-L2 rule
     uint64_t l3_per_thread = 0;    // bytes, 0 = undetected
     bool sparse_regime = false;
     TierSet wide, narrow;        // narrow: unused unless narrow_k_end > 0
@@ -396,8 +397,23 @@ inline SievePlan plan_sieve(Options& opt, const BasePrimes& base, uint64_t base_
     // 1/12 was
     // jointly re-tuned with small_limit's own divisor above -- see
     // docs/RESEARCH.md#small_limit-re-tuned-jointly-with-med64_limit-kept-2026-09-26.
+    // 1/2 on a core whose L2 is 256 KiB or less (i5-3470, Ivy Bridge: the
+    // medium tier's generic per-prime stepping is what that core pays,
+    // -5.9% at 1e12 and -4.5% at the 1e13 tail, 3/3 each; the whole segment
+    // measured the same, -6.7%). The modern cores rank the two tiers the
+    // other way (i5-11400F +7.7%/+11.5%, i5-13500 +7.6%/+3.2%, the Xeon
+    // VMs within noise), hence the gate on the physical L2 as the proxy for
+    // an old core -- unmeasured on Skylake-class clients, which have 256
+    // KiB too. --l2-bytes counts as the L2 here, --tune med64 overrides.
+    // docs/RESEARCH.md#i5-3470-profile-at-1e12-the-med64-tier-over-the-whole-l2-segment-is-59-of-the-cycles-open-2026-10-04
+    constexpr uint64_t MED64_SMALL_L2 = 256 * uint64_t{1024};
     uint64_t med64_num = 1, med64_den = 6;
+    bool med64_l2_gate = false;
     if (opt.tune_med64.den) { med64_num = opt.tune_med64.num; med64_den = opt.tune_med64.den; }
+    else {
+        const uint64_t l2_core = opt.l2_bytes_override ? opt.l2_bytes_override : detect_l2_cache_bytes();
+        if (l2_core && l2_core <= MED64_SMALL_L2) { med64_den = 2; med64_l2_gate = true; }
+    }
     uint64_t med64_limit = seg_k_width * med64_num / med64_den;
     // The sub-blocked med64 band (SegmentSieve::process_med64s), off by
     // default: --tune med64s=a/b puts the med64 primes below a/b of the
@@ -514,6 +530,7 @@ inline SievePlan plan_sieve(Options& opt, const BasePrimes& base, uint64_t base_
     P.sparse_den = sparse_den;
     P.sparse_den_auto = sparse_den_auto;
     P.sparse_l3_gate = sparse_l3_gate;
+    P.med64_l2_gate = med64_l2_gate;
     P.l3_per_thread = l3_per_thread;
     P.sparse_regime = sparse_regime;
     P.wide = std::move(wide);
@@ -583,6 +600,8 @@ inline void print_plan(const SievePlan& P, const Options& opt, unsigned actual_t
         std::fprintf(stderr, "  sparse ring: %s arenas%s\n",
                      cfg.huge_arenas ? "2 MiB huge-page" : "1 MiB",
                      opt.huge >= 0 ? " (--tune huge)" : cfg.huge_arenas ? " (one thread per core)" : "");
+    if (P.med64_l2_gate)
+        std::fprintf(stderr, "  med64 cutoff: 1/2 of the segment (L2 of 256 KiB or less)\n");
     if (cfg.med64s_limit)
         std::fprintf(stderr, "  med64: primes below %s crossed off per L1 sub-block%s\n",
                      format_thousands(cfg.med64s_limit).c_str(), opt.tune_med64s.den ? " (--tune med64s)" : "");

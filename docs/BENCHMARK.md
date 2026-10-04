@@ -30,10 +30,10 @@ Intel Core i5-13500 (Raptor Lake, 2023), 64 GB.
 |---|---:|---:|---:|
 | 1e10 | 0.13s | 0.137s | 0.95x |
 | 1e11 | 1.88s | 1.973s | 0.95x |
-| 1e12 | 21.93s | 25.360s | 0.86x |
+| 1e12 | 21.37s | 25.360s | 0.86x |
 | 1e13 | 282.60s | 294.862s | 0.96x |
 | 1e14 | 3392.08s | 3349.907s | 1.01x |
-| 1e15 | 40664.78s | - | - |
+| 1e15 | 40381.23s | - | - |
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
@@ -127,7 +127,7 @@ Intel Core i5-3470 (Ivy Bridge, 2012), 8 GB.
 
 ## Intel Core i7-620M
 
-Intel Core i7-620M (Arrandale, 2010), 8 GB.
+Intel Core i7-620M (Arrandale, 2010), 8 GB, running at 1.2 GHz (no battery: the SMC caps the clock; at its nominal 2.66 GHz it overheats).
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|

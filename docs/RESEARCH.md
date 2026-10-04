@@ -3212,6 +3212,56 @@ gains, the sieve phase pays the extra blocks where the lines already fit
 (512 KiB L2, 12 MiB L3). To settle on the Mac and the server (1.25 MiB L2
 holds 320 of the 4096 lines).
 
+Colouring, 1e18 tail, 1e11 window: i5-13500 (20 threads) **+6.3% (2/2)**
+and +5.1% (2/2) at 1e17; i5-3470 +3.1% (2/2); Xeon @2.10GHz +1.4% and
++3.1% (both overlapping, x3); Xeon @2.80GHz (Cascade Lake, 2 MiB L2)
+-1.4% (3/3). Refuted as a default, and the reason is instructive: the
+aliasing is a cheap cache partition during the sieve phase. With every
+tail line in the same set-index bits, the ring's write stream can only
+occupy 1 of the 64 L1 sets and 8 of the 512 L2 sets, so it never evicts
+the segment or the consumer stream; coloured, the same stream spreads
+over 8x the sets and the sparse marking pays it on every machine with a
+small L2 share. The activation (one pass, 2-3% of a tail) is the only
+phase that gains. Kept as a knob.
+
+i5-13500 activation: 7.6 ns per prime at 6 threads, **18.6 at 20** (HT
+pairs: 2.4x) -- 0.95 s of a 7.2-7.9 s 1e18 tail, about 12%, the largest
+share of any machine; 1e17 (17M primes) about 5%. The per-group batch is
+untested there.
+
+i7-620M, 1e18 tail x2: colouring +0.4% (2/2, 0.5 s), per-group batch
++0.8% (overlap). Neither moves its 83-129 ns per prime, so that cost is
+not the tail-line RFO at all (and not the division: FPDIV -0.4%). What is
+left in the activation path is the kernel: the ring's 406 MB per thread
+are first-touched there (1 MiB arenas, huge pages gated off on HT pairs;
+`--tune huge=1` gave ~-1% earlier), a page fault per 4 KiB page on a 2010
+laptop, or something only a profile shows. Next: `perf record` without
+`:u` on a 1e9 window of 1e18 at 2 threads, where the activation is 3/4
+of the run.
+
+i5-1235U (WSL, 3.7 GB), 1e17 tail at 8 threads x3: per-group batch -1.5%
+(overlapping; the runs drift 14.4 -> 16.8 s, laptop power limits), 16.0
+ns per prime without it, 18.0 with. HT pairs do not rescue it either.
+
+**Resolved (i7-620M): it is the clock.** `perf record` on a 1e9 window of
+1e18 at 2 threads: 53.8% in `activate` (user code, file_sparse inlined),
+23.5% in the base-prime sieve, 11.2% in process_big, 0.3% kernel -- no
+page faults. 9.5 G cycles of activation over 2 x 50.8M primes = 94 cycles
+per prime, i.e. 35 ns at the nominal 2.67 GHz, yet 83 were measured.
+`perf stat`: 16.5 G cycles:u over 14.28 s of task-clock = **1.16 GHz**.
+The machine runs at well under half its nominal clock (no battery: the
+MacBook's SMC caps the CPU when the adapter is the only supply). Every
+Mac number in BENCHMARK.md is a 1.2 GHz Nehalem, primesieve's included,
+so the ratios stand; the 83 ns were never a code problem. The three
+activation experiments (FPDIV, ACT_BATCH, BLK_COLOR) are closed on every
+machine; the flags stay as knobs.
+
+i5-13500, 20 threads, x3: the per-group batch **+7.7% (3/3)** at the 1e18
+tail, +3.6% (3/3) at 1e17, 20.5 ns per prime against 18.6. Refuted on the
+one machine where the activation weighs 12%: HT pairs or not, the group
+buffers are extra traffic through an L2 that the direct push does not
+need. ERA_ACT_BATCH closed everywhere.
+
 ### i5-3470 profile at 1e12: the med64 tier over the whole-L2 segment is 59% of the cycles (open, 2026-10-04)
 
 First PMU profile of a dense-regime loss on a one-thread-per-core machine
@@ -3246,6 +3296,72 @@ med64 band (`--tune med64s=a/b`, refuted on Rocket Lake, see above) is
 exactly that band on our side; the i5-3470 is the machine it was built
 for. Pending: `--tune med64s=1/4|1/2|1` A/B at 1e12 there, and `perf
 stat` with the L2 request events to confirm the L2 misses.
+
+Follow-up (same day). `--tune med64s=1/4|1/2|1` at the 1e12 tail: -1.2%,
+-1.2%, 0.0%, all overlapping -- the L1-blocked band is not it. `perf
+stat` at 1e11, 4 threads, is:
+
+| segment | cycles:u | L2 demand reads | L2 hit | LLC-loads | wall |
+|---|---:|---:|---:|---:|---:|
+| 256 KiB (auto, whole L2) | 80.0 G | 9.74 G | 82% | 1.78 G | 5.96 s |
+| 128 KiB | 76.8 G | 8.85 G | 94% | 0.52 G | 5.73 s |
+| 64 KiB | 85.1 G | 7.37 G | 94% | 0.43 G | 6.34 s |
+| primesieve (128 KiB sieve) | 74.5 G | 8.31 G | 97% | 0.22 G | 5.55 s |
+
+The whole-L2 segment is the pathological size on a 256 KiB 8-way L2: its
+4096 lines are all 8 ways of all 512 sets, so every line of med64/medium
+state streaming through evicts a hot sieve line, which misses on its next
+touch and evicts another -- 1.78 G L2 misses, 34 per sieve line per
+segment. Half the L2 leaves 4 ways per set for the streams: -71% L2
+misses, -4% cycles at 1e11. But at the 1e12 tail `-s 3932160` is **+12.1%
+(3/3)**: the med64/medium cutoff scales with the segment (29375 med64 +
+48559 medium become 15333 + 62601) and the medium tier, which is
+per-segment-call bound, gets 14K more primes and twice the segments. The
+segment and the band have to move together: pending `-s 3932160 --tune
+med64=1/3` (same med64 population as the auto) and `1/2` at 1e12.
+
+Done: with the populations equalised (`-s 3932160 --tune med64=1/3`:
+29375 med64 + 48559 medium, same as the auto) the 1e12 tail is still
+**+9.0% (3/3)**, `1/2` +5.4% (3/3); `perf stat` on that tail: L2 misses
+2.03 G -> 0.69 G (-66%) and cycles 111.7 G -> 120.1 G (+7.5%). So the
+cascade is real but hidden (overlapped), and halving the segment doubles
+the per-segment visit of every med64/medium entry (78K primes x 12.7K
+extra segments = 1e9 visits for 8.4 G cycles, ~8 cycles each), which
+costs more than the misses ever did. Half L2 only pays while the base
+primes are few (1e11: -4%). The whole-L2 rule stands on the i5-3470; its
+dense loss is not the L2 either. Left: the med64 kernel's ~6 cycles per
+hit against primesieve's EratMedium -- `perf annotate` is the next look.
+
+`perf annotate` (1e12 tail, cycles:u, samples summed by mnemonic inside
+the kernel): `process_med64<0>` add 73%, lea 14%, cmp 8%, orb 0.1%;
+`run_med64` (the inlined classes) lea 85%, cmp 8%, orb 0.7%;
+primesieve's `EratMedium::crossOff_7` add 73%, cmp 11%, andb 2.5%. With
+skid the sample lands on the instruction after the one that stalls, and
+in both kernels that is the add/lea right after the byte RMW: both are
+bound by the segment-byte read-modify-write missing L1, at the same
+shape. Per hit the kernels are alike; what differs is how many hits each
+program sends through a non-L1 kernel (primesieve's EratSmall runs
+L1-blocked up to ~23K, ours to ~3.8K) and how many per-segment visits
+(our separate medium tier, 48559 primes at 1e12, is the generic
+per-prime stepping kernel primesieve does not have: it keeps its 64-list
+design up to the EratBig limit). The band experiments (small=1/2,
+med64s) were neutral, so the hit count below 23K is not it; the medium
+tier is the remaining structural difference -- `--tune med64=1/2|1/1`
+(moving it into the med64 design) is the next A/B on the i5-3470.
+
+Done, and it splits by machine. i5-3470 (x3, 1e11 windows): `med64=1/2`
+**-5.9% (3/3)** at 1e12, `1/1` (no medium tier at all) -6.7% (3/3),
+`1/2` at 1e13 -4.5% (3/3). i5-11400F (12 threads, x3): `1/2` +7.7%
+(3/3) and `1/1` +8.1% at 1e12, +11.5% / +13.1% at 1e13. The two tiers
+rank the opposite way on the two cores: the medium tier's generic
+per-prime stepping (table-driven, a load on the position chain) is what
+Ivy Bridge pays and Rocket Lake hides, while the med64 double-buffered
+state traffic is what Rocket Lake pays. So the med64 fraction is a
+per-microarchitecture setting, not a cache-size one: 1/6 on the modern
+cores, the whole segment on the i5-3470. Pending on the i5-13500,
+i5-1235U and the Xeon VMs before choosing the gate (L2 <= 256 KiB is the
+candidate proxy for "old core", with the caveat that Skylake-class
+clients have 256 KiB too and are unmeasured).
 
 ### Sparse ring arenas as 2 MiB huge pages, with one thread per core (kept, 2026-10-04)
 

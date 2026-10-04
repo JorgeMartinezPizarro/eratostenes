@@ -366,6 +366,10 @@ expect_log "-s redondeado: 1 MiB"             "segment=31457280,"               
 expect_log "-s respetado sin tier sparse"     "segment=47185920,"               $T13 -s 47185920
 expect_log "--tune sparse en el log"          "sparse cutoff: 1/2 of the segment \(--tune sparse\)" $T15 --tune sparse=1/2
 expect_log "--tune medium_nta forzado"        "medium-tier prefetchnta: no \(forced" $T13 --tune medium_nta=0
+# med64 1/2 on a 256 KiB L2 (tuning.hpp's small-L2 rule), 1/6 on 512 KiB; --tune med64 overrides
+expect_log "med64 1/2 con L2 de 256 KiB"      "med64 cutoff: 1/2 of the segment \(L2 of 256 KiB or less\)" $T13 --l1-bytes 32768 --l2-bytes 262144
+expect_log "med64 1/2: poblacion"             "med64, 0 medium" $T13 --l1-bytes 32768 --l2-bytes 262144
+expect_log "med64 1/6 con L2 de 512 KiB"      "^Starting.*[1-9][0-9]* medium" $T13 --l1-bytes 32768 --l2-bytes 524288
 
 # The L3 gate (tuning.hpp): 1/4 from 4 MiB of L3 per active thread, also
 # below the sparse regime when an octave of base primes lands in the sparse

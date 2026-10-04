@@ -114,10 +114,10 @@ What this project is built from, one term each — follow the link for the conce
 |---|---:|---:|---:|
 | 1e10 | 0.13s | 0.137s | 0.95x |
 | 1e11 | 1.88s | 1.973s | 0.95x |
-| 1e12 | 22.80s | 25.360s | 0.90x |
+| 1e12 | 21.37s | 25.360s | 0.90x |
 | 1e13 | 284.37s | 294.862s | 0.96x |
 | 1e14 | 3392.08s | 3349.907s | 1.01x |
-| 1e15 | 40664.78s | - | - |
+| 1e15 | 40381.23s | - | - |
 
 For more machines and results, see: [docs/BENCHMARK.md](docs/BENCHMARK.md).
 
