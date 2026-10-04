@@ -70,6 +70,7 @@ throughout below).
   - [med64: re-filing without `std::vector::push_back` (tried, reverted, 2026-09-29)](#med64-re-filing-without-stdvectorpush_back-tried-reverted-2026-09-29)
   - [med64: `prefetchnta` on the state stream (kept, 2026-09-29)](#med64-prefetchnta-on-the-state-stream-kept-2026-09-29)
   - [Sparse tier: mod-2310 multiplier wheel (kept, 2026-09-30)](#sparse-tier-mod-2310-multiplier-wheel-kept-2026-09-30)
+  - [Sparse tier: next-block prefetch spread over the current block (kept, 2026-10-04)](#sparse-tier-next-block-prefetch-spread-over-the-current-block-kept-2026-10-04)
   - [Activation at the top of N on old cores: 83 ns per prime on Nehalem, two flags to split it (open, 2026-10-04)](#activation-at-the-top-of-n-on-old-cores-83-ns-per-prime-on-nehalem-two-flags-to-split-it-open-2026-10-04)
   - [i5-3470 profile at 1e12: the med64 tier over the whole-L2 segment is 59% of the cycles (open, 2026-10-04)](#i5-3470-profile-at-1e12-the-med64-tier-over-the-whole-l2-segment-is-59-of-the-cycles-open-2026-10-04)
   - [i5-3470 follow-up: med64 gate at the tails, the +6% that was not code, and the 1e12 window profile (2026-10-04)](#i5-3470-follow-up-med64-gate-at-the-tails-the-6-that-was-not-code-and-the-1e12-window-profile-2026-10-04)
@@ -3150,6 +3151,45 @@ anywhere in the ring: a cache miss per prime), not arithmetic. Reverted.
 The measurement that would say whether the division matters on an old
 core is `--debug-idle` on the i5-3470 or i7-620M at the 1e18 tail; the
 push cost is structural (primesieve's storeSievingPrime pays it too).
+
+### Sparse tier: next-block prefetch spread over the current block (kept, 2026-10-04)
+
+A fresh pass over the whole algorithm on the dev PC (i5-11400F, 12
+threads, cycles:u) started from a profile by symbol: at the 1e12 window
+med64 ~40% of the cycles, small ~31%, medium ~23%, presieve 4%; at the
+1e15 tail `process_big` 32% (39% of the instructions), med64 27%, medium
+27%. Per hit that is ~5 instructions and ~5 cycles in med64 (one L1 miss
+per hit, the segment lives in L2), ~2.3 / 2.5 in the small tier, and ~38
+instructions / ~40 cycles per hit in the sparse tier at 12 threads.
+
+`perf annotate` of `process_big<true>` put **22% of its cycles on the
+next-block prefetch loop** (`prefetcht1 0x40(%rax)` / `sub $-0x80,%rax`),
+the 64 prefetches issued in a burst at every block boundary (kept
+2026-09-27 as a win over no prefetch). Sixty-four outstanding L2 requests
+exceed the core's miss queue, so the loop stalls until they drain: a
+synchronous fetch of the next 4 KiB block dressed as a prefetch. The
+other hot spots were the entry loads (the `and $0xffffff` after the
+16-ahead `pe` load, 11%) and the table row (`movzbl %dh`, 9%).
+
+Spread instead (ERA_BIG_PFSPREAD, now the default): inside the unrolled
+loop, during entries 0..255 of the current block, prefetch line idx/4 of
+the next block -- 64 lines over half a block, each requested twice (U =
+2), never more than a couple outstanding. Interleaved A/B
+(`benchmark_ab.sh`, 1e11 windows, REPS=3, every B run below every A run):
+
+| tail | threads | burst | spread | delta |
+|---|---:|---:|---:|---:|
+| 1e14 | 12 | 5.35 s | 5.09 s | -4.9% |
+| 1e15 | 12 | 7.33 s | 6.98 s | -4.8% |
+| 1e16 | 12 | 9.88 s | 9.41 s | -4.8% |
+| 1e17 | 12 | 13.12 s | 12.43 s | -5.3% |
+| 1e15 | 6 (one per core) | 8.60 s | 8.03 s | -6.6% |
+
+cycles:u at the 1e15 tail, A/B/A/B: 323.9 / 309.8 / 325.2 / 316.2 G
+(-3..-4.4%) with +3.4% instructions (the per-iteration condition and
+address). The dense regime (1e12 and below, no sparse tier) is untouched.
+`-DERA_BIG_PFSPREAD=0` keeps the burst for an A/B on the other machines
+(pending: i5-13500, i5-3470, i5-1235U, the Xeons).
 
 ### Activation at the top of N on old cores: 83 ns per prime on Nehalem, two flags to split it (open, 2026-10-04)
 

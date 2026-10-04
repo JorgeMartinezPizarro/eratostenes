@@ -59,6 +59,17 @@ constexpr double MEDIUM_BAND_MAX_HITS = 8.0;
 #ifndef ERA_BIG_PFPUSH
 #define ERA_BIG_PFPUSH 0
 #endif
+// Sparse tier: the next block's prefetch spread over the first half of the
+// current block (one line per 4 entries, default) instead of 64 prefetcht1
+// in a burst at the block boundary (-DERA_BIG_PFSPREAD=0 for the A/B). The
+// burst filled the core's miss queue and stalled on it: 22% of process_big's
+// cycles sat on that prefetch loop (dev PC, perf annotate, 1e15 tail).
+// Spread: -4.8..-5.3% at the 1e14-1e17 tails with 12 threads, -6.6% at
+// 1e15 with one thread per core, 3/3 each; cycles:u -3..-4.4% with +3.4%
+// instructions. See docs/RESEARCH.md#sparse-tier-next-block-prefetch-spread-over-the-current-block-kept-2026-10-04.
+#ifndef ERA_BIG_PFSPREAD
+#define ERA_BIG_PFSPREAD 1
+#endif
 // Sparse activation experiments (--debug-idle prints the per-prime cost):
 // ERA_FPDIV=1 computes the first multiplier with a double division plus an
 // exact fixup instead of a 64-bit integer division (slow on pre-Ice-Lake
@@ -749,14 +760,19 @@ private:
                 Blk* next_blk = blk->next;
                 // Chain blocks are scattered in memory (LIFO free list), so
                 // the hardware streamer restarts at every block boundary;
-                // fetch the whole next block into L2 now, one block's worth
-                // of work ahead. See
-                // docs/RESEARCH.md#sparse-tier-prefetch-the-next-block-of-the-chain-once-per-block-kept-2026-09-27.
-                if (next_blk) {
-                    const char* nb = reinterpret_cast<const char*>(next_blk);
-                    for (size_t off = 0; off < BLK_BYTES; off += 64) __builtin_prefetch(nb + off, 0, 2);
+                // the next block is prefetched into L2 one block's worth of
+                // work ahead -- spread over this block's first half (the
+                // loop below, ERA_BIG_PFSPREAD) or, the 2026-09-27 form, as
+                // a burst of 64 prefetcht1 here. See
+                // docs/RESEARCH.md#sparse-tier-prefetch-the-next-block-of-the-chain-once-per-block-kept-2026-09-27
+                // and docs/RESEARCH.md#sparse-tier-next-block-prefetch-spread-over-the-current-block-kept-2026-10-04.
+                const char* nb = reinterpret_cast<const char*>(next_blk);
+                if constexpr (!ERA_BIG_PFSPREAD) {
+                    if (next_blk)
+                        for (size_t off = 0; off < BLK_BYTES; off += 64) __builtin_prefetch(nb + off, 0, 2);
                 }
                 erat::DenseState* it = blk->entries();
+                [[maybe_unused]] erat::DenseState* const blk_base = it;
                 erat::DenseState* end = next_blk ? blk->block_end() : last_end;
                 // One 8-byte load per entry and per table row (fields split
                 // with shifts), the entry rebuilt as one 8-byte store, and the
@@ -774,6 +790,13 @@ private:
                     constexpr int U = ERA_BIG_UNROLL;
                     for (; it + U <= end; it += U) {
                         uint64_t ent[U], pos[U], te[U], e[U], sl[U];
+                        if constexpr (ERA_BIG_PFSPREAD) {
+                            // Line idx/4 of the next block during entries 0..255
+                            // of this one: 64 lines over half a block, each
+                            // requested twice (U = 2), never in a burst.
+                            const size_t idx = static_cast<size_t>(it - blk_base);
+                            if (next_blk && idx < BLK_BYTES / 16) __builtin_prefetch(nb + (idx >> 2) * 64, 0, 2);
+                        }
                         // The segment byte of the entries ERA_BIG_PF ahead
                         // (same block, stale entries past `end` excluded):
                         // pos is the entry's own bits, no table needed, and
