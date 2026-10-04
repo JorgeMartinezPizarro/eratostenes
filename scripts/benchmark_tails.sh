@@ -99,7 +99,7 @@ for n in $NS; do
     need_kb=$(awk -v n="$stop" -v t="$THREADS" 'BEGIN{r = sqrt(n); printf "%d", (t + 1) * 8 * 1.15 * r / log(r) / 1024}')
     avail_kb=$(sed -nE 's/^MemAvailable: *([0-9]+) kB$/\1/p' /proc/meminfo 2>/dev/null || true)
     if [ -n "$avail_kb" ] && [ "$need_kb" -gt "$avail_kb" ]; then
-        echo "  N=$n: saltado, necesita ~$(( need_kb / 1048576 )) GB con $THREADS hilos y hay $(( avail_kb / 1048576 )) GB libres (prueba con menos THREADS)" >&2
+        echo "  N=$n: saltado, necesita ~$(awk -v k="$need_kb" 'BEGIN{printf "%.1f", k / 1048576}') GiB con $THREADS hilos y MemAvailable da $(awk -v k="$avail_kb" 'BEGIN{printf "%.1f", k / 1048576}') GiB (prueba con menos THREADS)" >&2
         continue
     fi
     if ! diff=$(dec_sub "$stop" "$width") || [ "$diff" = 0 ]; then
