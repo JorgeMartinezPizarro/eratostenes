@@ -3161,6 +3161,16 @@ threads 1e17 `huge=0` +3.3% (4/4), 12 threads 1e18 `huge=1` -1.0%
 (overlapping). The i7-620M and i5-3470 (512-entry STLBs) and the 2-vCPU
 Xeons are the machines it is meant for; unmeasured there yet.
 
+The three Emerald Rapids operators (b38faee, 2 vCPU one per core, so the
+automatic choice is the huge pages; `--tune huge=0` as B, 1e17 tail, 1e11
+windows, x3): +6.5% (3/3, the host with the tightest reps: 27.27-27.47 s
+against 25.48-26.05 s), +1.2% and +1.3% (both overlapping). Same sign on
+all three, 1-6% for turning them off. The i7-620M at 4 threads (HT, the
+gate off) measured auto against `huge=0`, i.e. itself: +1.5%, its noise
+floor; its real cases (`huge=1` at 4 threads, auto at 2) are pending.
+benchmark_ab.sh and benchmark_mini.sh now print the `sparse ring` and
+`med64:` startup lines in the config, which the operators missed.
+
 ### Sparse tier: marking a prime's further hits in the same segment in a loop before re-filing it (tried, reverted, 2026-10-04)
 
 The one structural difference left against EratBig after the pairs, the

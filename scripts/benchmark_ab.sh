@@ -61,7 +61,7 @@ run_cfg() { # BIN CFG -> t (total seconds), c (count)
     out=$(env "${envs[@]}" "$bin" "$N" --start "$START" -t "$THREADS" "${args[@]}" 2>&1) || { echo "$out" >&2; exit 1; }
     t=$(echo "$out" | sed -nE 's/.*total: *([0-9.]+)s.*/\1/p')
     c=$(echo "$out" | sed -nE 's/.*Done\. ([0-9,]+) primes.*/\1/p' | tr -d ',')
-    startup=$(echo "$out" | grep -E '^Starting|^  (segment|sub-block|sparse cutoff|medium-tier prefetchnta)' \
+    startup=$(echo "$out" | grep -E '^Starting|^  (segment|sub-block|sparse cutoff|sparse ring|med64:|medium-tier prefetchnta)' \
         | sed -E 's/^Starting [0-9]+ threads, limit=[0-9]+, (segment=[0-9]+), wheel mod [0-9]+ \([0-9]+ primes\), ([0-9]+ small[^,]*\(sub-block [^)]*\))?.*/\1 \2/' \
         | sed 's/^ *//' | paste -sd ';' - | sed 's/;/; /g')
 }

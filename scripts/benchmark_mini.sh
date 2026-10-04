@@ -72,7 +72,7 @@ run_e() { # ENVSTRING ARGS... -> t_e, c_e, startup (the config lines of the log)
     out=$(env $envs "$BIN" "$N" --start "$START" -t "$THREADS" "$@" 2>&1) || { echo "$out" >&2; exit 1; }
     t_e=$(echo "$out" | sed -nE 's/.*total: *([0-9.]+)s.*/\1/p')
     c_e=$(echo "$out" | sed -nE 's/.*Done\. ([0-9,]+) primes.*/\1/p' | tr -d ',')
-    startup=$(echo "$out" | grep -E '^Starting|^  (segment|sub-block|sparse cutoff|medium-tier prefetchnta)' \
+    startup=$(echo "$out" | grep -E '^Starting|^  (segment|sub-block|sparse cutoff|sparse ring|med64:|medium-tier prefetchnta)' \
         | sed -E 's/^Starting [0-9]+ threads, limit=[0-9]+, (segment=[0-9]+), wheel mod [0-9]+ \([0-9]+ primes\), ([0-9]+ small[^,]*\(sub-block [^)]*\))?.*/\1 \2/')
 }
 ratio() { awk -v a="$1" -v b="$2" 'BEGIN{ if (b > 0) printf "%.2fx", a / b; else printf "?" }'; }
