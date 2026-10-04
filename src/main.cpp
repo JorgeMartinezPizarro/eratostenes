@@ -193,7 +193,8 @@ static void sieve_chunk(ChunkRange range, const TierSet& t, uint64_t base_prime_
     if (slot->tiers != &t) {
         slot->sieve = std::make_unique<SegmentSieve>(t.width, base_prime_max, presieve, cfg.sub_block_bytes,
                                                      cfg.med64s_limit, !t.sparse.empty(),
-                                                     t.medium.size() >= cfg.medium_nta_min_primes, cfg.big2310);
+                                                     t.medium.size() >= cfg.medium_nta_min_primes, cfg.big2310,
+                                                     cfg.huge_arenas);
         slot->tiers = &t;
         slot->next_k = UINT64_MAX;
     }

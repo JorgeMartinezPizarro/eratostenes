@@ -50,6 +50,10 @@ struct SieveConfig {
     // (SegmentSieve::process_med64s); 0 = off. About 2 x the sub-block, so
     // every prime in the band has 14+ hits per sub-block.
     uint64_t med64s_limit = 0;
+    // Sparse ring arenas as 2 MiB huge pages (SegmentSieve): with one thread
+    // per core (-2.9..-3.5% on the 1e17/1e18 tails, dev PC at 2 threads),
+    // not with HT pairs (+10.5% at 12). --tune huge=1|0 forces it.
+    bool huge_arenas = false;
 };
 
 struct ChunkRange {
@@ -225,6 +229,7 @@ inline SievePlan plan_sieve(Options& opt, const BasePrimes& base, uint64_t base_
     // medium/sparse cutoff below.
     const bool sparse_regime = base_limit >= seg_k_width;
     const bool one_per_core = l1_big_cores && opt.threads <= l1_big_cores;
+    cfg.huge_arenas = opt.huge >= 0 ? opt.huge != 0 : one_per_core;
     bool whole_l2_base = false; // startup log
     if (!opt.segment_width_set && sparse_regime) {
         seg_k_width *= 2;
@@ -570,6 +575,10 @@ inline void print_plan(const SievePlan& P, const Options& opt, unsigned actual_t
                      : P.sparse_den_auto == 4 ? " (L2 per thread >= 1 MiB)"
                      : P.sparse_den_auto == 2 ? " (L2 per thread >= 512 KiB)" : "");
     if (!cfg.big2310 && !P.wide.sparse.empty()) std::fprintf(stderr, "  sparse tier on the mod-210 wheel (--tune big2310=0)\n");
+    if (!P.wide.sparse.empty())
+        std::fprintf(stderr, "  sparse ring: %s arenas%s\n",
+                     cfg.huge_arenas ? "2 MiB huge-page" : "1 MiB",
+                     opt.huge >= 0 ? " (--tune huge)" : cfg.huge_arenas ? " (one thread per core)" : "");
     if (cfg.med64s_limit)
         std::fprintf(stderr, "  med64: primes below %s crossed off per L1 sub-block%s\n",
                      format_thousands(cfg.med64s_limit).c_str(), opt.tune_med64s.den ? " (--tune med64s)" : "");

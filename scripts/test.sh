@@ -250,6 +250,8 @@ check_count_only "$N5" "$expected_pi_1e10" "NTA medio forzado on"          -t "$
 check_count_only "$N5" "$expected_pi_1e10" "NTA medio forzado off"         -t "$THREADS" -s 100000 --tune medium_nta=0
 check_count_only "$N5" "$expected_pi_1e10" "med64 banda sub-bloque off / ancha" -t "$THREADS" --tune med64s=0
 check_count_only "$N5" "$expected_pi_1e10" "med64 banda sub-bloque 6x"         -t "$THREADS" --tune med64s=6/1
+check_count_only "$N5" "$expected_pi_1e10" "anillo sparse: paginas grandes on"  -t "$THREADS" -s 100000 --tune huge=1
+check_count_only "$N5" "$expected_pi_1e10" "anillo sparse: paginas grandes off" -t 2 -s 100000 --tune huge=0
 
 # --start N0: el recuento es el del tramo [N0, N], pi(N) - pi(N0 - 1).
 check_start() {

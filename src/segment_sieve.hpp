@@ -54,6 +54,15 @@ constexpr double MEDIUM_BAND_MAX_HITS = 8.0;
 #ifndef ERA_BIG_LOOP
 #define ERA_BIG_LOOP 0
 #endif
+// Sparse tier: with one thread per core the bucket arenas are 2 MiB regions
+// advised MADV_HUGEPAGE (SegmentSieve's huge_arenas, decided in tuning.hpp),
+// so the ring's active write set (slots x block: 4 MiB at the 1e18 tail, a
+// thousand 4 KiB pages) costs a couple of TLB entries. Dev PC, 2 threads:
+// -2.9% on the 1e17 tail (4/4), -3.5% on 1e18, -12% on the 1e18 tail with a
+// 1e10 window (the activation of 50M primes files into that write set); 6
+// threads neutral; 12 threads (HT pairs) +10.5% worse (6/6), hence the gate.
+// Best effort: THP in "madvise" (Ubuntu's default) or "always" mode.
+#include <sys/mman.h>
 #ifndef ERA_BIG_UNROLL
 #define ERA_BIG_UNROLL 2
 #endif
@@ -81,13 +90,16 @@ public:
     // m64s_limit: med64 primes below it are crossed off one L1 sub-block at
     // a time (process_med64s), like the small tier; 0 turns that band off.
     SegmentSieve(uint64_t seg_k_width, uint64_t base_prime_max, const Presieve& presieve,
-                 uint64_t sub_block_bytes, uint64_t m64s_limit, bool has_sparse, bool medium_nta, bool big2310)
+                 uint64_t sub_block_bytes, uint64_t m64s_limit, bool has_sparse, bool medium_nta, bool big2310,
+                 bool huge_arenas = false)
         : words_((seg_k_width + 63) / 64 + 1, 0), // +1 word: s[bytes_needed] is the banded medium tier's spare byte
           seg_k_width_(seg_k_width),
           sub_block_bytes_(sub_block_bytes),
           medium_nta_(medium_nta),
           big2310_(big2310),
           presieve_(presieve),
+          arena_bytes_(huge_arenas ? (size_t{2} << 20) : BLK_BYTES * 256),
+          huge_arenas_(huge_arenas),
           m64s_limit_(m64s_limit) {
         // The byte-addressed dense tiers (erat_small.hpp) need every
         // segment to start on a byte (k multiple of 8) and to stay a whole
@@ -164,7 +176,7 @@ public:
         // the free list from scratch rather than reallocate.
         free_.clear();
         for (auto& c : chunks_)
-            for (size_t i = 0; i < CHUNK_BLOCKS; ++i)
+            for (size_t i = 0; i < arena_bytes_ / BLK_BYTES; ++i)
                 free_.push_back(reinterpret_cast<Blk*>(c.get() + i * BLK_BYTES));
     }
 
@@ -912,7 +924,7 @@ private:
     }
 
     // BLK_BYTES-aligned blocks pulled from a pool of aligned_alloc'd
-    // CHUNK_BLOCKS-sized arenas (indices/pointers into chunks_ stay valid
+    // arena_bytes_-sized arenas (indices/pointers into chunks_ stay valid
     // across pool growth since chunks_ holds owning pointers, never moved
     // or resized in place). free_ is a stack of blocks not currently in
     // any ring slot; begin_chunk() repopulates it from every arena ever
@@ -921,7 +933,6 @@ private:
 #define ERA_BLK_BYTES 4096
 #endif
     static constexpr size_t BLK_BYTES = ERA_BLK_BYTES; // -DERA_BLK_BYTES for A/B
-    static constexpr size_t CHUNK_BLOCKS = 256;
     struct Blk {
         Blk* next;
         uint64_t pad;
@@ -931,9 +942,10 @@ private:
     struct AlignedFree { void operator()(char* p) const { std::free(p); } };
     Blk* alloc_blk() {
         if (free_.empty()) {
-            char* c = static_cast<char*>(std::aligned_alloc(BLK_BYTES, BLK_BYTES * CHUNK_BLOCKS));
+            char* c = static_cast<char*>(std::aligned_alloc(huge_arenas_ ? arena_bytes_ : BLK_BYTES, arena_bytes_));
+            if (c && huge_arenas_) madvise(c, arena_bytes_, MADV_HUGEPAGE); // best effort
             chunks_.emplace_back(c);
-            for (size_t i = 0; i < CHUNK_BLOCKS; ++i) free_.push_back(reinterpret_cast<Blk*>(c + i * BLK_BYTES));
+            for (size_t i = 0; i < arena_bytes_ / BLK_BYTES; ++i) free_.push_back(reinterpret_cast<Blk*>(c + i * BLK_BYTES));
         }
         Blk* b = free_.back();
         free_.pop_back();
@@ -981,6 +993,10 @@ private:
     // the sub-block loop skips the band's calls while it is empty.
     std::array<std::vector<erat::DenseState>, 384> m64s_cur_{};
     std::array<std::vector<erat::DenseState>, 384> m64s_nxt_{};
+    // Bucket arena: 256 blocks (1 MiB), or one 2 MiB huge page (huge_arenas_,
+    // decided in tuning.hpp). Declared here in the constructor's order.
+    size_t arena_bytes_;
+    bool huge_arenas_;
     uint64_t m64s_limit_ = 0;
     size_t m64s_count_ = 0;
 

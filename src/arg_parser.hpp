@@ -82,6 +82,7 @@ struct Options {
     Fraction tune_med64s; // sub-blocked med64 band, as a/b of the sub-block (default 0 = off)
     bool big2310 = true; // sparse tier on the mod-2310 wheel (false: mod-210)
     int medium_nta = -1; // medium-tier prefetchnta: -1 auto (L3 gate), 1 on, 0 off
+    int huge = -1;       // sparse ring arenas as 2 MiB huge pages: -1 auto (one thread per core), 1 on, 0 off
     uint64_t minsegs = 1;    // smallest chunk, in segments (main.cpp's MIN_SEGS_PER_CHUNK)
 };
 
@@ -217,9 +218,10 @@ inline void parse_tune(Options& opt, const std::string& kv) {
     }
     else if (k == "big2310") opt.big2310 = parse_switch(k, v, "1", "0");
     else if (k == "medium_nta") opt.medium_nta = parse_switch(k, v, "1", "0") ? 1 : 0;
+    else if (k == "huge") opt.huge = parse_switch(k, v, "1", "0") ? 1 : 0;
     else if (k == "med64s") opt.tune_med64s = parse_fraction(k, v);
     else if (k == "minsegs") { opt.minsegs = parse_fraction(k, v).num; if (opt.minsegs < 1) throw std::runtime_error("--tune minsegs: at least 1"); }
-    else throw std::runtime_error("--tune: unknown key '" + k + "' (small, med64, med64s, sparse, big2310, medium_nta, minsegs)");
+    else throw std::runtime_error("--tune: unknown key '" + k + "' (small, med64, med64s, sparse, big2310, medium_nta, huge, minsegs)");
 }
 
 inline void print_usage(const char* prog) {
@@ -274,6 +276,8 @@ inline void print_usage(const char* prog) {
         "      big2310=1|0        Sparse tier on the mod-2310 (default 1) or mod-210 wheel\n"
         "      medium_nta=1|0     Force medium-tier prefetchnta on/off (default:\n"
         "                         on once its state outgrows the L3 share)\n"
+        "      huge=1|0           Sparse ring arenas as 2 MiB huge pages (default:\n"
+        "                         on with one thread per core)\n"
         "      minsegs=N          Smallest chunk, in segments (default 1; the tail\n"
         "                         granularity between threads at small N)\n"
         "\n"

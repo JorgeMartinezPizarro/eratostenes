@@ -3127,6 +3127,40 @@ structure that lets it overlap is worth more than L1 residency. Kept as
 `--tune med64s=a/b` (default 0 = off) for other cores; the default is the
 whole-segment med64.
 
+### Sparse ring arenas as 2 MiB huge pages, with one thread per core (kept, 2026-10-04)
+
+Where the one-thread-per-core machines lose most is the 1e16-1e18 tails,
+and what grows with N there is the bucket ring's active write set: the
+slots ahead scale with isqrt(N) (32 at 1e15, ~1024 at 1e18 on a 1 MiB
+segment), each with a 4 KiB tail block being written -- 4 MiB of pages at
+1e18 that every re-file store touches at random. Two things were tried on
+it. Smaller blocks, to shrink that set (`ERA_BLK_BYTES`, dev PC, 1e18 tail,
+1e10 window, 2 threads, x2): 1 KiB +11.7% (4/4 worse), 2 KiB +1.3%
+(overlapping) -- the block size stays at 4 KiB. And the arenas the blocks
+come from as 2 MiB regions advised `MADV_HUGEPAGE` (one huge page each,
+THP in Ubuntu's default "madvise" mode), so the write set costs two TLB
+entries instead of a thousand:
+
+| threads | N, window | huge vs 1 MiB arenas |
+|---:|---|---:|
+| 2 | 1e18, 1e10 (x4) | -12.1% (8/8) |
+| 2 | 1e18, 1e11 | -3.5% (overlapping) |
+| 2 | 1e17, 1e11 | -2.9% (4/4) |
+| 2 | 1e17 / 1e16, 1e10 (x3) | +0.4% / +0.9% (noise) |
+| 6 | 1e18, 1e11 | -0.5% (noise) |
+| 12 | 1e18, 1e11 (x3) | +10.5% (6/6 worse); a second round -1.0% (overlapping) |
+| 12 | 1e15, 1e11 (x4) | -5.3% vs +5.1% in two rounds: noise |
+
+Real at 2 threads from 1e17 up (the 1e10-window figure is mostly the
+activation of 50M base primes filing into that write set), nothing at 6,
+and against it at 12 in one of two rounds. So it is a runtime decision in
+tuning.hpp, on with one thread per core (the same condition as the whole-L2
+base and the whole-L1d sub-block), off under HT pairs; `--tune huge=1|0`
+forces it and the startup log says which. Checked after the gate: 2
+threads 1e17 `huge=0` +3.3% (4/4), 12 threads 1e18 `huge=1` -1.0%
+(overlapping). The i7-620M and i5-3470 (512-entry STLBs) and the 2-vCPU
+Xeons are the machines it is meant for; unmeasured there yet.
+
 ### Sparse tier: marking a prime's further hits in the same segment in a loop before re-filing it (tried, reverted, 2026-10-04)
 
 The one structural difference left against EratBig after the pairs, the
@@ -4202,6 +4236,20 @@ pass -- out of scope for what's been tried so far.
 
 ## Makefile
 
+
+### Compiler flags and PGO, re-asked with the A/B tooling (nothing, 2026-10-04 night)
+
+`make benchmark-flags` with compile flags as the variants (DEFS is appended
+to CXXFLAGS, so `-O2` overrides `-O3`), dev PC, 12 threads, 1e11 windows,
+x2: 1e13 `-mprefer-vector-width=512` -0.3%, `-funroll-loops` +0.6%, `-O2`
++2.0%, `-fno-plt` -0.6%, `-march=x86-64-v3` -1.5%; 1e15 +0.7% / -1.9% /
++0.3%; all overlapping. At 2 threads with 1e10 windows the same flags read
++11% to -5%, also overlapping: that window is too short at 2 threads for
+anything under 10%. PGO (`make pgo`, the Makefile's 1e9-1e11 training
+set, the binary copied aside and the default rebuilt): 12 threads 1e13 tail
++2.4% (overlapping), 1e15 -1.9% (4/4), 2 threads 1e13 noise, full 1e12
+23.27 / 23.34 s against 23.13 / 23.13 s. Nothing to take; `-O3
+-march=native -flto=auto` stays, PGO stays unadopted.
 ### PGO training set: a natural 1e13 pass (tried, reverted, 2026-09-25, follow-up session)
 
 Considered adding a natural `1e13` training pass (no `-s` override) to also give
