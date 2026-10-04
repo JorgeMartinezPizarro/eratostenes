@@ -64,9 +64,9 @@ constexpr double MEDIUM_BAND_MAX_HITS = 8.0;
 // exact fixup instead of a 64-bit integer division (slow on pre-Ice-Lake
 // cores: ~40-90 cycles on Nehalem/Ivy Bridge, ~15 on Rocket Lake, where it
 // was neutral-to-slower). ERA_ACT_BATCH=1 stages the activation's pushes
-// in a per-thread buffer and flushes them grouped by ring slot (64 slots at
-// a time), so the ring's 4096 tail lines are touched in L1-sized groups
-// instead of one random RFO per prime. -DERA_FPDIV=1 / -DERA_ACT_BATCH=1.
+// per group of 64 ring slots and drains a group when it fills, so the
+// ring's thousands of tail lines are touched in L1-sized groups instead of
+// one random RFO per prime. -DERA_FPDIV=1 / -DERA_ACT_BATCH=1.
 #ifndef ERA_FPDIV
 #define ERA_FPDIV 0
 #endif
@@ -166,7 +166,10 @@ public:
         while (num_buckets_ < ahead * 2) num_buckets_ <<= 1; // power of 2, 2x margin
         head_.assign(num_buckets_, nullptr);
         tail_.assign(num_buckets_, nullptr);
-        if (ERA_ACT_BATCH) act_buf_.reserve(ACT_BATCH);
+        if (ERA_ACT_BATCH) {
+            act_groups_.resize(static_cast<size_t>(std::max<uint64_t>(1, num_buckets_ >> 6)));
+            for (std::vector<ActEnt>& g : act_groups_) g.reserve(ACT_GROUP_CAP);
+        }
     }
 
     // Wheel indices below k are marked composite before extraction (the
@@ -951,31 +954,30 @@ private:
 
     // Activation push: straight into the ring, or (ERA_ACT_BATCH) staged in
     // act_buf_ and flushed in slot groups by flush_activation().
+    struct ActEnt { uint32_t slot; erat::DenseState e; };
+    static constexpr size_t ACT_GROUP_CAP = 512;
     void stage_sparse_entry(uint32_t slot, erat::DenseState e) {
 #if ERA_ACT_BATCH
-        act_buf_.push_back({slot, e});
-        if (act_buf_.size() == ACT_BATCH) flush_activation();
+        // One sequential append into the slot group's buffer (slot >> 6:
+        // <= num_buckets_/64 groups, one hot line each); a full group is
+        // pushed on the spot, 64 slots at a time, so its 64 tail lines and
+        // 8 lines of tail_ stay in L1 while it drains. The first version
+        // staged everything in one buffer and counting-sorted it: 4 memory
+        // ops per entry, +6 ns per prime on a Xeon @2.10GHz (operator 3).
+        std::vector<ActEnt>& g = act_groups_[slot >> 6];
+        g.push_back({slot, e});
+        if (g.size() == ACT_GROUP_CAP) flush_group(g);
 #else
         push_sparse_entry(slot, e);
 #endif
     }
-
-    // ERA_ACT_BATCH: partitions the staged entries by slot >> 6 (a counting
-    // pass over <= num_buckets_/64 groups, sequential reads and 64-way
-    // sequential writes), then pushes group by group, so each group's 64
-    // tail lines and 8 lines of tail_ stay in L1 while it is pushed.
+    void flush_group(std::vector<ActEnt>& g) {
+        for (const ActEnt& a : g) push_sparse_entry(a.slot, a.e);
+        g.clear();
+    }
     void flush_activation() {
 #if ERA_ACT_BATCH
-        const size_t n = act_buf_.size();
-        if (n == 0) return;
-        const size_t ngroups = static_cast<size_t>(std::max<uint64_t>(1, num_buckets_ >> 6));
-        act_count_.assign(ngroups + 1, 0);
-        for (const ActEnt& a : act_buf_) ++act_count_[(a.slot >> 6) + 1];
-        for (size_t g = 0; g < ngroups; ++g) act_count_[g + 1] += act_count_[g];
-        act_part_.resize(n);
-        for (const ActEnt& a : act_buf_) act_part_[act_count_[a.slot >> 6]++] = a;
-        for (const ActEnt& a : act_part_) push_sparse_entry(a.slot, a.e);
-        act_buf_.clear();
+        for (std::vector<ActEnt>& g : act_groups_) if (!g.empty()) flush_group(g);
 #endif
     }
 
@@ -1081,12 +1083,9 @@ private:
     uint64_t m64s_limit_ = 0;
     size_t m64s_count_ = 0;
 
-    // ERA_ACT_BATCH staging (see stage_sparse_entry): 32K entries x 12 B.
-    struct ActEnt { uint32_t slot; erat::DenseState e; };
-    static constexpr size_t ACT_BATCH = 32768;
-    std::vector<ActEnt> act_buf_;
-    std::vector<ActEnt> act_part_;
-    std::vector<uint32_t> act_count_;
+    // ERA_ACT_BATCH staging (see stage_sparse_entry): one buffer of
+    // ACT_GROUP_CAP entries x 12 B per group of 64 ring slots.
+    std::vector<std::vector<ActEnt>> act_groups_;
 
     uint64_t skip_below_k_ = 1; // first wheel index that counts (set_skip_below_k)
     uint32_t log2_sb_ = 0; // log2(segment width in bytes) -- see constructor

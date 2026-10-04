@@ -1,3 +1,5 @@
+| Xeon @2.10GHz, 2 vCPU, third host (operator 3) | -0.1% (overlap) | +0.6% (overlap) |
+| Xeon @2.10GHz, 2 vCPU, other host (operator 1; A spread 7%) | +0.4% (overlap) | +1.0% (overlap) |
 # Research log: tried, measured, reverted
 
 This collects every optimization attempt this project has tried, benchmarked, and
@@ -3173,6 +3175,25 @@ the two suspects, both default off, both leaving counts identical on the
 `make variant DEFS=-DERA_FPDIV=1` and `BIN_B=./eratostenes_variant make
 benchmark-ab` at the 1e18 tail on the i7-620M and the i5-3470 decide
 which one, if any, becomes the default below some L2 size.
+
+Results as they come in (1e18 tail, 1e11 window, x2 each):
+
+| machine | FPDIV | ACT_BATCH |
+|---|---:|---:|
+| Xeon @2.10GHz, 2 vCPU, 96 KiB L1d, 4 MiB L2 (operator 2) | +0.0% (overlap) | +1.6% (2/2 worse) |
+
+Expected there: a fast divider and an L2 that holds the whole ring's tail
+lines, so the staging pass is pure overhead.
+On the 1e10 window (x3, operators 2 and 3, same numbers on both hosts):
+ACT_BATCH +8.2% (3/3 worse), 3.88 -> 4.20 s -- the same +0.32..0.44 s as on
+the 1e11 window, i.e. a fixed cost of ~6 ns per activated prime per
+thread, not a per-segment one: the first version staged every entry in
+one 32K buffer and counting-sorted it (4 memory operations per entry).
+Operator 1 also settled a scare: b38faee vs 94f93af at the 1e18 tail x3,
++1.5% overlapping, the host had drifted. Rewritten as one buffer of 512
+entries per group of 64 slots, drained when it fills (one sequential
+append and one read per entry): dev PC 13.4 ns per prime vs 11.5, counts
+identical on both wheels; the Mac decides.
 
 ### i5-3470 profile at 1e12: the med64 tier over the whole-L2 segment is 59% of the cycles (open, 2026-10-04)
 
