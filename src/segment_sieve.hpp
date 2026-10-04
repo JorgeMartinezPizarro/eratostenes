@@ -1016,10 +1016,27 @@ private:
 #define ERA_BLK_BYTES 4096
 #endif
     static constexpr size_t BLK_BYTES = ERA_BLK_BYTES; // -DERA_BLK_BYTES for A/B
+    // ERA_BLK_COLOR: the entries of a block start ERA_BLK_COLOR-1 lines at
+    // most past its header, by the block's address. All slots fill at about
+    // the same rate, so without it the ring's thousands of tail pointers sit
+    // at the same offset inside their 4 KiB blocks -- the same cache-set
+    // index bits 6-11 -- and only ways x (sets with those bits) of them can
+    // be cached at once: 64 lines in a 256 KiB 8-way L2, 1024 in a 4 MiB
+    // 16-way L3 (i7-620M: 83 ns per activated prime, DRAM). Costs
+    // (ERA_BLK_COLOR-1)/2 lines of capacity per block on average.
+#ifndef ERA_BLK_COLOR
+#define ERA_BLK_COLOR 1
+#endif
     struct Blk {
         Blk* next;
         uint64_t pad;
-        erat::DenseState* entries() { return reinterpret_cast<erat::DenseState*>(this + 1); }
+        erat::DenseState* entries() {
+            if constexpr (ERA_BLK_COLOR > 1) {
+                const size_t c = (reinterpret_cast<uintptr_t>(this) / BLK_BYTES) % ERA_BLK_COLOR;
+                return reinterpret_cast<erat::DenseState*>(reinterpret_cast<char*>(this + 1) + 64 * c);
+            }
+            return reinterpret_cast<erat::DenseState*>(this + 1);
+        }
         erat::DenseState* block_end() { return reinterpret_cast<erat::DenseState*>(reinterpret_cast<char*>(this) + BLK_BYTES); }
     };
     struct AlignedFree { void operator()(char* p) const { std::free(p); } };

@@ -3195,6 +3195,23 @@ entries per group of 64 slots, drained when it fills (one sequential
 append and one read per entry): dev PC 13.4 ns per prime vs 11.5, counts
 identical on both wheels; the Mac decides.
 
+The Mac (x2, 1e18 tail): FPDIV -0.4% (overlap), the first ACT_BATCH +3.1%
+(2/2 worse). The i5-3470: 20.0 ns per prime at 2 threads, 24.8 at 4 --
+twice the dev PC, not seven times; FPDIV +1.2% and ACT_BATCH +0.3%, both
+overlapping. So the division is closed on every architecture, and the
+Mac's 83 ns are its own problem. Best explanation: cache-set aliasing of
+the ring's tail lines. Every slot fills at about the same rate, so the
+thousands of tail pointers sit at the same offset inside their 4 KiB
+blocks, with the same set-index bits 6-11: a 256 KiB 8-way L2 can hold 64
+of the 4096 tail lines, the Mac's 4 MiB 16-way L3 1024 -- three pushes in
+four go to DRAM. `-DERA_BLK_COLOR=8` starts a block's entries 0-7 lines
+past the header by its address (5.5% less capacity per block). Dev PC, 2
+threads: 1e18 with a 1e10 window -2.7% (3/3) with 8 colours, -2.9%
+(overlap) with 16; with the 1e11 window +1.9% (2/2 worse): the activation
+gains, the sieve phase pays the extra blocks where the lines already fit
+(512 KiB L2, 12 MiB L3). To settle on the Mac and the server (1.25 MiB L2
+holds 320 of the 4096 lines).
+
 ### i5-3470 profile at 1e12: the med64 tier over the whole-L2 segment is 59% of the cycles (open, 2026-10-04)
 
 First PMU profile of a dense-regime loss on a one-thread-per-core machine
