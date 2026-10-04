@@ -50,9 +50,9 @@ NTH_OBJ := $(OBJ_DIR_RELEASE)/nth_prime.o
 OUT_DIR := $(CURDIR)/output
 COMPOSE := docker compose -f docker/docker-compose.yml
 
-.PHONY: all portable debug pgo clean fclean re docker run docker-pgo run-pgo nth-prime bands medpairs \
-        test benchmark benchmark-io benchmark-tails benchmark-mini benchmark-ab docker-dev docker-test docker-benchmark \
-        docker-benchmark-io docker-benchmark-tails docker-benchmark-mini docker-benchmark-ab
+.PHONY: all portable debug pgo clean fclean re docker run docker-pgo run-pgo nth-prime variant \
+        test benchmark benchmark-io benchmark-tails benchmark-mini benchmark-ab benchmark-flags docker-dev docker-test docker-benchmark \
+        docker-benchmark-io docker-benchmark-tails docker-benchmark-mini docker-benchmark-ab docker-benchmark-flags
 
 # --- release (default) ---
 all: $(BIN) $(NTH_BIN)
@@ -63,19 +63,17 @@ $(BIN): $(OBJS_RELEASE)
 $(NTH_BIN): $(NTH_OBJ)
 	$(CXX) $(CXXFLAGS_RELEASE) -o $@ $(NTH_OBJ) $(LDLIBS)
 
-# Variante con el tier medium en bandas (-DERA_MED_BANDS=1, ver erat_small.hpp):
-# un binario aparte para A/B (BIN_B=./eratostenes_bands make benchmark-ab).
-BIN_BANDS := eratostenes_bands
-$(BIN_BANDS): $(SRC_DIR)/main.cpp $(HEADERS)
-	$(CXX) $(CXXFLAGS_RELEASE) -DERA_MED_BANDS=1 -o $@ $(SRC_DIR)/main.cpp $(LDLIBS)
-bands: $(BIN_BANDS)
-
-# Variante con el tier medium a dos primos por iteracion (-DERA_MED_PAIRS=1,
-# ver erat_small.hpp): BIN_B=./eratostenes_medpairs make benchmark-ab.
-BIN_MEDPAIRS := eratostenes_medpairs
-$(BIN_MEDPAIRS): $(SRC_DIR)/main.cpp $(HEADERS)
-	$(CXX) $(CXXFLAGS_RELEASE) -DERA_MED_PAIRS=1 -o $@ $(SRC_DIR)/main.cpp $(LDLIBS)
-medpairs: $(BIN_MEDPAIRS)
+# Binario de prueba con flags de compilacion extra para un A/B contra el
+# binario normal (los mandos ERA_* de segment_sieve.hpp / erat_small.hpp:
+# ERA_MED_BANDS, ERA_MED_PAIRS, ERA_BIG_LOOP, ERA_BIG_UNROLL, ERA_BIG_PF,
+# ERA_BLK_BYTES; todos medidos en docs/RESEARCH.md). Se recompila siempre:
+#   make variant DEFS=-DERA_MED_BANDS=1
+#   BIN_B=./eratostenes_variant make benchmark-ab
+BIN_VARIANT := eratostenes_variant
+$(BIN_VARIANT): $(SRC_DIR)/main.cpp $(HEADERS)
+	$(CXX) $(CXXFLAGS_RELEASE) $(DEFS) -o $@ $(SRC_DIR)/main.cpp $(LDLIBS)
+variant:
+	$(MAKE) -B $(BIN_VARIANT) DEFS="$(DEFS)"
 
 $(OBJ_DIR_RELEASE)/%.o: $(SRC_DIR)/%.cpp $(HEADERS) | $(OBJ_DIR_RELEASE)
 	$(CXX) $(CXXFLAGS_RELEASE) -c $< -o $@
@@ -158,7 +156,7 @@ $(OBJ_DIR_RELEASE) $(OBJ_DIR_PORTABLE) $(OBJ_DIR_DEBUG) $(OBJ_DIR_PGO):
 	mkdir -p $@
 
 clean:
-	rm -f $(BIN_BANDS) $(BIN_MEDPAIRS); rm -rf obj
+	rm -f $(BIN_VARIANT); rm -rf obj
 
 fclean: clean
 	rm -f $(BIN) $(BIN)_debug $(NTH_BIN)
@@ -259,6 +257,12 @@ benchmark-mini: $(BIN)
 benchmark-ab: $(BIN)
 	bash scripts/benchmark_ab.sh
 
+# Todos los flags de compilacion ERA_* (ver scripts/benchmark_flags.sh): compila
+# cada variante con make variant y la enfrenta al binario normal con benchmark-ab.
+# FLAGS/N/WIDTH/THREADS/REPS como variables de entorno.
+benchmark-flags: $(BIN)
+	bash scripts/benchmark_flags.sh
+
 # --- run the same targets inside Docker (see docker/Dockerfile's `dev`
 # stage: gcc + libsqlite3-dev + libzstd-dev + primesieve). Each rebuilds
 # eratostenes/nth_prime with the container's own gcc against the
@@ -287,3 +291,6 @@ docker-benchmark-mini: docker-dev
 
 docker-benchmark-ab: docker-dev
 	$(COMPOSE) run --rm -e THREADS -e N -e WIDTH -e REPS -e A -e B -e BIN_B dev make benchmark-ab
+
+docker-benchmark-flags: docker-dev
+	$(COMPOSE) run --rm -e THREADS -e N -e WIDTH -e REPS -e FLAGS dev make benchmark-flags

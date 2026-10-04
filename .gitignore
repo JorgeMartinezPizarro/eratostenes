@@ -6,5 +6,4 @@ nth_prime
 *.o
 /obj/
 /output/
-eratostenes_bands
-eratostenes_medpairs
+eratostenes_variant

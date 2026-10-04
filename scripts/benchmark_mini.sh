@@ -111,7 +111,7 @@ done
 seg_args=()
 [ -n "$best_s" ] && seg_args=(-s "$best_s")
 echo "== cutoff and prefetch on the best segment so far ($best_label), each paired with primesieve"
-for cfg in "--tune sparse=1/1" "--tune sparse=1/2" "--tune sparse=1/4" "--tune medium_nta=1" "--tune medium_nta=0"; do
+for cfg in "--tune sparse=1/1" "--tune sparse=1/2" "--tune sparse=1/4" "--tune med64=1/12" "--tune med64=1/4" "--tune small=1/2" "--tune big2310=0" "--tune medium_nta=1" "--tune medium_nta=0"; do
     # shellcheck disable=SC2086
     pair "$best_label $cfg" "" "${seg_args[@]}" $cfg
 done

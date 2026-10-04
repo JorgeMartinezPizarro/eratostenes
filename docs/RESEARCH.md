@@ -3093,6 +3093,36 @@ The i5-13500 at 20 threads is still unmeasured (its 1e14 full run of
   tables, and dropping coverage was measured worse than the fill it saves
   (each prime removed costs ~8x its share of the fill in small-tier hits).
 
+### Sparse tier: marking a prime's further hits in the same segment in a loop before re-filing it (tried, reverted, 2026-10-04)
+
+The one structural difference left against EratBig after the pairs, the
+prefetch, the 4 KiB blocks and mod-2310: EratBig keeps marking a prime
+(`while (sieveIndex < sieveSize)`) and re-files it once per segment, while
+`process_big` marks one hit and re-files the entry every time -- into the
+current slot's own tail when the next hit is still in this segment, to be
+read back later in the same pass (an 8-byte copy, a tail update, a block
+now and then). With the cutoff at 1/4 the primes between K/4 and K/2 have
+2-4 hits per segment, ~15-20% of the tier's hits at 1e14-1e15, so a loop
+(`-DERA_BIG_LOOP=1`, `make bigloop`: `while (pos <= modsb)` after the first
+hit, in the unrolled path and the scalar one) looked worth 3-5% on the
+one-thread-per-core tails. Dev PC, `BIN_B=./eratostenes_bigloop`, counts
+identical:
+
+| threads | N, window | loop vs re-file |
+|---:|---|---:|
+| 2 | 1e14, 1e10 (x3) | +14.9% (6/6 worse) |
+| 2 | 1e15, 1e10 (x3) | +10.5% (6/6 worse) |
+| 12 | 1e15, 1e11 (x2) | -0.3% (overlap) |
+| 12 | 1e18, 1e11 (x2) | +19.6% (4/4 worse; 23.75 / 19.45 vs 18.08 / 18.05 s) |
+
+Clearly worse where it was meant to help. The re-file is not waste: it is
+what keeps every hit in the batched, two-entries-per-iteration stream,
+where one entry's table row, segment RMW and push overlap another's; the
+loop turns a multi-hit prime back into a dependent chain (table row ->
+position -> table row) with a data-dependent exit per entry, inside the
+hot path. EratBig's IPC lead is not this. Reverted to the re-file; the flag
+stays, like the bands and the medium pairs, as an A/B knob.
+
 ### Sparse tier: two entries per iteration in `process_big`, and a segment-byte prefetch 16 entries ahead (both kept, 2026-10-02)
 
 The per-tier map put the uncontended gap in the sparse tier's IPC (2.36 vs

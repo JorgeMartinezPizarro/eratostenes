@@ -11,10 +11,10 @@
 #
 # Usage: B="-s 15728640 --tune sparse=1/2" make benchmark-ab
 #        A="--tune sparse=1/1" B="--tune sparse=1/2" REPS=3 make benchmark-ab
-#        BIN_B=./eratostenes_bands make benchmark-ab   (two binaries, same config)
+#        make variant DEFS=-DERA_MED_BANDS=1; BIN_B=./eratostenes_variant make benchmark-ab
 # Env: A (default: auto), B (required unless BIN_B differs), BIN_B (the binary
-#      B runs on; default the same as A. `make bands` builds ./eratostenes_bands,
-#      and a missing BIN_B is built with make), N (default 1e13), WIDTH
+#      B runs on; default the same as A. `make variant DEFS=...` builds
+#      ./eratostenes_variant with extra compile flags), N (default 1e13), WIDTH
 #      (default 1e10), THREADS (default nproc), REPS (default 2)
 set -euo pipefail
 cd "$(dirname "$0")/.."

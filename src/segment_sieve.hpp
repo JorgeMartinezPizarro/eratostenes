@@ -38,7 +38,7 @@
 #define ERA_MED_BANDS 0
 #endif
 // Medium tier two primes per iteration (erat_small.hpp::cross_off_medium_pairs):
-// -DERA_MED_PAIRS=1 for an A/B (`make medpairs` builds ./eratostenes_medpairs).
+// -DERA_MED_PAIRS=1 for an A/B (`make variant DEFS=-DERA_MED_PAIRS=1`).
 #ifndef ERA_MED_PAIRS
 #define ERA_MED_PAIRS 0
 #endif
@@ -47,6 +47,12 @@ constexpr double MEDIUM_BAND_MAX_HITS = 8.0;
 
 #ifndef ERA_BIG_PF
 #define ERA_BIG_PF 16
+#endif
+// Sparse tier: a prime with more hits in the current segment marks them in a
+// loop before being re-filed (EratBig's loop), instead of one re-file per hit
+// (process_big). -DERA_BIG_LOOP=1 for the A/B (`make variant DEFS=-DERA_BIG_LOOP=1`).
+#ifndef ERA_BIG_LOOP
+#define ERA_BIG_LOOP 0
 #endif
 #ifndef ERA_BIG_UNROLL
 #define ERA_BIG_UNROLL 2
@@ -687,10 +693,31 @@ private:
                             te[k] = big::TABLE2310[ent[k] & 4095];
                         }
                         for (int k = 0; k < U; ++k) s[pos[k]] |= static_cast<uint8_t>(te[k]);
+                        uint64_t nidx[U];
                         for (int k = 0; k < U; ++k) {
                             pos[k] += (ent[k] >> 36) * ((te[k] >> 8) & 0xff) + ((te[k] >> 16) & 15);
+                            nidx[k] = te[k] >> 20;
+                        }
+                        if constexpr (ERA_BIG_LOOP) {
+                            // EratBig's loop: a prime whose next hit is still in
+                            // this segment marks on, instead of being re-filed
+                            // into this same slot and read back later in the
+                            // pass (one 8-byte copy, a tail update and maybe a
+                            // new block per extra hit). With the cutoff at 1/4
+                            // the primes between K/4 and K/2 have 2-4 hits per
+                            // segment, ~15-20% of the tier's hits at 1e14-1e15.
+                            for (int k = 0; k < U; ++k) {
+                                while (pos[k] <= modsb) {
+                                    const uint64_t t2 = big::TABLE2310[nidx[k]];
+                                    s[pos[k]] |= static_cast<uint8_t>(t2);
+                                    pos[k] += (ent[k] >> 36) * ((t2 >> 8) & 0xff) + ((t2 >> 16) & 15);
+                                    nidx[k] = t2 >> 20;
+                                }
+                            }
+                        }
+                        for (int k = 0; k < U; ++k) {
                             sl[k] = (cur + (pos[k] >> log2sb)) & bmask;
-                            e[k] = (ent[k] & ~((uint64_t{1} << 36) - 1)) | (te[k] >> 20) | ((pos[k] & modsb) << 12);
+                            e[k] = (ent[k] & ~((uint64_t{1} << 36) - 1)) | nidx[k] | ((pos[k] & modsb) << 12);
                         }
                         for (int k = 0; k < U; ++k) {
                             erat::DenseState* w = tails[sl[k]];
@@ -713,6 +740,14 @@ private:
                         s[pos] |= static_cast<uint8_t>(te);
                         pos += a * ((te >> 8) & 0xff) + ((te >> 16) & 15);
                         nidx = te >> 20;
+                        if constexpr (ERA_BIG_LOOP) { // see the unrolled path above
+                            while (pos <= modsb) {
+                                const uint64_t t2 = big::TABLE2310[nidx];
+                                s[pos] |= static_cast<uint8_t>(t2);
+                                pos += a * ((t2 >> 8) & 0xff) + ((t2 >> 16) & 15);
+                                nidx = t2 >> 20;
+                            }
+                        }
                         e_keep = ent & ~((uint64_t{1} << 36) - 1);
                     } else { // qw | pos << 32
                         uint64_t qw = static_cast<uint32_t>(ent);
@@ -722,6 +757,14 @@ private:
                         s[pos] |= static_cast<uint8_t>(te);
                         pos += a * ((te >> 8) & 0xff) + ((te >> 16) & 0xff);
                         nidx = te >> 32;
+                        if constexpr (ERA_BIG_LOOP) {
+                            while (pos <= modsb) {
+                                const uint64_t t2 = big::TABLE64[nidx];
+                                s[pos] |= static_cast<uint8_t>(t2);
+                                pos += a * ((t2 >> 8) & 0xff) + ((t2 >> 16) & 0xff);
+                                nidx = t2 >> 32;
+                            }
+                        }
                         e_keep = a << 9;
                     }
                     uint64_t sl = (cur + (pos >> log2sb)) & bmask;
