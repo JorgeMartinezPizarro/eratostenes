@@ -375,10 +375,15 @@ inline SievePlan plan_sieve(Options& opt, const BasePrimes& base, uint64_t base_
     // docs/RESEARCH.md#medium-tier-64-list-restructuring-scoped-to-a-bounded-sub-band-med64_primes-kept-2026-09-26
     // for why the whole-tier version was reverted first). med64_limit swept
     // via --tune med64=a/b without recompiling; med64=0 disables
-    // the tier, exactly reproducing the pre-med64 baseline. Default 1/12,
+    // the tier, exactly reproducing the pre-med64 baseline. Default 1/6
+    // since 2026-10-04 (1/12 before: on a 256 KiB segment that band ended
+    // at p = 175K, and the i5-3470 wanted it at 350K, -3.8%; 1/6 is neutral
+    // on the 512 KiB and 1 MiB segments of the other machines -- see
+    // docs/RESEARCH.md#one-thread-per-core-the-medium-tiers-per-call-cost-and-the-sparse-cutoff-by-active-threads-2026-10-03-evening);
+    // 1/12 was
     // jointly re-tuned with small_limit's own divisor above -- see
     // docs/RESEARCH.md#small_limit-re-tuned-jointly-with-med64_limit-kept-2026-09-26.
-    uint64_t med64_num = 1, med64_den = 12;
+    uint64_t med64_num = 1, med64_den = 6;
     if (opt.tune_med64.den) { med64_num = opt.tune_med64.num; med64_den = opt.tune_med64.den; }
     uint64_t med64_limit = seg_k_width * med64_num / med64_den;
     uint64_t sparse_limit = seg_k_width * sparse_num / sparse_den;

@@ -2808,6 +2808,51 @@ worse). The whole-L1d sub-block is right on the Ivy Bridge too. So the
 tower's dense loss is not the ISA, not the cutoff, not the segment (128 KiB
 was worse) and not the sub-block; what is left to sweep there without
 counters is the small/med64 split and the medium prefetch.
+
+The rest of the tower's dense-regime sweep (1e12, last 1e11, x3, auto vs
+`--tune`): `small=1/2` -1.6% (overlapping), `small=1/8` +5.2% (6/6 worse),
+`med64=0` +15.9% (6/6: the med64 tier earns its keep there), `med64=1/6`
+**-3.8% (6/6)**, `medium_nta=1` +0.1%, `-s 15728640` -6.0% but overlapping
+(one auto run at 10.33 s against 9.06 / 9.08). So the one knob that moves
+the Ivy Bridge in the dense regime is the med64/medium split: at its 256 KiB
+segment (seg_k_width 2.1M) the default 1/12 puts the band at 6K-175K; 1/6
+takes it to 350K, which is where the default 1/12 lands on a 512 KiB
+segment (4.19M / 12 = 350K): the measured optimum may be an absolute prime
+(~350K, i.e. a hit count per call that depends on the segment width) rather
+than a fixed fraction. On the dev PC `--tune med64=1/6` (band 6K-700K): 12
+threads 1e12 tail -2.2% (4/4), 1e13 -1.1% (overlap), 1e14 +0.5%, 1e18 +0.9%
+(x3, overlapping), full 1e12 count ABAB 25.37 / 24.63 vs 24.48 / 24.83 s; 2
+threads 1e12 -7.2%, 1e13 -10.0% (overlapping) -- during a stretch where
+the host ran 5-20% slower than in the morning for everything, so none of
+the dev numbers is better than a hint. Candidate: med64 band up to
+~350K-700K regardless of the segment (a hits-per-call floor instead of
+1/12), to be settled with the operators (1 MiB segment: 1/6 would take the
+band to 1.4M, a doubled double-buffered state) and the tower at 1/4.
+
+The Xeon 2.80 (now identified: Cascade Lake, family 6 model 85 stepping 7,
+AVX-512, 1 MiB L2; 1 MiB segment, so 1/6 takes the band to 1.4M, 106,410
+med64 primes against 55,910), x3: 1e13 -0.8%, 1e14 -2.8%, both overlapping
+(its reps spread 4-6%). The doubled band does not hurt on a 1 MiB segment
+either. The i5-13500 (640 KiB share, HT pairs on a 1.25 MiB L2, where the
+doubled double-buffered state is the risk) is the one machine still to ask
+before 1/6 becomes the default.
+
+**Kept (2026-10-04): med64 default 1/12 -> 1/6.** The i5-13500 (20 threads,
+640 KiB share, 512 KiB segment, the doubled double-buffered state on HT
+pairs), x3: 1e13 +4.4% but only through its usual fast first run (2.80 s,
+then 3.27 / 3.37 against 3.30 / 3.29 / 3.29), 1e14 -0.5%: neutral. Four
+architectures: -3.8% (6/6) on the i5-3470, -2.2% (4/4) at the 1e12 tail on
+the i5-11400F and noise elsewhere there, -0.8% / -2.8% (overlapping) on the
+Cascade Lake, a tie on the i5-13500. Never worse beyond noise; the default
+moves to 1/6, `--tune med64=1/12` restores the old band.
+Confirmed on the dev PC once the host was idle (the earlier dev numbers
+were taken under an unexplained 5-20% slowdown of everything), new default
+1/6 as A against `--tune med64=1/12` as B, x3: 4 threads 1e12 B +1.1%,
+12 threads 1e13 B +1.2%, 1e12 B -0.8% (all overlapping), and the full 1e12
+count ABAB x2 23.51 / 23.93 s (1/6) against 24.17 / 25.41 s (1/12). On the
+i5-3470, `med64=1/4` at 1e12 is -4.3% (6/6) against the old 1/12, the same
+as 1/6's -3.8%, and 1/6 at the 1e13 tail (sparse regime, cutoff 1/2) -0.7%
+overlapping: the gain is the dense regime's, and 1/6 is where it saturates.
 ### `run_parallel_chunks`: steals priced with the run's own measurements (kept, 2026-10-02)
 
 The fixed steal threshold (4 wheel indices per base prime) came from the dev

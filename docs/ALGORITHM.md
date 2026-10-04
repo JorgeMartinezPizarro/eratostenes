@@ -238,7 +238,8 @@ Finally, **extraction**: invert each word (bit = 0 means prime) and either
 
 The two cutoffs are tuned jointly (the lower bound of med64 *is* `small_limit`):
 `small_limit = sub-block / 4` (L1d/8: 6144 on a 48 KiB L1d) and `med64_limit =
-seg_k_width / 12`, re-confirmed after the sub-block moved to half the L1d. Both are
+seg_k_width / 6` (1/12 until 2026-10-04: the wider band is -3.8% on a 256 KiB
+segment and neutral on 512 KiB and 1 MiB ones). Both are
 overridable via `--tune small=a/b` and `--tune med64=a/b` for sweeps without
 recompiling; `--tune med64=0` disables med64, giving the three-tier layout back. See [RESEARCH.md](RESEARCH.md) for the sweeps.
 

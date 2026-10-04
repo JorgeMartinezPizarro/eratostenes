@@ -87,7 +87,7 @@ Intel Core i5-11400F (Rocket Lake, 2021).
 
 ## Intel Xeon @ 2.80GHz (claude.ai sandbox)
 
-Intel Xeon @ 2.80GHz (model hidden by the hypervisor; Cascade Lake class, 2019), 2 vCPU.
+Intel Xeon @ 2.80GHz (Cascade Lake, 2019), 2 vCPU, 8 GB.
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|

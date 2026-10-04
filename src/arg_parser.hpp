@@ -77,7 +77,7 @@ struct Options {
         uint64_t den = 0;
     };
     Fraction tune_small;  // small/med64 cutoff, default 1/4
-    Fraction tune_med64;  // med64/medium cutoff, default 1/12 (0 = no med64 tier)
+    Fraction tune_med64;  // med64/medium cutoff, default 1/6 (0 = no med64 tier)
     Fraction tune_sparse; // medium/sparse cutoff, default 1/1, 1/2 or 1/4 (tuning.hpp); in (0, 1]
     bool big2310 = true; // sparse tier on the mod-2310 wheel (false: mod-210)
     int medium_nta = -1; // medium-tier prefetchnta: -1 auto (L3 gate), 1 on, 0 off
@@ -262,7 +262,7 @@ inline void print_usage(const char* prog) {
         "\n"
         "Fine tuning (--tune key=value, repeatable; see docs/RESEARCH.md):\n"
         "      small=a/b          Small/med64 cutoff (default 1/4 of the segment)\n"
-        "      med64=a/b          med64/medium cutoff (default 1/12; 0 = no med64)\n"
+        "      med64=a/b          med64/medium cutoff (default 1/6; 0 = no med64)\n"
         "      sparse=a/b         Medium/sparse cutoff, in (0, 1] (default 1/1;\n"
         "                         1/2 from 512 KiB and 1/4 from 1 MiB of L2 per\n"
         "                         thread, or 1/2 from 1.5 MiB and 1/4 from 4 MiB of\n"
