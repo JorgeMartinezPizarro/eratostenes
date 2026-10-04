@@ -19,9 +19,12 @@
 # Usage: bash scripts/benchmark_tails.sh   (or: make benchmark-tails)
 # Env overrides:
 #   THREADS  thread count for both programs (default: nproc)
-#   REPS     runs per program and N, alternating which one goes first
-#            (era/ps, ps/era, ...); the table keeps each one's fastest
-#            (default: 1)
+#   REPS     runs per program and N, as interleaved pairs alternating which
+#            one goes first (era/ps, ps/era, ...); the table shows each
+#            one's mean (default: 1). See benchmark.sh for why pairs and
+#            means: the two power regimes.
+#   WARMUP   seconds of all-core load before the first measured run
+#            (default: 0, none)
 #   NS       space-separated N list, integers or 1eX, up to 2^64 - 1 (~1.8e19)
 #            (default: "1e13 1e14 1e15 1e16 1e17 1e18"). Memory grows with
 #            pi(sqrt N) in both programs, per thread: ~1.2 GB each at 1e19
@@ -49,7 +52,7 @@ fi
 
 # Numbers stay decimal strings: N goes up to 2^64 - 1, and bash arithmetic
 # stops at 2^63 - 1 (1e19 overflowed it).
-source scripts/lib.sh # to_dec, num_lt
+source scripts/lib.sh # to_dec, num_lt, mean_of, warm_up
 dec_sub() { # a - b, in 9-digit limbs; fails when b > a
     local a=$1 b=$2 len i x y borrow=0 out="" limb
     len=$(( ${#a} > ${#b} ? ${#a} : ${#b} ))
@@ -88,9 +91,8 @@ run_ps() { # stop start -> sets t_p, c_p
     t_p=$(echo "$out" | sed -nE 's/^Seconds: *([0-9.]+)$/\1/p')
     c_p=$(echo "$out" | grep -oE '^[0-9]+$' | head -1 || true)
 }
-faster() { awk -v a="$1" -v b="$2" 'BEGIN{exit !(b == "" || a < b)}'; }
-
-declare -A BEST_E BEST_P COUNT
+declare -A MEAN_E MEAN_P COUNT
+warm_up "$WARMUP" "$BIN" "$THREADS"
 for n in $NS; do
     stop=$(to_dec "$n")
     # Both programs keep every base prime in each thread's bucket ring (8
@@ -111,7 +113,7 @@ for n in $NS; do
     # or the counts differ by the few primes in between. The default windows
     # (N - 1e11) are already multiples of 240.
     start=$(dec_sub "$diff" "$(dec_mod "$diff" 240)")
-    best_e="" best_p="" count=""
+    times_e=() times_p=() count=""
     for ((r = 1; r <= REPS; r++)); do
         if (( r % 2 )); then run_era "$stop" "$start"; run_ps "$stop" "$start"
         else run_ps "$stop" "$start"; run_era "$stop" "$start"; fi
@@ -120,17 +122,16 @@ for n in $NS; do
             exit 1
         fi
         count="$c_e"
-        faster "$t_e" "$best_e" && best_e="$t_e"
-        faster "$t_p" "$best_p" && best_p="$t_p"
+        times_e+=("$t_e"); times_p+=("$t_p")
         echo "  N=$n rep=$r eratostenes=${t_e}s primesieve=${t_p}s ($count primos) [ok]" >&2
     done
-    BEST_E[$n]="$best_e"
-    BEST_P[$n]="$best_p"
+    MEAN_E[$n]=$(mean_of "${times_e[@]}")
+    MEAN_P[$n]=$(mean_of "${times_p[@]}")
     COUNT[$n]="$count"
 done
 
 echo
-bash scripts/machine_info.sh "$THREADS" "last $WIDTH below N, best of $REPS"
+bash scripts/machine_info.sh "$THREADS" "last $WIDTH below N, mean of $REPS, pairs interleaved$( (( WARMUP > 0 )) && echo ", ${WARMUP}s warm-up")"
 echo
 # Same layout as README.md's tail table: the window width goes in the header
 # line above, the counts (checked above) stay in the progress lines.
@@ -138,6 +139,6 @@ echo "| N | eratostenes | primesieve | ratio |"
 echo "|---|---:|---:|---:|"
 for n in $NS; do
     [ -n "${COUNT[$n]:-}" ] || continue # skipped for memory
-    ratio=$(awk -v a="${BEST_E[$n]}" -v b="${BEST_P[$n]}" 'BEGIN{printf "%.2f", a / b}')
-    printf "| %s | %ss | %ss | %sx |\n" "$n" "${BEST_E[$n]}" "${BEST_P[$n]}" "$ratio"
+    ratio=$(awk -v a="${MEAN_E[$n]}" -v b="${MEAN_P[$n]}" 'BEGIN{printf "%.2f", a / b}')
+    printf "| %s | %ss | %ss | %sx |\n" "$n" "${MEAN_E[$n]}" "${MEAN_P[$n]}" "$ratio"
 done

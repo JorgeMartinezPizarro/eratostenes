@@ -29,19 +29,32 @@
 # (make benchmark-io).
 #
 # Usage: ./scripts/benchmark.sh
-# Env overrides: THREADS (default: nproc, used for both eratostenes and
-# primesieve -- an apples-to-apples comparison needs the same thread
-# count), SEGMENT (default: unset, i.e. the CLI's own auto -s), REPS
-# (default: 1, keeps the fastest of REPS eratostenes runs per N in the CPU
-# sweep -- there's real run-to-run noise on this kind of box, see BENCHMARK
-# section of the README/commit history; primesieve itself always runs once
-# per N regardless of REPS -- it's the fixed reference, not what's being
-# tuned, and at N=1e13 a single run already costs several minutes).
-# Reps run back to back, with no pause between them: a pause leaves the
-# cores idle right before the next run, which then pays the ramp-up (at
-# 1e10, ~0.19s from a cold start vs ~0.13s warm on the i5-13500), while
-# primesieve's own reference run always starts warm. Thermal throttling
-# was ruled out on both benchmark machines (clocks >= 4.2GHz, < 70C).
+# Env overrides:
+#   THREADS  thread count for both programs (default: nproc -- an
+#            apples-to-apples comparison needs the same thread count)
+#   SEGMENT  forced -s for eratostenes (default: unset, the CLI's auto width)
+#   REPS     runs per program and N, as interleaved pairs alternating which
+#            one goes first (era/ps, ps/era, ...); the table shows each
+#            one's mean (default: 1). Note that at N=1e13 each primesieve
+#            run costs minutes too.
+#   WARMUP   seconds of all-core load before the first measured run
+#            (default: 0, none)
+#
+# Why pairs and means, not "primesieve once, then the best of REPS": every
+# machine has two power regimes (docs/RESEARCH.md, "Two power regimes on
+# every machine"): a turbo budget (PL2) for a window of seconds to half a
+# minute from idle, then the sustained limit (PL1). A run shorter than that
+# window from idle is all burst (the i5-13500 does 1e11 in 1.49 s cold vs
+# 1.88 s sustained; the i5-1235U at 15 W drops 40%), and whichever program
+# ran first took it. Interleaving the pairs and alternating the order
+# shares what is left of the budget evenly, and the mean of REPS reads the
+# regime the pairs actually ran in instead of picking the one burst run.
+# The regime that matters is the sustained one (a 1e15 count runs for
+# hours), so WARMUP=45 or so before a table is the honest setting; it is
+# off by default to keep a quick single run quick. Reps run back to back:
+# a pause leaves the cores idle and the next run pays the ramp-up from
+# idle (~0.19 s vs ~0.13 s at 1e10 on the i5-13500), the opposite effect
+# at the 0.1 s scale.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -49,6 +62,7 @@ BIN=./eratostenes
 THREADS="${THREADS:-$(nproc)}"
 SEGMENT="${SEGMENT:-}"
 REPS="${REPS:-1}"
+WARMUP="${WARMUP:-0}"
 
 if ! command -v primesieve >/dev/null 2>&1; then
     echo "primesieve no esta en el PATH -- instalalo (apt-get install primesieve)" >&2
@@ -59,60 +73,56 @@ fi
 echo "Reconstruyendo eratostenes..." >&2
 make re >/tmp/benchmark_build.log 2>&1 || { cat /tmp/benchmark_build.log >&2; exit 1; }
 
+source scripts/lib.sh # warm_up, mean_of
+
 NS=(1e10 1e11 1e12 1e13)
 # pi(N) for each N above, in the same order -- known values, used to catch
 # a silently-wrong build/primesieve mismatch instead of just reporting a
 # (meaningless) time. See scripts/test.sh for the same values at other N.
 EXPECTED=(455052511 4118054813 37607912018 346065536839)
 
-declare -A ERATO_TIME
-declare -A PRIMESIEVE_TIME
+run_era() { # n expected -> sets t_e
+    local out count_e
+    seg_args=()
+    [ -n "$SEGMENT" ] && seg_args=(-s "$SEGMENT")
+    out=$("$BIN" "$1" -t "$THREADS" "${seg_args[@]}" 2>&1) || { echo "$out" >&2; exit 1; }
+    t_e=$(echo "$out" | sed -nE 's/.*total: *([0-9.]+)s.*/\1/p')
+    count_e=$(echo "$out" | sed -nE 's/.*Done\. ([0-9,]+) primes.*/\1/p' | tr -d ',')
+    if [ "$count_e" != "$2" ]; then
+        echo "n=$1: eratostenes MAL: obtenido $count_e, esperado $2" >&2
+        exit 1
+    fi
+}
+run_ps() { # n expected -> sets t_p
+    local out count_p
+    out=$(primesieve "$1" --count -t "$THREADS" --time -q 2>&1) || { echo "$out" >&2; exit 1; }
+    t_p=$(echo "$out" | sed -nE 's/^Seconds: *([0-9.]+)$/\1/p')
+    count_p=$(echo "$out" | grep -oE '^[0-9]+$' | head -1 || true)
+    if [ "$count_p" != "$2" ]; then
+        echo "n=$1: primesieve MAL: obtenido $count_p, esperado $2" >&2
+        exit 1
+    fi
+}
 
+declare -A ERATO_TIME PRIMESIEVE_TIME
+
+warm_up "$WARMUP" "$BIN" "$THREADS"
 for i in "${!NS[@]}"; do
     n="${NS[$i]}"
     expected="${EXPECTED[$i]}"
-
-    # --- primesieve: run once regardless of REPS. It's the fixed reference,
-    # not what's being tuned here -- REPS exists to smooth out eratostenes'
-    # own run-to-run noise, and at N=1e13 a single primesieve run already
-    # costs several minutes, so paying that REPS times over just to also
-    # smooth the reference isn't worth it.
-    out=$(primesieve "$n" --count -t "$THREADS" --time -q 2>&1)
-    t_p=$(echo "$out" | sed -nE 's/^Seconds: *([0-9.]+)$/\1/p')
-    count_p=$(echo "$out" | grep -oE '^[0-9]+$' | head -1)
-    if [ "$count_p" != "$expected" ]; then
-        echo "n=$n: primesieve MAL: obtenido $count_p, esperado $expected" >&2
-        exit 1
-    fi
-    echo "  n=$n primesieve=${t_p}s [ok]" >&2
-
-    best_e=""
+    times_e=() times_p=()
     for ((r = 1; r <= REPS; r++)); do
-        # --- eratostenes ---
-        seg_args=()
-        [ -n "$SEGMENT" ] && seg_args=(-s "$SEGMENT")
-        out=$("$BIN" "$n" -t "$THREADS" "${seg_args[@]}" 2>&1)
-        t_e=$(echo "$out" | sed -nE 's/.*primes\), .*total: *([0-9.]+)s.*/\1/p')
-        # sed above only matches the "Starting..." + "total:" combined
-        # blob in edge cases; fall back to a plain total: match.
-        [ -z "$t_e" ] && t_e=$(echo "$out" | sed -nE 's/.*total: *([0-9.]+)s.*/\1/p')
-        count_e=$(echo "$out" | sed -nE 's/.*Done\. ([0-9,]+) primes.*/\1/p' | tr -d ',')
-        if [ "$count_e" != "$expected" ]; then
-            echo "n=$n rep=$r: eratostenes MAL: obtenido $count_e, esperado $expected" >&2
-            exit 1
-        fi
-        if [ -z "$best_e" ] || awk -v a="$t_e" -v b="$best_e" 'BEGIN{exit !(a<b)}'; then
-            best_e="$t_e"
-        fi
-
-        echo "  n=$n rep=$r eratostenes=${t_e}s [ok]" >&2
+        if (( r % 2 )); then run_era "$n" "$expected"; run_ps "$n" "$expected"
+        else run_ps "$n" "$expected"; run_era "$n" "$expected"; fi
+        times_e+=("$t_e"); times_p+=("$t_p")
+        echo "  n=$n rep=$r eratostenes=${t_e}s primesieve=${t_p}s [ok]" >&2
     done
-    ERATO_TIME["$n"]="$best_e"
-    PRIMESIEVE_TIME["$n"]="$t_p"
+    ERATO_TIME["$n"]=$(mean_of "${times_e[@]}")
+    PRIMESIEVE_TIME["$n"]=$(mean_of "${times_p[@]}")
 done
 
 echo >&2
-bash scripts/machine_info.sh "$THREADS" "eratostenes best of $REPS, primesieve 1 run"
+bash scripts/machine_info.sh "$THREADS" "mean of $REPS, pairs interleaved$( (( WARMUP > 0 )) && echo ", ${WARMUP}s warm-up")"
 echo
 echo "| N | eratostenes | primesieve | ratio |"
 printf "|---|---:|---:|---:|\n"

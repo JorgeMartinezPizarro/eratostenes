@@ -72,6 +72,7 @@ throughout below).
   - [Sparse tier: mod-2310 multiplier wheel (kept, 2026-09-30)](#sparse-tier-mod-2310-multiplier-wheel-kept-2026-09-30)
   - [Activation at the top of N on old cores: 83 ns per prime on Nehalem, two flags to split it (open, 2026-10-04)](#activation-at-the-top-of-n-on-old-cores-83-ns-per-prime-on-nehalem-two-flags-to-split-it-open-2026-10-04)
   - [i5-3470 profile at 1e12: the med64 tier over the whole-L2 segment is 59% of the cycles (open, 2026-10-04)](#i5-3470-profile-at-1e12-the-med64-tier-over-the-whole-l2-segment-is-59-of-the-cycles-open-2026-10-04)
+  - [i5-3470 follow-up: med64 gate at the tails, the +6% that was not code, and the 1e12 window profile (2026-10-04)](#i5-3470-follow-up-med64-gate-at-the-tails-the-6-that-was-not-code-and-the-1e12-window-profile-2026-10-04)
 - [gap_encoding.hpp](#gap_encodinghpp)
   - [Gap encoding: wheel-index deltas](#gap-encoding-wheel-index-deltas)
   - [`.db` extraction in wheel indices: `GapBlockSink::write_k` (kept, 2026-10-01)](#db-extraction-in-wheel-indices-gapblocksinkwrite_k-kept-2026-10-01)
@@ -106,6 +107,7 @@ throughout below).
   - [Extending pre-sieve coverage past prime 163 (tried three ways, all reverted)](#extending-pre-sieve-coverage-past-prime-163-tried-three-ways-all-reverted)
 - [Makefile](#makefile)
   - [PGO training set: a natural 1e13 pass (tried, reverted, 2026-09-25, follow-up session)](#pgo-training-set-a-natural-1e13-pass-tried-reverted-2026-09-25-follow-up-session)
+  - [Two power regimes on every machine: burst and sustained (open, 2026-10-04)](#two-power-regimes-on-every-machine-burst-and-sustained-open-2026-10-04)
   - [PGO overall: measured on the dev PC, not adopted on the production server](#pgo-overall-measured-on-the-dev-pc-not-adopted-on-the-production-server)
 
 ## erat_small.hpp
@@ -3409,6 +3411,66 @@ the half-L2 case simple). Startup lines `segment: half the L2 (...)` and
 caches. Expected on the i5-3470: 1e10 1.12x -> ~1.02x, 1e11 1.06x ->
 ~1.01x, nothing else changes; the modern machines never see either line.
 
+### i5-3470 follow-up: med64 gate at the tails, the +6% that was not code, and the 1e12 window profile (2026-10-04)
+
+The 3ad8ce3 gate (med64 = the whole segment on an L2 of 256 KiB or less)
+was only validated at the 1e13 tail. At the sparse-regime tails, where the
+segment doubles to 512 KiB (2x the L2), x3 interleaved, auto (whole
+segment) / `--tune med64=1/2` / `--tune med64=1/6`: 1e15 15.92-15.97 /
+15.93-16.03 / 16.48-16.50 s; 1e16 18.57-18.62 / 18.61-18.65 / 19.09-19.17
+s. **Whole segment and 1/2 tie, 1/6 loses 3.3% (3/3 at both). Gate kept.**
+
+The same round's tails came out 4-7% above the table taken at 62fc592
+(1e14 12.85 -> 13.39, 1e15 15.06 -> 15.97, 1e16 17.34 -> 18.52, two reps
+each, tight), with primesieve unchanged at 1e13-1e15 and the only code
+diff being 3ad8ce3. Chased three ways, all in one session
+(`~/torre_2026-10-04.log`):
+
+- **The 62fc592 build against d8bc352, x3 interleaved at the 1e15 tail:
+  15.95 / 15.97 / 16.10 vs 15.96 / 15.97 / 15.99 s. A tie.** The 15.06 s
+  of the table is not reproducible with its own code: the difference is
+  machine state, not code.
+- **THP is fine:** `thp_fault_alloc` +32 during a 1e15 tail (4 threads x
+  2 MiB arenas), `thp_fault_fallback` unchanged at 302, 5.6 GB available,
+  the live overlay (`/cow`) at 22%. The "best effort" `madvise` was
+  getting its huge pages.
+- **`--tune huge=0` x3: 16.13 / 16.13 / 16.13 vs auto 15.96 / 16.24 /
+  15.95.** Huge arenas still ~1% ahead, consistent with the above.
+
+primesieve's own 1e17 tail re-run twice: 25.78, 25.58 s against the
+table's 21.70 (+18%); 1e18 28.84 vs 25.24 (+14%). Both tools moved
+between the two sessions on the same live USB, each on its own rows. See
+the power-regime note under Makefile (the server showed the same thing the
+same day: 21.37 s cold vs 22.83 s sustained at 1e12).
+
+Count table replaced from the REPS=2 round: 1e10 1.12x -> **1.03x**, 1e11
+1.06x -> **1.02x**, 1e12/1e13 1.02x/1.01x unchanged, as predicted for the
+half-L2 rule (9,592 base primes at 1e10, the startup line confirms it;
+1e12 takes the whole L2).
+
+`perf stat` on the 9e11-1e12 window, 4 threads, the auto plan (an
+earlier run with `-t 12` on this 4-core machine was 1.20x: oversubscribed,
+the one-per-core rules off; discarded):
+
+| | eratostenes | primesieve |
+|---|---:|---:|
+| cycles:u | 104.8 G | 105.5 G |
+| instructions:u | 127.1 G | 160.3 G |
+| IPC | 1.21 | 1.52 |
+| branch-misses:u | 0.85 G | 1.04 G |
+| L1-dcache-load-misses:u | 12.8 G | 11.4 G |
+| LLC-loads:u | **2.03 G** | 0.58 G |
+| wall | 7.93 s | 7.85 s |
+
+Cycles tie with 21% fewer instructions and 18% fewer mispredicts; the
+whole-L2 segment costs **3.5x primesieve's LLC loads** (its 128 KiB sieve
+stays in L2 next to its state), mostly hidden by the out-of-order window,
+and that is the whole of the remaining dense-regime gap on this core.
+Halving the segment is known to cost more than it saves here (the med64
+per-prime-per-segment cost, the half-L2 points above 2.5e11); the lever,
+if any, is fewer state streams through L2 during the sieve, not a smaller
+segment.
+
 ### Sparse ring arenas as 2 MiB huge pages, with one thread per core (kept, 2026-10-04)
 
 Where the one-thread-per-core machines lose most is the 1e16-1e18 tails,
@@ -4599,6 +4661,60 @@ dev PC with no sign of finishing, vs seconds for the forced-small-width runs --
 the instrumented binary is far slower than release, and at 1e13 that cost becomes
 prohibitive per `make pgo` invocation. Killed before completion; not worth the
 build-time cost for one training pass among several.
+
+### Two power regimes on every machine: burst and sustained (open, 2026-10-04)
+
+The i5-13500 server gave 21.37 s at 1e12 in one round and 22.83 s (best of
+5, 22.83-22.89) in the next, primesieve unchanged at 25.3 s. The user
+confirmed the 21.37 was real and taken cold: the first run after the
+machine had been idle. The i5-1235U laptop shows it as a staircase: the
+1e13 tail x3 back to back went 7.20 / 7.97 / 10.19 s (primesieve 7.63 /
+10.71 / 10.54), with the chip never getting hot. The i5-3470 moved 4-7%
+on the tails between sessions with its own build tied against itself (see
+the i5-3470 follow-up under main.cpp).
+
+This is the turbo budget, not temperature: PL2 for the tau window (~28 s
+by Intel default), then PL1. A run shorter than tau that starts from idle
+runs entirely in the burst regime; anything after ~30 s of load, or a run
+of minutes, is in the sustained one. The two regimes differ by ~6% on the
+server and up to 40% on the 15 W laptop. The earlier conclusion that
+neither desktop throttles (clocks >= 4.2 GHz, < 70 C) was about
+temperature and stands; the budget drop is a separate mechanism and the
+clocks do move with it.
+
+Consequences for the tables:
+
+- `benchmark.sh` runs primesieve first and the REPS of eratostenes after:
+  at 1e10-1e12 primesieve gets the burst and we get the sustained regime.
+  `benchmark_tails.sh` interleaves the pairs, so its ratios share a regime
+  and are the more stable ones.
+- Rows measured in different regimes are not comparable (the server 1e12
+  21.37 vs 22.83, the tower's 1e14-1e16 tails, the laptop's whole table).
+- Proposal: a warm-up of ~45 s of all-core load before the first measured
+  run in both scripts (`WARMUP=0` to skip), so every table is "sustained",
+  and a line in BENCHMARK.md saying so. Read the limits with
+  `grep . /sys/class/powercap/intel-rapl/intel-rapl:0/constraint_*` to
+  document PL1/PL2/tau per machine.
+
+Measured on the i5-1235U (`/sys/class/powercap/intel-rapl/intel-rapl:0`):
+PL1 15 W with a 32 s window, PL2 55 W (2.4 ms window), peak 70 W. Cold,
+1e10 x5 interleaved: 0.31-0.32 s vs primesieve 0.332-0.336 (0.95x). After
+a 70 s warm-up (a 1e12 count), everything in PL1: 1e10 0.41 vs 0.452
+(0.91x); tails x2 interleaved 1e13 10.09 / 10.643, 1e14 12.22 / 12.510,
+1e15 14.11 / 14.555, 1e16 16.17 / 16.763, 1e17 18.61 / 19.170 s
+(**0.95-0.98x across the board**). The earlier table's 0.75-0.88x came
+from a primesieve at 0.439 s for 1e10 that no regime reproduces today
+(0.333 cold, 0.452 sustained). The laptop's section in BENCHMARK.md is
+now the sustained round and says so in its description line.
+
+The i5-13500 server, three manual `make run` from idle (each a fresh
+container, minutes apart): 1e10 0.14, **1e11 1.49 s (the REPS=5 round:
+1.88-1.89)**, 1e12 21.62 (round: 22.83-22.89). A 21% burst at 1e11 and
+5% at 1e12 means a short PL1 window on that board (seconds, not 32):
+RAPL readout and a 1e11 x10 series with a power/MHz trace pending there.
+Note the scripts' own older note (1e10 ~0.19 s cold vs ~0.13 warm on the
+same server): that is the frequency ramp from idle, a second effect with
+the opposite sign at the 0.1 s scale.
 
 ### PGO overall: measured on the dev PC, not adopted on the production server
 
