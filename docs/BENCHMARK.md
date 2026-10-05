@@ -1,6 +1,6 @@
 # Benchmarks
 
-`eratostenes` against [primesieve](https://github.com/kimwalisch/primesieve), one section per machine, newest CPU first: the count table (`make benchmark`, pi(N)) and the tails table (`make benchmark-tails`, the last 1e11 numbers below each N), same thread count for both programs. Ratio = eratostenes / primesieve: below 1 means eratostenes is faster.
+`eratostenes` against [primesieve](https://github.com/kimwalisch/primesieve), one section per machine, newest CPU first: the count table (`make benchmark`, pi(N)) and the tails table (`make benchmark-tails`, the last 1e11 numbers below each N), same thread count for both programs. Ratio = eratostenes / primesieve: below 1 means eratostenes is faster. Each time is the mean of REPS interleaved pairs (eratostenes, primesieve, eratostenes, ...); the line under each machine says how many, with the commit measured.
 
 ## Intel Xeon Emerald Rapids (claude.ai sandbox)
 
@@ -24,23 +24,23 @@ Intel Xeon @ 2.10GHz (Emerald Rapids, 2023), 2 vCPU.
 
 ## Intel Core i5-13500
 
-Intel Core i5-13500 (Raptor Lake, 2023), 64 GB.
+Intel Core i5-13500 (Raptor Lake, 2023), 64 GB. 20 threads (2 per core); L1d 544 KiB (14 instances); L2 11.5 MiB (8 instances); L3 24 MiB. primesieve 11.0 (Debian, inside the `dev` container); eratostenes 5f7d213; mean of 3, pairs interleaved.
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
-| 1e10 | 0.15s | 0.137s | 1.09x |
-| 1e11 | 1.90s | 2.092s | 0.91x |
-| 1e12 | 22.87s | 25.363s | 0.90x |
-| 1e13 | 284.93s | 295.297s | 0.96x |
+| 1e10 | 0.14s | 0.137s | 1.02x |
+| 1e11 | 1.87s | 2.105s | 0.89x |
+| 1e12 | 23.03s | 25.332s | 0.91x |
+| 1e13 | 286.09s | 295.222s | 0.97x |
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
-| 1e13 | 3.10s | 3.432s | 0.90x |
-| 1e14 | 3.85s | 4.049s | 0.95x |
-| 1e15 | 4.44s | 4.596s | 0.97x |
-| 1e16 | 5.16s | 5.289s | 0.98x |
-| 1e17 | 6.12s | 6.151s | 0.99x |
-| 1e18 | 7.74s | 8.143s | 0.95x |
+| 1e13 | 3.02s | 3.227s | 0.94x |
+| 1e14 | 3.84s | 3.968s | 0.97x |
+| 1e15 | 4.39s | 4.634s | 0.95x |
+| 1e16 | 5.08s | 5.297s | 0.96x |
+| 1e17 | 6.15s | 6.249s | 0.98x |
+| 1e18 | 7.61s | 8.202s | 0.93x |
 
 ## Intel Core i5-1235U
 
@@ -105,23 +105,23 @@ Intel Xeon @ 2.80GHz (Cascade Lake, 2019), 2 vCPU, 8 GB.
 
 ## Intel Core i5-3470
 
-Intel Core i5-3470 (Ivy Bridge, 2012), 8 GB.
+Intel Core i5-3470 (Ivy Bridge, 2012), 8 GB. 4 threads (1 per core); L1d 128 KiB (4 instances); L2 1 MiB (4 instances); L3 6 MiB. primesieve 12.12 (Ubuntu live USB); eratostenes 5f7d213; mean of 3, pairs interleaved.
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
-| 1e10 | 0.45s | 0.44s | 1.02x |
-| 1e11 | 5.64s | 5.52s | 1.02x |
-| 1e12 | 72.04s | 70.20s | 1.03x |
-| 1e13 | 923.36s | 914.70s | 1.01x |
+| 1e10 | 0.45s | 0.439s | 1.03x |
+| 1e11 | 5.64s | 5.520s | 1.02x |
+| 1e12 | 71.95s | 70.185s | 1.03x |
+| 1e13 | 907.72s | 909.366s | 1.00x |
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
-| 1e13 | 10.43s | 10.431s | 1.00x |
-| 1e14 | 13.37s | 14.724s | 0.91x |
-| 1e15 | 15.95s | 18.717s | 0.85x |
-| 1e16 | 18.57s | 22.264s | 0.83x |
-| 1e17 | 20.41s | 26.648s | 0.77x |
-| 1e18 | 23.32s | 28.591s | 0.82x |
+| 1e13 | 10.01s | 10.310s | 0.97x |
+| 1e14 | 12.71s | 14.037s | 0.91x |
+| 1e15 | 15.08s | 18.268s | 0.83x |
+| 1e16 | 16.16s | 21.642s | 0.75x |
+| 1e17 | 18.05s | 23.191s | 0.78x |
+| 1e18 | 21.01s | 25.293s | 0.83x |
 
 ## Intel Core i7-620M
 

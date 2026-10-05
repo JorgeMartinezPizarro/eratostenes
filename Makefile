@@ -49,6 +49,10 @@ NTH_OBJ := $(OBJ_DIR_RELEASE)/nth_prime.o
 
 OUT_DIR := $(CURDIR)/output
 COMPOSE := docker compose -f docker/docker-compose.yml
+# The dev image has no .git: hand the benchmark scripts the host's commit
+# (scripts/machine_info.sh prints it above every table).
+GIT_DESC := $(shell git describe --always --dirty 2>/dev/null || echo "?")
+COMPOSE_ENV := -e ERATOSTENES_COMMIT=$(GIT_DESC)
 
 .PHONY: all portable debug pgo clean fclean re docker run docker-pgo run-pgo nth-prime variant \
         test benchmark benchmark-io benchmark-tails benchmark-mini benchmark-ab benchmark-flags docker-dev docker-test docker-benchmark \
@@ -278,19 +282,19 @@ docker-test: docker-dev
 	$(COMPOSE) run --rm -e THREADS dev make test
 
 docker-benchmark: docker-dev
-	$(COMPOSE) run --rm -e THREADS -e SEGMENT -e REPS dev make benchmark
+	$(COMPOSE) run --rm -e THREADS -e SEGMENT -e REPS $(COMPOSE_ENV) dev make benchmark
 
 docker-benchmark-io: docker-dev
-	$(COMPOSE) run --rm -e THREADS -e SEGMENT -e WRITE_PATH -e KEEP_DB dev make benchmark-io
+	$(COMPOSE) run --rm -e THREADS -e SEGMENT -e WRITE_PATH -e KEEP_DB $(COMPOSE_ENV) dev make benchmark-io
 
 docker-benchmark-tails: docker-dev
-	$(COMPOSE) run --rm -e THREADS -e REPS -e NS -e WIDTH -e SEGMENT dev make benchmark-tails
+	$(COMPOSE) run --rm -e THREADS -e REPS -e NS -e WIDTH -e SEGMENT $(COMPOSE_ENV) dev make benchmark-tails
 
 docker-benchmark-mini: docker-dev
-	$(COMPOSE) run --rm -e THREADS -e N -e WIDTH -e SEGMENTS dev make benchmark-mini
+	$(COMPOSE) run --rm -e THREADS -e N -e WIDTH -e SEGMENTS $(COMPOSE_ENV) dev make benchmark-mini
 
 docker-benchmark-ab: docker-dev
-	$(COMPOSE) run --rm -e THREADS -e N -e WIDTH -e REPS -e A -e B -e BIN_B dev make benchmark-ab
+	$(COMPOSE) run --rm -e THREADS -e N -e WIDTH -e REPS -e A -e B -e BIN_B $(COMPOSE_ENV) dev make benchmark-ab
 
 docker-benchmark-flags: docker-dev
-	$(COMPOSE) run --rm -e THREADS -e N -e WIDTH -e REPS -e FLAGS dev make benchmark-flags
+	$(COMPOSE) run --rm -e THREADS -e N -e WIDTH -e REPS -e FLAGS $(COMPOSE_ENV) dev make benchmark-flags
