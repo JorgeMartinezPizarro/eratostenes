@@ -3321,7 +3321,23 @@ laptop with callgrind:
   mod-210, `-s 2000` and 1e15/1e16 tail checks. What is left per
   iteration: one `modsb` reload and the `movabs` of the 36-bit mask.
   **Committed for the cycles:u A/B on the i5-3470 and the server** (A =
-  e7a4520, B = this).
+  e7a4520, B = this, 4e03879).
+- Two more on top of 4e03879, same method (laptop, callgrind, A = 4e03879):
+  `pos & modsb` as one BMI2 `bzhi` taking the bit count from `log2sb`
+  (`low_bits`, `#ifdef __BMI2__`, the `and` kept for Ivy Bridge and the
+  portable build), and the spread next-block prefetch made unconditional
+  by pointing the last block of a chain at itself (already cached) instead
+  of testing `next_blk != nullptr` on every pair of hits -- that flag was a
+  `cmpb` on the stack plus a branch per iteration. `process_big<true>`
+  223.6 M -> 221.1 M Ir with `bzhi` alone (-1.1%), **-> 211.1 M with both
+  (-5.6%)**; the U = 2 iteration 82 -> 78 instructions. One detour recorded
+  so nobody repeats it: declaring `log2sb` as `uint64_t` so `shrx` and
+  `bzhi` would share the count register made GCC keep two copies and spill
+  `tails_cur` instead (back to 223.6 M); as `uint32_t` it keeps one
+  zero-extended copy of the count on the stack for `bzhi` and the rest in
+  registers. Register allocation in this loop is a lottery: every change
+  needs its own callgrind and asm read, the source-level intent predicts
+  nothing. `make test` 87/87. Committed for the A/B against 4e03879.
 
 ### Activation at the top of N on old cores: 83 ns per prime on Nehalem, two flags to split it (open, 2026-10-04)
 

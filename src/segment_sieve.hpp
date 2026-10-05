@@ -93,6 +93,24 @@ constexpr double MEDIUM_BAND_MAX_HITS = 8.0;
 // threads neutral; 12 threads (HT pairs) +10.5% worse (6/6), hence the gate.
 // Best effort: THP in "madvise" (Ubuntu's default) or "always" mode.
 #include <sys/mman.h>
+#ifdef __BMI2__
+#include <immintrin.h>
+#endif
+
+// v mod 2^nbits, with mask = 2^nbits - 1: one BMI2 instruction (bzhi) that
+// takes the bit count from a register instead of an `and` with a mask the
+// hot loop had to keep live (process_big reloaded it from the stack every
+// iteration); plain `and` where there is no BMI2 (Ivy Bridge, the portable
+// build).
+static inline uint64_t low_bits(uint64_t v, uint32_t nbits, uint64_t mask) {
+#ifdef __BMI2__
+    (void)mask;
+    return _bzhi_u64(v, nbits);
+#else
+    (void)nbits;
+    return v & mask;
+#endif
+}
 #ifndef ERA_BIG_UNROLL
 #define ERA_BIG_UNROLL 2
 #endif
@@ -762,6 +780,9 @@ private:
         // the stack and reloaded it per hit -- see docs/RESEARCH.md). The
         // slow path recovers the slot index from tail_.data().
         erat::DenseState** const tails_cur = tail_.data() + cur_segment_;
+        // uint32_t, as measured: declared 64-bit (so shrx and bzhi would share
+        // the count register) GCC instead kept two copies and spilled
+        // tails_cur, +1.1% instructions (docs/RESEARCH.md).
         const uint32_t log2sb = log2_sb_;
         const uint64_t modsb = (uint64_t{1} << log2sb) - 1;
         while (head_[slot]) {
@@ -779,7 +800,12 @@ private:
                 // a burst of 64 prefetcht1 here. See
                 // docs/RESEARCH.md#sparse-tier-prefetch-the-next-block-of-the-chain-once-per-block-kept-2026-09-27
                 // and docs/RESEARCH.md#sparse-tier-next-block-prefetch-spread-over-the-current-block-kept-2026-10-04.
-                const char* nb = reinterpret_cast<const char*>(next_blk);
+                // The last block of a chain has no next: its prefetch target
+                // is itself (already cached, harmless) so the spread loop
+                // below has no `next_blk != nullptr` test per iteration --
+                // that flag was a stack load and a branch on every pair of
+                // hits.
+                const char* nb = reinterpret_cast<const char*>(next_blk ? next_blk : blk);
                 if constexpr (!ERA_BIG_PFSPREAD) {
                     if (next_blk)
                         for (size_t off = 0; off < BLK_BYTES; off += 64) __builtin_prefetch(nb + off, 0, 2);
@@ -808,7 +834,7 @@ private:
                             // of this one: 64 lines over half a block, each
                             // requested twice (U = 2), never in a burst.
                             const size_t idx = static_cast<size_t>(it - blk_base);
-                            if (next_blk && idx < BLK_BYTES / 16) __builtin_prefetch(nb + (idx >> 2) * 64, 0, 2);
+                            if (idx < BLK_BYTES / 16) __builtin_prefetch(nb + (idx >> 2) * 64, 0, 2);
                         }
                         // The segment byte of the entries ERA_BIG_PF ahead
                         // (same block, stale entries past `end` excluded):
@@ -866,7 +892,7 @@ private:
                         }
                         for (int k = 0; k < U; ++k) {
                             sl[k] = pos[k] >> log2sb; // segments ahead: the slot is tails_cur[sl]
-                            e[k] = (ent[k] & ~((uint64_t{1} << 36) - 1)) | nidx[k] | ((pos[k] & modsb) << 12);
+                            e[k] = (ent[k] & ~((uint64_t{1} << 36) - 1)) | nidx[k] | (low_bits(pos[k], log2sb, modsb) << 12);
                         }
                         for (int k = 0; k < U; ++k) {
                             erat::DenseState** const tp = tails_cur + sl[k];
@@ -917,8 +943,8 @@ private:
                         }
                         e_keep = a << 9;
                     }
-                    uint64_t e = W2310 ? (e_keep | nidx | ((pos & modsb) << 12))
-                                       : (e_keep | nidx | ((pos & modsb) << 32));
+                    uint64_t e = W2310 ? (e_keep | nidx | (low_bits(pos, log2sb, modsb) << 12))
+                                       : (e_keep | nidx | (low_bits(pos, log2sb, modsb) << 32));
                     erat::DenseState** const tp = tails_cur + (pos >> log2sb);
                     erat::DenseState* w = *tp;
                     // Null (empty slot) or on a block boundary (block full).
