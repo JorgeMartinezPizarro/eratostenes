@@ -3513,7 +3513,10 @@ measured (the 2026-10-04 entry above has the same core 83 ns per prime on
 Nehalem for the same loop). **Kept gated:** `ERA_ACT_IDX` defaults to 1
 only with `__BMI2__` (Haswell and newer), 0 otherwise -- the tower and the
 portable build keep the old derivation, `ERA_ACT_KCUT` stays on
-everywhere. Unmeasured in between: Haswell to Skylake clients.
+everywhere. Unmeasured in between: Haswell to Skylake clients. Confirmed on
+the i5-3470 (5f7d213 vs 25f5c75, 1e17/1e18, x3): cycles +0.5% / +0.3%
+inside A's spread, instructions -0.8% / -1.6% -- a tie, the regression
+gone; the i5-13500's binary is unchanged from the d7d2203 measurement.
 
 ### i5-3470 profile at 1e12: the med64 tier over the whole-L2 segment is 59% of the cycles (open, 2026-10-04)
 
