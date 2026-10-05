@@ -117,7 +117,7 @@ What this project is built from, one term each — follow the link for the conce
 | 1e12 | 22.87s | 25.363s | 0.90x |
 | 1e13 | 284.93s | 295.297s | 0.96x |
 | 1e14 | 3392.08s | 3349.907s | 1.01x |
-| 1e15 | 40381.23s | - | - |
+| 1e15 | 40381.23s | 39053.581 | 1.03x |
 
 For more machines and results, see: [docs/BENCHMARK.md](docs/BENCHMARK.md).
 
