@@ -3215,8 +3215,14 @@ spread against the previous day's mean-of-5 with the burst, primesieve
 3.85 -> 3.85, 1e15 4.45 -> 4.44, 1e16 5.16 -> 5.16, 1e17 6.19 -> 6.12
 (-1.1%), 1e18 7.92 -> 7.74 (-2.3%). Neutral at 1e14-1e16, -1..-2% at the
 two largest tails, no regression anywhere: the burst did not stall the
-Raptor Lake cores the way it stalled the Rocket Lake ones. Pending:
-i5-3470, i5-1235U, the Xeons.
+Raptor Lake cores the way it stalled the Rocket Lake ones.
+
+i5-3470 (4 threads, one per core, 2026-10-05): `benchmark_ab.sh` at the
+1e15 tail, spread 15.37 / 15.33 / 15.32 s vs burst 15.97 / 15.97 / 15.96 s,
+**-3.9% (3/3)**, every spread run below every burst run. Ivy Bridge
+stalled on the burst like Rocket Lake, with no HT to hide it. Pending:
+i5-1235U, the Xeons; then a tails round on the tower and the laptop to
+refresh their tables (both measured on 3a1218b, before the spread).
 
 ### Sparse tier: `process_big` is issue-bound at 12 threads; the ring's wrap mask and the spills are what is left (open, 2026-10-05)
 
