@@ -45,6 +45,7 @@ throughout below).
   - [`cross_off_medium`: byte positions + doubled tables (kept, 2026-09-27)](#cross_off_medium-byte-positions--doubled-tables-kept-2026-09-27)
   - [med64: EratMedium-style checked loop, `cross_off_checked` (kept, 2026-09-29)](#med64-eratmedium-style-checked-loop-cross_off_checked-kept-2026-09-29)
   - [`cross_off_medium`: struct-of-arrays state + gated `prefetchnta` (kept, 2026-09-29)](#cross_off_medium-struct-of-arrays-state--gated-prefetchnta-kept-2026-09-29)
+  - [`cross_off_medium`: per-hit phase-wrap test dropped when the plan bounds the hits (tried, neutral, reverted, 2026-10-05)](#cross_off_medium-per-hit-phase-wrap-test-dropped-when-the-plan-bounds-the-hits-tried-neutral-reverted-2026-10-05)
   - [`cross_off_medium`: `qp` as 1-byte deltas (kept, 2026-09-30)](#cross_off_medium-qp-as-1-byte-deltas-kept-2026-09-30)
   - [med64: mod-210 stepping on the checked loop, `cross_off_checked210` (kept, 2026-09-30)](#med64-mod-210-stepping-on-the-checked-loop-cross_off_checked210-kept-2026-09-30)
 - [wheel.hpp](#wheelhpp)
@@ -71,6 +72,7 @@ throughout below).
   - [med64: `prefetchnta` on the state stream (kept, 2026-09-29)](#med64-prefetchnta-on-the-state-stream-kept-2026-09-29)
   - [Sparse tier: mod-2310 multiplier wheel (kept, 2026-09-30)](#sparse-tier-mod-2310-multiplier-wheel-kept-2026-09-30)
   - [Sparse tier: next-block prefetch spread over the current block (kept, 2026-10-04)](#sparse-tier-next-block-prefetch-spread-over-the-current-block-kept-2026-10-04)
+  - [Sparse tier: `process_big` is issue-bound at 12 threads; the ring's wrap mask and the spills are what is left (open, 2026-10-05)](#sparse-tier-process_big-is-issue-bound-at-12-threads-the-rings-wrap-mask-and-the-spills-are-what-is-left-open-2026-10-05)
   - [Activation at the top of N on old cores: 83 ns per prime on Nehalem, two flags to split it (open, 2026-10-04)](#activation-at-the-top-of-n-on-old-cores-83-ns-per-prime-on-nehalem-two-flags-to-split-it-open-2026-10-04)
   - [i5-3470 profile at 1e12: the med64 tier over the whole-L2 segment is 59% of the cycles (open, 2026-10-04)](#i5-3470-profile-at-1e12-the-med64-tier-over-the-whole-l2-segment-is-59-of-the-cycles-open-2026-10-04)
   - [i5-3470 follow-up: med64 gate at the tails, the +6% that was not code, and the 1e12 window profile (2026-10-04)](#i5-3470-follow-up-med64-gate-at-the-tails-the-6-that-was-not-code-and-the-1e12-window-profile-2026-10-04)
@@ -701,6 +703,23 @@ per tier set: on when medium primes x 8 bytes exceed the per-thread L3 share
 62,601 and 1e13 197,708). The crossover between those two points isn't measured.
 `ERATOSTENES_MEDIUM_NTA=0/1` forces it. Gated binary, 1 rep: 1e12 1205.1G (NTA
 off), 1e13 tail 1726.9G (on). Server A/B pending.
+
+### `cross_off_medium`: per-hit phase-wrap test dropped when the plan bounds the hits (tried, neutral, reverted, 2026-10-05)
+
+`perf annotate` of `cross_off_medium<1, true>` at the 1e15 tail (dev PC)
+counts the kernel exactly: **22 instructions per prime visit and 13 per
+hit**, two of them `cmp $0x60,%rcx; jne` -- the `++w == 96` wrap test the
+header comment says is never needed once med64 is on (a medium prime then
+has at most seg_k_width / med64_limit + 1 = 7 hits per segment, so w stays
+below 96). Tried a `WRAP` template parameter picked at plan time from
+`med64_limit` (`SieveConfig::medium_p_min`, `-DERA_MED_NOWRAP=0` for the
+A/B). instructions:u on the 9e11-1e12 window 127.6 -> 126.4 G (-0.9%),
+cycles:u 125.1 -> 125.3 G (equal); wall interleaved x3: 1e12 window
++1.8%, 1e15 tail +0.9%, both overlapping. The tier is bound by its loop
+exit mispredict and the pos -> table -> pos latency chain, not by
+instruction count: two of thirteen per hit buy nothing. Reverted; the
+annotate's counts stay here as the reference for the medium tier's cost
+model (visit 22, hit 13).
 
 ### `cross_off_medium`: `qp` as 1-byte deltas (kept, 2026-09-30)
 
@@ -3188,8 +3207,58 @@ the next block -- 64 lines over half a block, each requested twice (U =
 cycles:u at the 1e15 tail, A/B/A/B: 323.9 / 309.8 / 325.2 / 316.2 G
 (-3..-4.4%) with +3.4% instructions (the per-iteration condition and
 address). The dense regime (1e12 and below, no sparse tier) is untouched.
-`-DERA_BIG_PFSPREAD=0` keeps the burst for an A/B on the other machines
-(pending: i5-13500, i5-3470, i5-1235U, the Xeons).
+`-DERA_BIG_PFSPREAD=0` keeps the burst for an A/B on the other machines.
+
+i5-13500 (20 threads, 2026-10-05): a mean-of-7 tails round with the
+spread against the previous day's mean-of-5 with the burst, primesieve
++0.6..+2.5% between the two rounds: 1e13 3.16 -> 3.10 s (-1.9%), 1e14
+3.85 -> 3.85, 1e15 4.45 -> 4.44, 1e16 5.16 -> 5.16, 1e17 6.19 -> 6.12
+(-1.1%), 1e18 7.92 -> 7.74 (-2.3%). Neutral at 1e14-1e16, -1..-2% at the
+two largest tails, no regression anywhere: the burst did not stall the
+Raptor Lake cores the way it stalled the Rocket Lake ones. Pending:
+i5-3470, i5-1235U, the Xeons.
+
+### Sparse tier: `process_big` is issue-bound at 12 threads; the ring's wrap mask and the spills are what is left (open, 2026-10-05)
+
+Where the sparse tier stands after the prefetch spread above, from the
+same dev-PC session (i5-11400F, 12 threads, cycles:u / perf annotate /
+objdump of `process_big<true>`):
+
+- ~47 instructions per hit in the unrolled U = 2 loop (95 per iteration),
+  of which ~4 are the 16-ahead segment prefetch (`ERA_BIG_PF`, re-checked:
+  `PF=0` +4.2%, keep) and ~2.5 the spread next-block prefetch. `UNROLL=1`
+  +8.6% (3/3), `LOOP=1` -0.6% (noise): both knobs stay.
+- At 12 threads the loop runs at ~20 cycles per hit per core for 2 x 47
+  instructions, i.e. an IPC near the core's issue width: **the tier is
+  instruction-bound with HT**, not memory-bound (with one thread per core
+  it is latency-bound instead). Every instruction removed per hit is time
+  at the tails.
+- The loop body keeps 21 values live for 15 registers: `tails`, `bmask`,
+  `modsb`, the next block's pointer and its flag are reloaded from the
+  stack each iteration (`mov 0x8(%rsp)` x2, `mov 0x10(%rsp)`, `and
+  (%rsp)` x2, `cmpb 0x20(%rsp)`), and the 36-bit mask is rematerialized
+  (`movabs`) every iteration.
+
+The one lever identified, not yet tried: **drop the ring's wrap mask**.
+Today a hit's slot is `(cur + (pos >> log2sb)) & bmask`. With `head_` /
+`tail_` arrays of 2 x num_buckets entries, `cur` kept below num_buckets
+and the slot simply `cur + (pos >> log2sb)` (always < 2 x num_buckets, the
+ring's own sizing guarantees ahead < num_buckets), the `and` goes and
+`bmask` leaves the loop, freeing a register and one or two of the stack
+reloads; once `cur` reaches num_buckets the two arrays are shifted down by
+num_buckets (a memmove of a few hundred pointers, once every num_buckets
+segments) and `cur` reset. Every slot user must follow: `process_big`,
+`file_sparse` / `stage_sparse_entry` (`(cur_segment_ + ahead) &
+(num_buckets_ - 1)` today), `new_block`, `begin_chunk`, `ERA_ACT_BATCH`'s
+slot groups. Expected: 2-3 instructions of 47 per hit, ~1.5% at the
+1e14-1e17 tails with HT, less without. Worth a session of its own, with
+`test.sh` and the ring-margin exceptions as the safety net; not worth
+doing at the end of a long one.
+
+Rejected on paper the same night: re-ordering the packed entry (idx | pos
+<< 12 | qp << 36). Whichever field sits in the middle costs a shift and a
+mask, so moving `pos` to the top saves its mask and adds one on `qp`; the
+repack stays at five operations. Zero change in instruction count.
 
 ### Activation at the top of N on old cores: 83 ns per prime on Nehalem, two flags to split it (open, 2026-10-04)
 
@@ -3478,7 +3547,11 @@ diff being 3ad8ce3. Chased three ways, all in one session
   15.95.** Huge arenas still ~1% ahead, consistent with the above.
 
 primesieve's own 1e17 tail re-run twice: 25.78, 25.58 s against the
-table's 21.70 (+18%); 1e18 28.84 vs 25.24 (+14%). Both tools moved
+table's 21.70 (+18%); 1e18 28.84 vs 25.24 (+14%). The next day's mean-of-5
+round (3a1218b, same code) shows what that is: across five interleaved
+reps primesieve ranges 21.2-23.0 s at 1e16 and 25.5-27.7 s at 1e17 while
+eratostenes stays within 0.1 s (18.54-18.63, 20.37-20.46). On this
+machine primesieve's big tails are the unstable side, not ours. Both tools moved
 between the two sessions on the same live USB, each on its own rows. See
 the power-regime note under Makefile (the server showed the same thing the
 same day: 21.37 s cold vs 22.83 s sustained at 1e12).
