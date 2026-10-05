@@ -72,6 +72,7 @@ throughout below).
   - [Sparse tier: next-block prefetch spread over the current block (kept, 2026-10-04)](#sparse-tier-next-block-prefetch-spread-over-the-current-block-kept-2026-10-04)
   - [Sparse tier: `process_big` is issue-bound at 12 threads; the ring's wrap mask and the spills are what is left (open, 2026-10-05)](#sparse-tier-process_big-is-issue-bound-at-12-threads-the-rings-wrap-mask-and-the-spills-are-what-is-left-open-2026-10-05)
   - [Activation at the top of N on old cores: 83 ns per prime on Nehalem, two flags to split it (open, 2026-10-04)](#activation-at-the-top-of-n-on-old-cores-83-ns-per-prime-on-nehalem-two-flags-to-split-it-open-2026-10-04)
+  - [Sparse activation from the bitmap index: 18% fewer instructions per prime (kept, 2026-10-05)](#sparse-activation-from-the-bitmap-index-18-fewer-instructions-per-prime-kept-2026-10-05)
   - [i5-3470 profile at 1e12: the med64 tier over the whole-L2 segment is 59% of the cycles (open, 2026-10-04)](#i5-3470-profile-at-1e12-the-med64-tier-over-the-whole-l2-segment-is-59-of-the-cycles-open-2026-10-04)
   - [i5-3470 follow-up: med64 gate at the tails, the +6% that was not code, and the 1e12 window profile (2026-10-04)](#i5-3470-follow-up-med64-gate-at-the-tails-the-6-that-was-not-code-and-the-1e12-window-profile-2026-10-04)
 - [gap_encoding.hpp](#gap_encodinghpp)
@@ -3453,6 +3454,39 @@ tail, +3.6% (3/3) at 1e17, 20.5 ns per prime against 18.6. Refuted on the
 one machine where the activation weighs 12%: HT pairs or not, the group
 buffers are extra traffic through an L2 that the direct push does not
 need. ERA_ACT_BATCH closed everywhere.
+
+### Sparse activation from the bitmap index: 18% fewer instructions per prime (kept, 2026-10-05)
+
+Line-level callgrind (`make variant DEFS=-g`, 1e17 tail, 1e8 window, one
+thread, 17 M sparse primes activated) put `activate` at 1.50 G Ir, ~88
+instructions per filed prime, and named the avoidable ones: `ri =
+WHEEL_POS[p % 30]` 153 M (a multiply-shift modulo and a table load),
+`(p / 30) << 36` inside the entry pack 153 M (another), `(1 << log2_sb_)
+- 1` rebuilt per prime, and `if (p * p >= high_n)` 89 M (a multiply, a
+compare and a branch per prime, plus `wheel_number(k)` for a prime that
+may not activate). The bitmap walk already has the index: for the mod-30
+wheel `k >> 3` is `p / 30` and `k & 7` the residue class, so `file_sparse`
+now takes `k`, derives `qp`, `ri` and `p` from it and never divides by 30;
+`sb_mask_` is a member; and the per-prime square test became one `isqrt`
+per segment -- `k_cut = wheel_count_upto(isqrt(high_n - 1))` bounds the
+walk, the partial last word is masked once. `activate` 1.50 G -> 1.23 G Ir
+(**-18.2%**, ~72 per prime); `process_big` unchanged. Correct on both
+wheels, `-s 64`/`-s 2000`, the 1e15-1e17 tails and the unaligned 2e16
+start; `make test` 87/87. Where it shows: every fresh start of a worker
+and every steal at the top of N (50 M primes at the 1e18 tail, ~1.3 s per
+thread on the dev PC before this), i.e. the tails' startup and the steal
+price in `run_parallel_chunks`. The same profile puts the base-prime
+sieve's `comp[k] = 1` at 31% of that window (1.3 G for 17 M primes up to
+3.16e8); it runs once per run and in parallel, so it was left alone, but a
+mod-3 or presieved inner loop there is the next obvious cut if the
+1e17-1e18 startup ever matters.
+
+What is left in `file_sparse` per prime, by line: the `m = ceil(start / p)`
+division (the real 64-bit `div`, ~4 instructions but the latency chain),
+`m / 2310` and `m % 2310` (5), `p * m / 30` (7, a 64-bit multiply and a
+constant division), the two table loads and the ring push (~10). The
+division by p was already shown not to be the cost on modern cores (the
+`ERA_FPDIV` entry above).
 
 ### i5-3470 profile at 1e12: the med64 tier over the whole-L2 segment is 59% of the cycles (open, 2026-10-04)
 

@@ -173,6 +173,7 @@ public:
         }
         log2_sb_ = 0;
         while ((uint64_t{1} << log2_sb_) < sb) ++log2_sb_;
+        sb_mask_ = (uint64_t{1} << log2_sb_) - 1;
         // Largest BYTE step between one sparse prime's consecutive hits:
         // qp * max(dm) + max(corr), with max(dm) = 10 on the mod-210
         // multiplier wheel (the largest gap between consecutive 210-
@@ -282,29 +283,25 @@ public:
 
         // Sparse tier: its primes are a run of the base-prime bitmap
         // (base_sieve.hpp's SparsePrimes), walked in increasing order from
-        // next_sparse_k_ until p*p reaches this segment's end; file_sparse
-        // files each one into the bucket ring.
+        // next_sparse_k_ up to k_stop, the first index whose prime's square
+        // reaches this segment's end (one isqrt per segment, in place of a
+        // p * p compare per prime); file_sparse files each one into the
+        // bucket ring, from its index -- the index already holds p / 30 and
+        // the residue class, so nothing is divided by 30 per prime.
         size_t sparse_activated = 0;
+        const uint64_t k_cut = wheel_count_upto(isqrt(high_n - 1)); // primes with p*p < high_n have k < k_cut
+        const uint64_t k_stop = std::min(k_cut, sparse_primes.k_end);
         if (next_sparse_k_ < sparse_primes.k_begin) next_sparse_k_ = sparse_primes.k_begin;
-        while (next_sparse_k_ < sparse_primes.k_end) {
+        while (next_sparse_k_ < k_stop) {
             const uint64_t wi = next_sparse_k_ >> 6;
-            const uint64_t word_end = std::min((wi + 1) << 6, sparse_primes.k_end);
+            const uint64_t word_end = std::min((wi + 1) << 6, k_stop);
             uint64_t bits = sparse_primes.words[wi] & (~uint64_t{0} << (next_sparse_k_ & 63));
-            bool reached = false; // p*p >= high_n: the rest activate in a later segment
+            if (word_end & 63) bits &= (uint64_t{1} << (word_end & 63)) - 1; // partial last word
             while (bits) {
-                const uint64_t k = (wi << 6) + static_cast<uint64_t>(__builtin_ctzll(bits));
-                if (k >= word_end) break;
-                const uint64_t p = wheel_number(k);
-                if (p * p >= high_n) {
-                    next_sparse_k_ = k;
-                    reached = true;
-                    break;
-                }
-                file_sparse(p, low_n, k_low);
+                file_sparse((wi << 6) + static_cast<uint64_t>(__builtin_ctzll(bits)), low_n, k_low);
                 ++sparse_activated;
                 bits &= bits - 1;
             }
-            if (reached) break;
             next_sparse_k_ = word_end;
         }
         flush_activation(); // ERA_ACT_BATCH: everything staged lands before this segment is sieved
@@ -959,12 +956,18 @@ private:
         }
     }
 
-    // Files sparse prime p (EratBig-style activation, see the header comment):
-    // the smallest multiplier m coprime to 210 (2310 with big2310_) with
-    // p*m >= max(p*p, low_n), packed with qp/residue class/phase into one
-    // word exactly like the dense tiers' DenseState, into the bucket ring by
-    // byte position (shift/mask, no division).
-    void file_sparse(uint64_t p, uint64_t low_n, uint64_t k_low) {
+    // Files the sparse prime of wheel index k (EratBig-style activation, see
+    // the header comment): the smallest multiplier m coprime to 210 (2310
+    // with big2310_) with p*m >= max(p*p, low_n), packed with qp/residue
+    // class/phase into one word exactly like the dense tiers' DenseState,
+    // into the bucket ring by byte position (shift/mask, no division). From
+    // the index, not the prime: k >> 3 is p / 30 and k & 7 its residue
+    // class, which `p % 30` and `WHEEL_POS[]` recomputed per prime (18 of
+    // ~83 instructions per activation, callgrind on the 1e17 tail).
+    void file_sparse(uint64_t k, uint64_t low_n, uint64_t k_low) {
+        const uint64_t qp = k >> WHEEL_SIZE_LOG2;             // p / WHEEL_MOD
+        const uint64_t ri = k & (WHEEL_SIZE - 1);             // WHEEL_POS[p % WHEEL_MOD]
+        const uint64_t p = qp * WHEEL_MOD + WHEEL_R[ri];
         uint64_t start_val = std::max(p * p, low_n);
 #if ERA_FPDIV
         // ceil(start_val / p) via a double quotient (53 bits: off by a unit
@@ -983,15 +986,13 @@ private:
             if (w == big::W2310) { ++t; w = 0; }
             m = t * 2310 + big::M2310[w];
             uint64_t pos = p * m / WHEEL_MOD - k_low / 8;
-            uint64_t ri = static_cast<uint64_t>(WHEEL_POS[p % WHEEL_MOD]);
             uint64_t ahead = pos >> log2_sb_;
             if (ahead >= num_buckets_) {
                 throw std::runtime_error(
                     "bucket sieve: a sparse prime's step exceeds the bucket ring's margin "
                     "(sizing bug in SegmentSieve's constructor)");
             }
-            uint64_t ent = (ri * big::W2310 + w) | ((pos & ((uint64_t{1} << log2_sb_) - 1)) << 12) |
-                           ((p / WHEEL_MOD) << 36);
+            uint64_t ent = (ri * big::W2310 + w) | ((pos & sb_mask_) << 12) | (qp << 36);
             erat::DenseState e;
             std::memcpy(&e, &ent, sizeof(e));
             stage_sparse_entry(static_cast<uint32_t>(cur_segment_ + ahead), e);
@@ -1003,10 +1004,9 @@ private:
         m = t * 210 + big::M210[w];
         uint64_t n = p * m;
         uint64_t pos = n / WHEEL_MOD - k_low / 8;
-        uint64_t ri = static_cast<uint64_t>(WHEEL_POS[p % WHEEL_MOD]);
-        erat::DenseState e{static_cast<uint32_t>(((p / WHEEL_MOD) << 9) | (ri * 48 + w)), 0};
+        erat::DenseState e{static_cast<uint32_t>((qp << 9) | (ri * 48 + w)), 0};
         uint64_t ahead = pos >> log2_sb_;
-        e.pos = static_cast<uint32_t>(pos & ((uint64_t{1} << log2_sb_) - 1));
+        e.pos = static_cast<uint32_t>(pos & sb_mask_);
         if (ahead >= num_buckets_) {
             throw std::runtime_error(
                 "bucket sieve: a sparse prime's step exceeds the bucket ring's margin "
@@ -1183,6 +1183,7 @@ private:
 
     uint64_t skip_below_k_ = 1; // first wheel index that counts (set_skip_below_k)
     uint32_t log2_sb_ = 0; // log2(segment width in bytes) -- see constructor
+    uint64_t sb_mask_ = 0; // (1 << log2_sb_) - 1: a hit's byte offset inside its segment
     uint64_t num_buckets_ = 1;
     uint64_t cur_segment_ = 0; // this segment's ring slot, in [0, num_buckets_) -- see wrap_ring
 
