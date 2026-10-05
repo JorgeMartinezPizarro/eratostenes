@@ -754,13 +754,16 @@ private:
     void process_big() {
         const uint32_t slot = static_cast<uint32_t>(cur_segment_);
         uint8_t* const s = reinterpret_cast<uint8_t*>(words_.data());
-        // Local copy of the ring's tail array base: the s[pos] byte store may
-        // alias anything, so tail_.data() would otherwise be reloaded from
-        // `this` on every hit.
-        erat::DenseState** const tails = tail_.data();
+        // This segment's tail pointer, as a pointer: a hit `ahead` segments on
+        // files into tails_cur[ahead], one address computation, with neither
+        // the array base nor the cursor live in the loop (the s[pos] byte
+        // store may alias anything, so tail_.data() would be reloaded from
+        // `this` on every hit, and with both live GCC spilled the base to
+        // the stack and reloaded it per hit -- see docs/RESEARCH.md). The
+        // slow path recovers the slot index from tail_.data().
+        erat::DenseState** const tails_cur = tail_.data() + cur_segment_;
         const uint32_t log2sb = log2_sb_;
         const uint64_t modsb = (uint64_t{1} << log2sb) - 1;
-        const uint64_t cur = cur_segment_;
         while (head_[slot]) {
             Blk* blk = head_[slot];
             erat::DenseState* last_end = tail_[slot];
@@ -828,7 +831,7 @@ private:
                                         // past L2 (1e17-1e18 tails).
                                         const uint64_t t2 = big::TABLE2310[pe & 4095];
                                         const uint64_t np = ((pe >> 12) & 0xffffff) + (pe >> 36) * ((t2 >> 8) & 0xff) + ((t2 >> 16) & 15);
-                                        __builtin_prefetch(tails[cur + (np >> log2sb)], 1, 3);
+                                        __builtin_prefetch(tails_cur[np >> log2sb], 1, 3);
                                     }
                                 }
                             }
@@ -862,15 +865,16 @@ private:
                             }
                         }
                         for (int k = 0; k < U; ++k) {
-                            sl[k] = cur + (pos[k] >> log2sb);
+                            sl[k] = pos[k] >> log2sb; // segments ahead: the slot is tails_cur[sl]
                             e[k] = (ent[k] & ~((uint64_t{1} << 36) - 1)) | nidx[k] | ((pos[k] & modsb) << 12);
                         }
                         for (int k = 0; k < U; ++k) {
-                            erat::DenseState* w = tails[sl[k]];
+                            erat::DenseState** const tp = tails_cur + sl[k];
+                            erat::DenseState* w = *tp;
                             if ((reinterpret_cast<uintptr_t>(w) & (BLK_BYTES - 1)) == 0) [[unlikely]]
-                                w = new_block(static_cast<uint32_t>(sl[k]));
+                                w = new_block(static_cast<uint32_t>(tp - tail_.data()));
                             std::memcpy(w, &e[k], sizeof(uint64_t));
-                            tails[sl[k]] = w + 1;
+                            *tp = w + 1;
                         }
                     }
                 }
@@ -913,15 +917,15 @@ private:
                         }
                         e_keep = a << 9;
                     }
-                    uint64_t sl = cur + (pos >> log2sb);
                     uint64_t e = W2310 ? (e_keep | nidx | ((pos & modsb) << 12))
                                        : (e_keep | nidx | ((pos & modsb) << 32));
-                    erat::DenseState* w = tails[sl];
+                    erat::DenseState** const tp = tails_cur + (pos >> log2sb);
+                    erat::DenseState* w = *tp;
                     // Null (empty slot) or on a block boundary (block full).
                     if ((reinterpret_cast<uintptr_t>(w) & (BLK_BYTES - 1)) == 0) [[unlikely]]
-                        w = new_block(static_cast<uint32_t>(sl));
+                        w = new_block(static_cast<uint32_t>(tp - tail_.data()));
                     std::memcpy(w, &e, sizeof(e));
-                    tails[sl] = w + 1;
+                    *tp = w + 1;
                 }
                 free_.push_back(blk);
                 blk = next_blk;

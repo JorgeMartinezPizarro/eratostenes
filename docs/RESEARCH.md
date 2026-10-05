@@ -3286,10 +3286,42 @@ and 1.74 -> 1.68 s median at 1e16; 4 threads x5 1.22 -> 1.21 (1e14), 1.42
 -> 1.41 (1e15), 1.68 -> 1.66 s (1e16). Same counts throughout, `make test`
 87/87, plus `-s 2000` at 1e10 (thousands of ring wraps) against primecount.
 Kept on the instruction count; cycles:u on the dev PC still to be taken.
+
+Validated the same evening with `scripts/perf_ab.sh` (A = b38e197 in a
+worktree, B = 3234cb3, 1e10 windows, x3). The i5-3470 (4 threads, one per
+core, instructions reproducible to 0.0% between reps): instructions:u
+-2.7 / -3.2 / -3.4 / -3.5% at 1e14..1e17, 3/3 each; cycles:u +1.1% (0/3,
+wall a tie at 1.30 s) at 1e14, -0.5%, -0.7%, -2.7% (3/3 each) at
+1e15..1e17. The i5-13500 server (20 threads, inside the dev container with
+`--cap-add SYS_ADMIN`, ~50 other containers running): the same binary's
+instructions:u varies 30% between reps at 1e14 (233-304 G) -- under
+contention a descheduled worker's run gets stolen and every steal
+re-activates the base primes, so the work itself moves -- and only the
+1e17 tail is conclusive, -6.3% cycles (4/4) with 1e11 windows; 1e14 -3.5%
+(3/4), 1e15/1e16 +1..1.6% (1/4), wall B <= A at every N but one rep. No
+machine loses; the issue-bound HT machines gain more than the Ivy Bridge.
+
 Left in the loop, same session's reading of the asm: the per-iteration
-`modsb` and `tails` reloads and the `movabs` -- `(pos & modsb) << 12`
-could become `pos - ((pos >> log2sb) << log2sb)` on the already computed
-shift (one more ALU op, one fewer live value), untested.
+`modsb` and `tails` reloads and the `movabs`. Tried next, both on the
+laptop with callgrind:
+
+- `(pos & modsb) << 12` as `pos - ((pos >> log2sb) << log2sb)` on the shift
+  already taken for the slot (`ERA_BIG_SUBSHIFT`, removed again): the
+  `modsb` reload goes, but `shlx + sub` is one instruction more per hit than
+  the `and` and the reload was one per two hits: `process_big<true>` 228.6 M
+  -> 231.1 M Ir (+1.1%). **Rejected on the count**, never measured in wall.
+- `tails_cur = tail_.data() + cur_segment_` as the one pointer the loop
+  keeps, a hit filing into `tails_cur[pos >> log2sb]`: neither the array
+  base (reloaded from the stack per hit) nor the cursor (added per hit) is
+  live any more; the slow path recovers the slot index as `tp -
+  tail_.data()`. callgrind: `process_big<true>` 228.6 M -> 223.6 M Ir
+  (**-2.2%**, another instruction per hit); the U = 2 loop 73 -> 71
+  instructions, `lea (%r15,%rdx,8)` straight off the pointer in place of
+  the `mov (%rsp)` reload and the `add`. Correct on the forced-sparse,
+  mod-210, `-s 2000` and 1e15/1e16 tail checks. What is left per
+  iteration: one `modsb` reload and the `movabs` of the 36-bit mask.
+  **Committed for the cycles:u A/B on the i5-3470 and the server** (A =
+  e7a4520, B = this).
 
 ### Activation at the top of N on old cores: 83 ns per prime on Nehalem, two flags to split it (open, 2026-10-04)
 
