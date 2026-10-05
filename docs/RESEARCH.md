@@ -3488,6 +3488,33 @@ constant division), the two table loads and the ring push (~10). The
 division by p was already shown not to be the cost on modern cores (the
 `ERA_FPDIV` entry above).
 
+Measured the same evening (`scripts/perf_ab.sh`, A = e7a4520, B = d7d2203,
+1e10 windows). **i5-13500** (20 threads, in the dev container, x7):
+cycles:u -3.9% (7/7) at 1e14, -0.5%, -3.3% (7/7), -1.6%, **-7.3% (7/7) at
+1e18** with A's spread 1.3%; instructions -7.4 / -3.0 / -5.3 / -6.0 /
+-11.6%. **i5-3470** (4 threads, x5): instructions -2.9 .. -6.5% (5/5) as
+predicted, cycles **+0.8, +1.3, +2.3, +6.5, +15.5%** (0/5 at every N),
+wall 3.43 -> 3.92 s at 1e18. Per-commit bisect there (1e17/1e18, x3):
+4e03879 and 25f5c75 are ties (-0.1 / +0.2%), d7d2203 alone is the +7.7% /
++15.8%. `perf stat` with the memory events: L1 misses, dTLB misses and
+branch misses unchanged, LLC loads *down* (721 M -> 587 M); `perf
+annotate` of `activate` puts 34% of its samples (20% before) on the
+`cmpb` right after the 64-bit `div` -- the skid of the division. Same
+operands, ~35 more cycles per division. Split into two knobs
+(`ERA_ACT_KCUT`, `ERA_ACT_IDX`, eff26f6) and bisected on the i5-3470 against
+HEAD (both on), x3: KCUT off +0.1 / +0.6% cycles (the isqrt bound is the
+better of the two there as well); **IDX off -7.1% / -13.1% (3/3)**, both
+off -7.3 / -13.3%. So the whole loss is deriving `qp` and `ri` from the
+index -- the same `q * 30 + R[j]` arithmetic `wheel_number` does, but
+without the independent `p / 30`, `p % 30` and table work that used to sit
+beside the division. Why removing independent work beside a non-pipelined
+divider costs Ivy Bridge 35 cycles per prime is not explained here, only
+measured (the 2026-10-04 entry above has the same core 83 ns per prime on
+Nehalem for the same loop). **Kept gated:** `ERA_ACT_IDX` defaults to 1
+only with `__BMI2__` (Haswell and newer), 0 otherwise -- the tower and the
+portable build keep the old derivation, `ERA_ACT_KCUT` stays on
+everywhere. Unmeasured in between: Haswell to Skylake clients.
+
 ### i5-3470 profile at 1e12: the med64 tier over the whole-L2 segment is 59% of the cycles (open, 2026-10-04)
 
 First PMU profile of a dense-regime loss on a one-thread-per-core machine

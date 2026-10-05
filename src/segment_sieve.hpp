@@ -114,17 +114,25 @@ static inline uint64_t low_bits(uint64_t v, uint32_t nbits, uint64_t mask) {
 #ifndef ERA_BIG_UNROLL
 #define ERA_BIG_UNROLL 2
 #endif
-// Sparse activation (d7d2203, see docs/RESEARCH.md): ERA_ACT_KCUT=0 restores
+// Sparse activation (d7d2203, see docs/RESEARCH.md). ERA_ACT_KCUT=0 restores
 // the per-prime `p * p >= high_n` test in place of the per-segment isqrt
-// bound; ERA_ACT_IDX=0 recomputes p / 30 and p % 30 from the prime instead
-// of taking them from its wheel index. Both 1 by default; the A/B knobs for
-// the Ivy Bridge regression (-18% instructions, +15% cycles at the 1e18
-// tail on the i5-3470, a tie-to-win everywhere else).
+// bound (on everywhere: neutral-to-better on every core measured).
+// ERA_ACT_IDX=0 recomputes p / 30 and p % 30 from the prime instead of
+// taking them from its wheel index: fewer instructions, and -7.3% cycles
+// at the 1e18 tail on the i5-13500, but +13% on the i5-3470 -- the same
+// division per prime stalls ~35 cycles longer there once the independent
+// work around it is gone (perf annotate, bisected with these knobs). On by
+// default only where BMI2 exists, i.e. Haswell and newer; Ivy Bridge and
+// the portable build take the old derivation.
 #ifndef ERA_ACT_KCUT
 #define ERA_ACT_KCUT 1
 #endif
 #ifndef ERA_ACT_IDX
+#ifdef __BMI2__
 #define ERA_ACT_IDX 1
+#else
+#define ERA_ACT_IDX 0
+#endif
 #endif
 
 class SegmentSieve {
