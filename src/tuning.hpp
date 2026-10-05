@@ -133,7 +133,6 @@ inline SievePlan plan_sieve(Options& opt, const BasePrimes& base, uint64_t base_
     uint64_t l1_bytes = opt.l1_bytes_override ? opt.l1_bytes_override : detect_l1d_cache_bytes();
     cfg.sub_block_bytes = sub_block_from_l1_bytes(l1_bytes);
     uint64_t small_limit = cfg.sub_block_bytes * small_num / small_den;
-    bool sub_block_whole_l1d = false;  // set once the thread count is known, see below
     unsigned l1_big_cores = 0;         // physical cores with the largest L1d (0: unknown)
     uint64_t l1_max = l1_bytes ? l1_bytes : 32 * 1024; // largest per-core L1d (segment ceiling below)
 
@@ -149,46 +148,44 @@ inline SievePlan plan_sieve(Options& opt, const BasePrimes& base, uint64_t base_
     // --l1-bytes) or detection found nothing (non-Linux, sysfs unavailable).
     // Read once: the sparse cutoff below needs it too.
     const CpuCacheTopology topo = detect_cpu_cache_topology();
-    if ((!opt.segment_width_set && !opt.l2_bytes_override) || !opt.l1_bytes_override) {
-        // Only recompute when some CPU's share is genuinely smaller than
-        // cpu0's own -- a uniform machine's minimum trivially equals cpu0's.
-        if (!opt.segment_width_set && !opt.l2_bytes_override && !topo.l2_share.empty() && topo.l2_share[0]) {
-            uint64_t min_l2_share = topo.l2_share[0];
-            for (uint64_t s : topo.l2_share) if (s && s < min_l2_share) min_l2_share = s;
-            if (min_l2_share < topo.l2_share[0]) {
-                seg_k_width = seg_k_width_from_l2_bytes(min_l2_share);
-                opt.segment_width = seg_k_width * WHEEL_MOD / WHEEL_SIZE; // keep the startup log's "segment=" accurate
-            }
+    // Only recompute when some CPU's share is genuinely smaller than
+    // cpu0's own -- a uniform machine's minimum trivially equals cpu0's.
+    if (!opt.segment_width_set && !opt.l2_bytes_override && !topo.l2_share.empty() && topo.l2_share[0]) {
+        uint64_t min_l2_share = topo.l2_share[0];
+        for (uint64_t s : topo.l2_share) if (s && s < min_l2_share) min_l2_share = s;
+        if (min_l2_share < topo.l2_share[0]) {
+            seg_k_width = seg_k_width_from_l2_bytes(min_l2_share);
+            opt.segment_width = seg_k_width * WHEEL_MOD / WHEEL_SIZE; // keep the startup log's "segment=" accurate
         }
-        // L1d: largest, not smallest -- sizing the P-cores' sub-block for
-        // the E-cores' L1d measured slower on the i5-13500, see the same
-        // RESEARCH.md entry.
-        if (!opt.l1_bytes_override && !topo.l1_raw.empty() && topo.l1_raw[0]) {
-            uint64_t max_l1_raw = topo.l1_raw[0];
-            for (uint64_t s : topo.l1_raw) if (s > max_l1_raw) max_l1_raw = s;
-            l1_max = max_l1_raw;
-            if (max_l1_raw > topo.l1_raw[0]) {
-                cfg.sub_block_bytes = sub_block_from_l1_bytes(max_l1_raw);
-                small_limit = cfg.sub_block_bytes * small_num / small_den;
-            }
-            // One thread per core: half the L1d is the per-thread share of
-            // an HT pair, which no thread has to give up when there are no
-            // more threads than physical cores, so the sub-block takes the
-            // whole L1d. Covers machines without SMT (VMs, HT off) and -t
-            // below the core count on SMT machines -- Linux spreads the
-            // threads one per core, P-cores first on a hybrid (checked on
-            // the i5-13500). Only cores with the largest L1d count (each
-            // CPU sharing one L1d instance is 1/sharers of a core): the
-            // whole P-core L1d would overflow an E-core's smaller one.
-            // small_limit stays at the half-L1d value -- letting it grow
-            // with the sub-block measured worse. See
-            // docs/RESEARCH.md#sub-block-the-whole-l1d-when-each-thread-has-a-core-to-itself-kept-2026-10-01.
-            double big_cores = 0;
-            for (size_t c = 0; c < topo.l1_raw.size(); ++c)
-                if (topo.l1_raw[c] == max_l1_raw && topo.l1_sharers[c] > 0) big_cores += 1.0 / topo.l1_sharers[c];
-            l1_big_cores = static_cast<unsigned>(big_cores + 0.5);
-            // Applied below, against the threads that actually run.
+    }
+    // L1d: largest, not smallest -- sizing the P-cores' sub-block for
+    // the E-cores' L1d measured slower on the i5-13500, see the same
+    // RESEARCH.md entry.
+    if (!opt.l1_bytes_override && !topo.l1_raw.empty() && topo.l1_raw[0]) {
+        uint64_t max_l1_raw = topo.l1_raw[0];
+        for (uint64_t s : topo.l1_raw) if (s > max_l1_raw) max_l1_raw = s;
+        l1_max = max_l1_raw;
+        if (max_l1_raw > topo.l1_raw[0]) {
+            cfg.sub_block_bytes = sub_block_from_l1_bytes(max_l1_raw);
+            small_limit = cfg.sub_block_bytes * small_num / small_den;
         }
+        // One thread per core: half the L1d is the per-thread share of
+        // an HT pair, which no thread has to give up when there are no
+        // more threads than physical cores, so the sub-block takes the
+        // whole L1d. Covers machines without SMT (VMs, HT off) and -t
+        // below the core count on SMT machines -- Linux spreads the
+        // threads one per core, P-cores first on a hybrid (checked on
+        // the i5-13500). Only cores with the largest L1d count (each
+        // CPU sharing one L1d instance is 1/sharers of a core): the
+        // whole P-core L1d would overflow an E-core's smaller one.
+        // small_limit stays at the half-L1d value -- letting it grow
+        // with the sub-block measured worse. See
+        // docs/RESEARCH.md#sub-block-the-whole-l1d-when-each-thread-has-a-core-to-itself-kept-2026-10-01.
+        double big_cores = 0;
+        for (size_t c = 0; c < topo.l1_raw.size(); ++c)
+            if (topo.l1_raw[c] == max_l1_raw && topo.l1_sharers[c] > 0) big_cores += 1.0 / topo.l1_sharers[c];
+        l1_big_cores = static_cast<unsigned>(big_cores + 0.5);
+        // Applied in finish_threads, against the threads that actually run.
     }
 
     // Smallest L2 share per hardware thread (sysfs): the whole-L2 base below,
@@ -369,12 +366,11 @@ inline SievePlan plan_sieve(Options& opt, const BasePrimes& base, uint64_t base_
     // is the regime itself), so it only applies inside it.
     constexpr uint64_t SPARSE_QUARTER_MIN_L3_PER_THREAD = 4 * uint64_t{1024} * 1024;
     constexpr uint64_t SPARSE_HALF_MIN_L3_PER_THREAD = 3 * uint64_t{512} * 1024;
+    // cpu0's L3, read once: this gate and the medium-tier prefetch gate below.
+    const CpuCacheInfo l3 = detect_cpu_cache_info(0, 3);
     uint64_t l3_per_thread = 0;
-    {
-        const CpuCacheInfo l3 = detect_cpu_cache_info(0, 3);
-        if (l3.total_bytes && l3.sharers > 0)
-            l3_per_thread = l3.total_bytes / std::max<uint64_t>(1, std::min<uint64_t>(opt.threads, static_cast<uint64_t>(l3.sharers)));
-    }
+    if (l3.total_bytes && l3.sharers > 0)
+        l3_per_thread = l3.total_bytes / std::max<uint64_t>(1, std::min<uint64_t>(opt.threads, static_cast<uint64_t>(l3.sharers)));
     bool sparse_l3_gate = false; // startup log
     if (l3_per_thread >= SPARSE_QUARTER_MIN_L3_PER_THREAD &&
         (sparse_regime || base_limit >= 2 * (seg_k_width / 4))) {
@@ -507,9 +503,9 @@ inline SievePlan plan_sieve(Options& opt, const BasePrimes& base, uint64_t base_
         narrow_k_end = wheel_count_upto(std::min(opt.limit, narrow.width * narrow.width));
         // A --start tail beginning past narrow^2 (split_ranges' first k) has
         // no narrow chunk: skip a second pass over every base prime.
-        uint64_t first_k = wheel_count_upto(opt.start) / 64 * 64; // 0 without --start
+        const uint64_t first_k = opt.start ? wheel_count_upto(opt.start - 1) / 64 * 64 : 0;
         if (first_k < narrow_k_end) classify(narrow, narrow.width * med64_num / med64_den, narrow.width);
-        else narrow_k_end = 0;
+        else { narrow_k_end = 0; narrow_early = false; }
     }
 
     // Steal threshold until the run has measured its own activation cost and
@@ -527,7 +523,7 @@ inline SievePlan plan_sieve(Options& opt, const BasePrimes& base, uint64_t base_
     // (0.5 MB of state), -6.1% at 1e13 (1.6 MB), -12.1% at 1e14. See
     // docs/RESEARCH.md. Undetected L3 -> 1 MiB.
     {
-        uint64_t l3_share = detect_cpu_cache_share(0, 3);
+        uint64_t l3_share = l3.sharers > 0 ? l3.total_bytes / static_cast<uint64_t>(l3.sharers) : 0;
         if (l3_share == 0) l3_share = 1024 * 1024;
         cfg.medium_nta_min_primes = l3_share / 8;
         // --tune medium_nta=1|0 overrides the gate: under a VM the detected
@@ -555,8 +551,8 @@ inline SievePlan plan_sieve(Options& opt, const BasePrimes& base, uint64_t base_
     P.narrow_early = narrow_early;
     P.min_l2_share = min_l2_share;
     P.l1_big_cores = l1_big_cores;
-    P.sub_block_whole_l1d = sub_block_whole_l1d;
-    P.whole_l2_base = whole_l2_base;
+    P.whole_l2_base = whole_l2_base; // sub_block_whole_l1d: set by finish_threads
+
     P.seg_l1_capped_k = seg_l1_capped_k;
     P.seg_uncapped_k = seg_uncapped_k;
     P.seg_unrounded_k = seg_unrounded_k;

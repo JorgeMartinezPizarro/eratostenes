@@ -7,15 +7,13 @@
 // The wheel (which primes to skip up front) is NOT here: it's a
 // compile-time constant in wheel.hpp, on purpose -- see that file.
 
-#include <cstdint>
-#include <string>
-#include <stdexcept>
-#include <cctype>
-#include <cmath>
-#include <thread>
-#include <fstream>
 #include <algorithm>
-#include <vector>
+#include <cctype>
+#include <cstdint>
+#include <cstdio>
+#include <stdexcept>
+#include <string>
+#include <thread>
 
 #include <zstd.h>
 
@@ -328,7 +326,7 @@ inline Options parse_args(int argc, char** argv) {
         } else if (a == "--tune") {
             parse_tune(opt, need_value(i, a.c_str()));
         } else if (!a.empty() && a[0] != '-' && !has_limit) {
-            // Bare positional limit (./eratostenes 1t -c), primesieve-style
+            // Bare positional limit (./eratostenes 1t), primesieve-style
             // -- the only way to give it; there's no -n/--limit flag (one
             // less thing to type, matches primesieve's own CLI). Only ever
             // consumes the *first* such argument; a second one falls

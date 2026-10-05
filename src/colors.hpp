@@ -15,7 +15,7 @@ struct Colors {
     const char* reset;
     const char* bold;
     const char* dim;
-    const char* label;     // field labels (conteo:, escritura:, total:)
+    const char* label;     // field labels (count:, write:, total:)
     const char* time;      // elapsed-time values
     const char* rate;      // primes/s values
     const char* io;        // disk throughput (GB/s) values

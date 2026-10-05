@@ -271,6 +271,13 @@ check_start 9007199254740997 9007199254739761 -t "$THREADS"
 # (3 de mas hasta 2026-10-04).
 check_start 20000000000000000 19999900000000000 -t 2
 check_start 20000000000000000 19999900000000000 -t 1 --tune big2310=0
+# Un primo de arranque cuyo indice de rueda es 63 mod 64 (239 -> 63, 2399 ->
+# 639): split_ranges lo dejaba fuera del primer chunk (una menos que
+# primesieve hasta 2026-10-05); 240 con --start 239 cribaba un rango vacio.
+check_start 1000000 239 -t 2
+check_start 1000000 2399 -t 1
+check_start 240 239
+check_start 241 239
 if "$BIN" 1000000 --start 1000 -o "$WORKDIR/start.txt" >/dev/null 2>&1; then
     printf "FAIL %-40s deberia rechazarse\n" "--start con -o"
     fail=1

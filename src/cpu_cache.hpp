@@ -56,15 +56,6 @@ inline int count_cpu_list(const std::string& s) {
     return count;
 }
 
-// A logical CPU's own EFFECTIVE share (bytes) of a given cache level: that
-// cache instance's total size divided by how many logical CPUs actually
-// share it (read from its "shared_cpu_list", e.g. "0-1" for a
-// hyperthread pair, or "12-15" for 4 E-cores sharing one L2 cluster).
-// This is what detect_cache_bytes() (above) can't tell apart on a hybrid
-// P-core/E-core CPU: it always reads cpu0, so every thread gets sized for
-// cpu0's own cache-sharing situation regardless of which physical core it
-// actually lands on. Returns 0 on any failure (same fallback contract as
-// detect_cache_bytes).
 // A logical CPU's own cache-level total size (bytes) and how many
 // logical CPUs share that instance (its "shared_cpu_list" cardinality).
 // {0, 0} when the level isn't there or sysfs can't be read; sharers alone

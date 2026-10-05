@@ -1,5 +1,3 @@
-| Xeon @2.10GHz, 2 vCPU, third host (operator 3) | -0.1% (overlap) | +0.6% (overlap) |
-| Xeon @2.10GHz, 2 vCPU, other host (operator 1; A spread 7%) | +0.4% (overlap) | +1.0% (overlap) |
 # Research log: tried, measured, reverted
 
 This collects every optimization attempt this project has tried, benchmarked, and
@@ -96,6 +94,8 @@ throughout below).
   - [Medium/sparse cutoff raised above `seg_k_width` (tried, reverted, 2026-09-27)](#mediumsparse-cutoff-raised-above-seg_k_width-tried-reverted-2026-09-27)
   - [EratBig-style sparse tier: forcing a power-of-2 segment width, and `sparse_limit = seg_k_width/4` (all attempts reverted)](#eratbig-style-sparse-tier-forcing-a-power-of-2-segment-width-and-sparse_limit--seg_k_width4-all-attempts-reverted)
   - [`--start`: the primes in the rounded-down head of the first word were counted (bug, fixed 2026-10-04)](#--start-the-primes-in-the-rounded-down-head-of-the-first-word-were-counted-bug-fixed-2026-10-04)
+  - [`--start`: the start itself was dropped when its wheel index was 63 mod 64 (bug, fixed 2026-10-05)](#--start-the-start-itself-was-dropped-when-its-wheel-index-was-63-mod-64-bug-fixed-2026-10-05)
+  - [`ByteCounter`: digit count without `to_chars` (tried, tie, reverted, 2026-10-05)](#bytecounter-digit-count-without-to_chars-tried-tie-reverted-2026-10-05)
 - [arg_parser.hpp](#arg_parserhpp)
   - [`--zstd-level` default: 1 (kept, 2026-09-28)](#--zstd-level-default-1-kept-2026-09-28)
   - [Sub-block size: half the L1d, not all of it (kept, 2026-09-27)](#sub-block-size-half-the-l1d-not-all-of-it-kept-2026-09-27)
@@ -3266,6 +3266,31 @@ Rejected on paper the same night: re-ordering the packed entry (idx | pos
 mask, so moving `pos` to the top saves its mask and adds one on `qp`; the
 repack stays at five operations. Zero change in instruction count.
 
+Done (2026-10-05, laptop i5-1235U under WSL2: no PMU, so instructions by
+callgrind and wall by short interleaved tails): **the wrap mask is gone,
+kept.** `head_`/`tail_` hold 2 x num_buckets_ slots, `cur_segment_` stays
+below num_buckets_ and a hit files into `cur_segment_ + ahead` as is (the
+ring's sizing has ahead < num_buckets_ / 2 for a re-filed hit and
+`file_sparse` already throws past num_buckets_ for an activation); when
+the cursor reaches num_buckets_, `wrap_ring()` copies the upper half of
+both arrays down and zeroes it (the slots below the cursor are drained by
+then), once every num_buckets_ segments. callgrind on the 1e15 tail, 1e8
+window, one thread: `process_big<true>` 233.6 M -> 228.6 M Ir (**-2.2%**),
+`activate` 170.3 M -> 164.7 M (-3.3%, `file_sparse` lost its mask too).
+objdump of the U = 2 loop: 75 -> 73 instructions per pair of hits, exactly
+the two `and 0x8(%rsp)`; the reloads of `tails` (x2) and `modsb` and the
+36-bit `movabs` are still there -- freeing `bmask` did not get GCC to keep
+the rest in registers, so this is 1 of ~47 per hit, not the 2-3 hoped for.
+Wall (1e10 windows, A/B interleaved): 12 threads x6 a tie at 1e14/1e15
+and 1.74 -> 1.68 s median at 1e16; 4 threads x5 1.22 -> 1.21 (1e14), 1.42
+-> 1.41 (1e15), 1.68 -> 1.66 s (1e16). Same counts throughout, `make test`
+87/87, plus `-s 2000` at 1e10 (thousands of ring wraps) against primecount.
+Kept on the instruction count; cycles:u on the dev PC still to be taken.
+Left in the loop, same session's reading of the asm: the per-iteration
+`modsb` and `tails` reloads and the `movabs` -- `(pos & modsb) << 12`
+could become `pos - ((pos >> log2sb) << log2sb)` on the already computed
+shift (one more ALU op, one fewer live value), untested.
+
 ### Activation at the top of N on old cores: 83 ns per prime on Nehalem, two flags to split it (open, 2026-10-04)
 
 The measurement above, taken: i7-620M (Nehalem, 2010), 1e18 tail, 1e11
@@ -3298,6 +3323,8 @@ Results as they come in (1e18 tail, 1e11 window, x2 each):
 | machine | FPDIV | ACT_BATCH |
 |---|---:|---:|
 | Xeon @2.10GHz, 2 vCPU, 96 KiB L1d, 4 MiB L2 (operator 2) | +0.0% (overlap) | +1.6% (2/2 worse) |
+| Xeon @2.10GHz, 2 vCPU, third host (operator 3) | -0.1% (overlap) | +0.6% (overlap) |
+| Xeon @2.10GHz, 2 vCPU, other host (operator 1; A spread 7%) | +0.4% (overlap) | +1.0% (overlap) |
 
 Expected there: a fast divider and an L2 that holds the whole ring's tail
 lines, so the staging pass is pure overhead.
@@ -4406,6 +4433,49 @@ without `--start`) and `SegmentSieve::set_skip_below_k`; `sieve_and_emit`
 marks the indices below it composite before extraction, which also covers
 the old "index 0 is the number 1" line. Test: that 2e16 tail on both wheel
 paths against primecount.
+
+### `--start`: the start itself was dropped when its wheel index was 63 mod 64 (bug, fixed 2026-10-05)
+
+The other end of the same rounding. `split_ranges` took the first chunk's
+start as `wheel_count_upto(start) / 64 * 64`, but `wheel_count_upto(start)`
+is the index of the first number *above* start: when start is on the wheel
+that is one past start's own index, and when that index is 63 mod 64 the
+rounding lands one word *after* start instead of on its word. `skip_below_k`
+(above) was already `wheel_count_upto(start - 1)`, so the two disagreed by one
+index exactly there, and a prime start was lost. Found by a sweep of
+`--start` values against `primesieve START N -c` on the laptop (2026-10-05,
+code review): 239, 2399 and 4799 (indices 63, 639, 1279) each counted one
+prime short of primesieve at N = 1e6; 241, 251, 1979, 2401, 4801 agreed. A
+corollary: `240 --start 239` produced an empty `ranges` and `main` indexed
+`ranges.back()` -- a segfault. One start in 64 that is itself prime, so
+neither the benchmark tails (powers of ten) nor the suite's starts had hit
+it. Fix: `start - 1` in `split_ranges` and in `tuning.hpp`'s `first_k`
+(the narrow-segment skip used the same expression), plus an explicit
+empty-`ranges` exit in `main`. Tests: `--start 239` and `2399` at 1e6,
+`240 --start 239` (1) and `241 --start 239` (2).
+
+### `ByteCounter`: digit count without `to_chars` (tried, tie, reverted, 2026-10-05)
+
+The text output's counting pass (`count_worker`, `ByteCounter`) ran a full
+`std::to_chars` per prime only to read the digit count off the returned
+pointer. Replaced with a cached decade: `[lo, hi)` and its digit count from
+the previous prime, two compares per call (the primes of a chunk come in
+increasing order, so both predict), a recount from scratch when the value
+falls outside. Byte-identical output at 1e8. Laptop (12T, WSL2, wall of
+the `count:` line, old/new interleaved, 1e9): 12 threads 0.12-0.16 s both;
+1 thread, 8 pairs, old min/median 0.55/0.56 s, new 0.56/0.57 s (max 0.61).
+A tie or a hair worse; the conversion was never the cost. What is: the
+count pass at one thread takes 0.56 s where the count-only run of the same
+N takes 0.20 s (primesieve: 0.12 s), so `emit_values` (the ctz walk and the
+wheel index -> value rebuild per prime) plus the sink is ~7 ns per prime,
+two thirds of the pass; the write pass (0.9 s) adds `to_chars` and `pwrite`
+on top, ~14 ns per prime over the sieve. `perf record -e cpu-clock` (WSL2
+has no hardware counters) can't split it further: with `-flto` the whole
+pass is one inlined symbol, `sieve_chunk<ByteCounter>` (40% of the text
+run) and the write pass's worker lambda (44%), the `cross_off<PR>` kernels
+that are separate symbols in a count-only profile don't appear at all. A
+real look at `emit_values` needs it pinned `noinline` first, as the tier
+kernels are. Reverted to `to_chars`.
 
 ## arg_parser.hpp
 

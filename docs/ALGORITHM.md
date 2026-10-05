@@ -227,9 +227,12 @@ sparse, then extraction.
   means "full", so there's no count field; 4 KiB rather than the earlier 1 KiB
   is -4..-8% on the 1e15-1e18 tails, see RESEARCH.md); hits are byte marks stepped with
   `big::TABLE2310` (mod-2310, §2; each entry one 64-bit word, class/phase index |
-  byte position << 12 | qp << 36); the slot is `byte position >> log2(segment bytes)`,
-  so whenever any prime is sparse `tuning.hpp` floors the segment to a power of 2
-  bytes. The next block of a chain is prefetched once per block, since pooled
+  byte position << 12 | qp << 36); the slot is the current one plus
+  `byte position >> log2(segment bytes)`, so whenever any prime is sparse
+  `tuning.hpp` floors the segment to a power of 2 bytes. The ring holds twice
+  the slots it needs and the cursor is reset by shifting the upper half down
+  once it reaches the midpoint (`wrap_ring`), so the hot loop has no wrap mask.
+  The next block of a chain is prefetched once per block, since pooled
   blocks are scattered in memory. [RESEARCH.md](RESEARCH.md#segment_sievehpp)
   has the history of the earlier designs.
 

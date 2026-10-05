@@ -10,7 +10,9 @@
 // output at ~260 MB/s on an NVMe RAID0 (i5-13500, 1e12: 77 s against a
 // 43 s CPU floor) -- see docs/RESEARCH.md#db-output-where-the-time-goes.
 
+#include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
@@ -19,14 +21,20 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+// Whether `path` ends in ".db", case-insensitively: what selects the .db
+// output mode (main.cpp's is_db_output) and what blk_path_for replaces.
+inline bool has_db_suffix(const std::string& path) {
+    const std::string suffix = ".db";
+    return path.size() >= suffix.size() &&
+           std::equal(suffix.rbegin(), suffix.rend(), path.rbegin(), [](char a, char b) {
+               return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b));
+           });
+}
+
 // "dir/primes.db" -> "dir/primes.blk" (a ".db" suffix is replaced, anything
 // else gets ".blk" appended).
 inline std::string blk_path_for(const std::string& db_path) {
-    const std::string suffix = ".db";
-    if (db_path.size() >= suffix.size() &&
-        std::equal(suffix.rbegin(), suffix.rend(), db_path.rbegin(),
-                   [](char a, char b) { return std::tolower(static_cast<unsigned char>(a)) == std::tolower(static_cast<unsigned char>(b)); }))
-        return db_path.substr(0, db_path.size() - suffix.size()) + ".blk";
+    if (has_db_suffix(db_path)) return db_path.substr(0, db_path.size() - 3) + ".blk";
     return db_path + ".blk";
 }
 

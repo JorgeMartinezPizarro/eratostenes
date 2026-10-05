@@ -29,7 +29,7 @@
 #include "wheel210_big.hpp"
 
 static_assert(WHEEL_MOD == 30 && WHEEL_SIZE == 8,
-              "erat_small.hpp: el marcado desenrollado por bytes solo existe para la rueda mod 30");
+              "erat_small.hpp: the unrolled byte marking only exists for the mod-30 wheel");
 
 namespace erat {
 

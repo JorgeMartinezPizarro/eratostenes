@@ -44,7 +44,6 @@
 // directly instead of being found by sieving.
 
 #include <algorithm>
-#include <cctype>
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
@@ -76,16 +75,11 @@
 
 namespace fs = std::filesystem;
 
-// Dispatches -o/--output on its extension: ".db" (case-insensitive) means
-// the SQLite + zstd gap-encoded format (gap_block_sink.hpp,
-// sqlite_prime_store.hpp); anything else keeps the original one-prime-per-
-// line text format.
-static bool is_db_output(const std::string& path) {
-    fs::path p(path);
-    std::string ext = p.extension().string();
-    for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    return ext == ".db";
-}
+// Dispatches -o/--output on its extension: ".db" (case-insensitive, the same
+// test blk_path_for applies) means the SQLite + zstd gap-encoded format
+// (gap_block_sink.hpp, sqlite_prime_store.hpp); anything else keeps the
+// original one-prime-per-line text format.
+static bool is_db_output(const std::string& path) { return has_db_suffix(path); }
 
 // Writes a (small, already-known) list of primes straight into a .db store,
 // with no threading -- used by the tiny-N early-return paths below, where
@@ -126,31 +120,36 @@ struct ChunkStats {
 };
 static thread_local ChunkStats t_chunk_stats;
 
-// Splits the wheel indices into 'threads' chunks as evenly as possible, each
+// Splits the wheel indices into `chunks` chunks as evenly as possible, each
 // (but the last) a whole number of `align` indices -- the segment width, so a
 // worker can carry its sieve from one chunk into the next (sieve_chunk).
 // k=0 is the number 1 (not prime; SegmentSieve clears it itself);
 // k_end_exclusive is wheel_count_upto(limit), the first index whose number
 // exceeds limit.
-static std::vector<ChunkRange> split_ranges(uint64_t limit, unsigned threads, uint64_t start, uint64_t align) {
+static std::vector<ChunkRange> split_ranges(uint64_t limit, unsigned chunks, uint64_t start, uint64_t align) {
     std::vector<ChunkRange> ranges;
     // Starts at k=0 (the number 1, cleared by SegmentSieve itself) rather
     // than k=1, and every chunk boundary is a multiple of 64: the
     // byte-addressed dense tiers (erat_small.hpp) need each segment to
     // start on a word boundary. `start` > 0 (--start, see main)
     // sieves only the tail [start, limit], rounded down to that boundary.
-    uint64_t k_start = start ? wheel_count_upto(start) / 64 * 64 : 0;
+    // wheel_count_upto(start - 1) is the index of the first number >= start
+    // (the same index SieveConfig::skip_below_k holds); wheel_count_upto(start)
+    // is one past it when start is on the wheel, which left `start` itself
+    // out whenever its index was 63 mod 64 (239, 2399, 4799: one prime
+    // short of primesieve, found 2026-10-05).
+    uint64_t k_start = start ? wheel_count_upto(start - 1) / 64 * 64 : 0;
     uint64_t k_end = wheel_count_upto(limit);
     if (k_end <= k_start) return ranges;
 
     uint64_t total = k_end - k_start;
-    uint64_t per_thread = (total + threads - 1) / threads;
-    per_thread = (per_thread + align - 1) / align * align; // align: a multiple of 64
+    uint64_t per_chunk = (total + chunks - 1) / chunks;
+    per_chunk = (per_chunk + align - 1) / align * align; // align: a multiple of 64
 
     uint64_t cursor = k_start;
     uint64_t remaining = total;
-    for (unsigned t = 0; t < threads && remaining > 0; ++t) {
-        uint64_t take = std::min(per_thread, remaining);
+    for (unsigned t = 0; t < chunks && remaining > 0; ++t) {
+        uint64_t take = std::min(per_chunk, remaining);
         uint64_t low = cursor;
         uint64_t high = low + take; // exclusive
         ranges.push_back({low, high});
@@ -739,14 +738,16 @@ int main(int argc, char** argv) {
     // run_parallel_chunks for why: work per chunk isn't uniform across the
     // range) and hand them out from a shared queue instead of one static
     // chunk per thread.
-    // Floored so each chunk spans at least MIN_SEGS_PER_CHUNK (4) segments: at
-    // small N, threads*150 chunks would be narrower than one segment, and
-    // per-chunk setup (SegmentSieve, re-activating every base prime) would
-    // dominate. No effect at large N, where chunks span thousands of
-    // segments. See
-    // docs/RESEARCH.md#chunk-width-floor-at-least-4-segments-per-chunk-kept-2026-09-27.
+    // Floored so each chunk spans at least MIN_SEGS_PER_CHUNK segments (1 by
+    // default, --tune minsegs=N): at small N, threads*150 chunks would be
+    // narrower than one segment, and per-chunk setup (SegmentSieve,
+    // re-activating every base prime) would dominate. No effect at large N,
+    // where chunks span thousands of segments. See
+    // docs/RESEARCH.md#chunk-width-floor-at-least-4-segments-per-chunk-kept-2026-09-27
+    // (4 until 2026-10-02, when sieve_chunk started carrying the sieve
+    // across a worker's consecutive chunks).
     constexpr unsigned CHUNKS_PER_THREAD = 150;
-    const uint64_t MIN_SEGS_PER_CHUNK = opt.minsegs; // default 1 (--tune minsegs=N); 4 until 2026-10-02, see docs/RESEARCH.md
+    const uint64_t MIN_SEGS_PER_CHUNK = opt.minsegs;
     uint64_t width_cap = wheel_count_upto(opt.limit) / (MIN_SEGS_PER_CHUNK * P.seg_k_width);
     // No floor of one chunk per thread either: a range under threads *
     // MIN_SEGS_PER_CHUNK segments runs on fewer threads (actual_threads
@@ -778,7 +779,7 @@ int main(int argc, char** argv) {
         // tail, i5-13500, 20 threads, back when each chunk re-activated every
         // base prime).
         constexpr uint64_t TAIL_CHUNKS_PER_THREAD = 32;
-        uint64_t span_k = wheel_count_upto(opt.limit) - wheel_count_upto(range_start);
+        uint64_t span_k = wheel_count_upto(opt.limit) - wheel_count_upto(range_start - 1);
         double frac = static_cast<double>(span_k) / static_cast<double>(wheel_count_upto(opt.limit));
         uint64_t scaled = static_cast<uint64_t>(target_chunks * frac + 0.5);
         uint64_t floor_chunks = std::min<uint64_t>(uint64_t{opt.threads} * TAIL_CHUNKS_PER_THREAD,
@@ -786,6 +787,15 @@ int main(int argc, char** argv) {
         target_chunks = static_cast<unsigned>(std::max<uint64_t>({uint64_t{1}, scaled, floor_chunks}));
     }
     auto ranges = split_ranges(opt.limit, target_chunks, range_start, P.seg_k_width);
+    if (ranges.empty()) {
+        // Can't happen with start < limit (the index just below a multiple
+        // of 64 is always residue 29, so the next wheel number is 2 away),
+        // but the passes below index ranges.back(): say so instead of
+        // faulting if that invariant ever breaks.
+        std::fprintf(stderr, "Done. 0 primes found in [%llu, %llu].\n",
+                     static_cast<unsigned long long>(range_start), static_cast<unsigned long long>(opt.limit));
+        return 0;
+    }
     unsigned num_chunks = static_cast<unsigned>(ranges.size());
     unsigned actual_threads = std::min<unsigned>(opt.threads, num_chunks);
 

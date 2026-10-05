@@ -1,9 +1,9 @@
 #pragma once
 // "Sinks" for SegmentSieve: three ways to consume the primes it finds.
 //
-//  - NullSink: does nothing at all. Used for --count-only, where we only
-//    care about the total count (already tracked by sieve_and_emit itself)
-//    and want to skip both the to_chars conversion and any I/O.
+//  - NullSink: does nothing at all. Used in count mode (no -o), where we
+//    only care about the total count (already tracked by sieve_and_emit
+//    itself) and want to skip both the to_chars conversion and any I/O.
 //
 //  - ByteCounter: writes nothing, just counts how many bytes the result
 //    would take as text (digits + newline). Used in a first pass, with no
@@ -23,7 +23,7 @@
 
 struct NullSink {
     // Tells SegmentSieve::sieve_and_emit's extraction loop it never needs
-    // an actual prime value out of a set bit -- --count-only (the only
+    // an actual prime value out of a set bit -- count mode (the only
     // user of NullSink) only wants how many bits are set, so that loop can
     // skip straight to a popcount per word instead of decoding each one
     // (ctz + wheel-index-to-value math) just to hand it to this no-op.
@@ -35,6 +35,10 @@ struct ByteCounter {
     static constexpr bool WANTS_VALUES = true;
     uint64_t total_bytes = 0;
 
+    // to_chars for the digit count: a cached-decade counter (two predicted
+    // compares per prime, the primes of a chunk arrive in increasing order)
+    // was a tie at 1e9, the conversion isn't where this pass spends its
+    // time -- see docs/RESEARCH.md#bytecounter-digit-count-without-to_chars-tried-tie-reverted-2026-10-05.
     void write_uint64(uint64_t v) {
         char scratch[24];
         auto res = std::to_chars(scratch, scratch + sizeof(scratch), v);

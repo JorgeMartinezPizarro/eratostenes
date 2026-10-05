@@ -175,10 +175,14 @@ public:
         uint64_t ahead = (maxstep >> log2_sb_) + 2;
         num_buckets_ = 1;
         while (num_buckets_ < ahead * 2) num_buckets_ <<= 1; // power of 2, 2x margin
-        head_.assign(num_buckets_, nullptr);
-        tail_.assign(num_buckets_, nullptr);
+        // Twice num_buckets_ slots, so a hit's slot is plainly cur_segment_ +
+        // ahead (ahead < num_buckets_, cur_segment_ < num_buckets_) and the
+        // hot loop has no wrap mask; wrap_ring() shifts the upper half down
+        // once the cursor reaches num_buckets_. See process_big.
+        head_.assign(2 * num_buckets_, nullptr);
+        tail_.assign(2 * num_buckets_, nullptr);
         if (ERA_ACT_BATCH) {
-            act_groups_.resize(static_cast<size_t>(std::max<uint64_t>(1, num_buckets_ >> 6)));
+            act_groups_.resize(static_cast<size_t>(std::max<uint64_t>(1, (2 * num_buckets_) >> 6)));
             for (std::vector<ActEnt>& g : act_groups_) g.reserve(ACT_GROUP_CAP);
         }
     }
@@ -373,7 +377,7 @@ public:
             if (big2310_) process_big<true>();
             else process_big<false>();
         }
-        ++cur_segment_;
+        if (++cur_segment_ == num_buckets_) wrap_ring();
 
         // Extraction: bit=0 => prime candidate. Three paths, by what the
         // sink can take (see below).
@@ -738,10 +742,17 @@ private:
     // idx | pos << 12 | qp << 36 and big::TABLE2310 (32-bit rows, next index
     // included) -- same work per hit (38 instructions vs 37), ~9.1% fewer
     // hits. See docs/RESEARCH.md#sparse-tier-mod-2310-multiplier-wheel-kept-2026-09-30.
+    // Ring slots: this segment's is cur_segment_ (kept below num_buckets_,
+    // see wrap_ring), a hit `ahead` segments on files into cur_segment_ +
+    // ahead, always below the 2 x num_buckets_ slots allocated (the ring's
+    // sizing has ahead < num_buckets_ / 2 for a re-filed hit, and
+    // file_sparse checks ahead < num_buckets_ for an activation). No wrap
+    // mask in the loop: `& bmask` was one of ~47 instructions per hit and
+    // kept bmask live across an issue-bound loop (see docs/RESEARCH.md).
     template <bool W2310>
     __attribute__((noinline))
     void process_big() {
-        const uint32_t slot = static_cast<uint32_t>(cur_segment_ & (num_buckets_ - 1));
+        const uint32_t slot = static_cast<uint32_t>(cur_segment_);
         uint8_t* const s = reinterpret_cast<uint8_t*>(words_.data());
         // Local copy of the ring's tail array base: the s[pos] byte store may
         // alias anything, so tail_.data() would otherwise be reloaded from
@@ -749,7 +760,6 @@ private:
         erat::DenseState** const tails = tail_.data();
         const uint32_t log2sb = log2_sb_;
         const uint64_t modsb = (uint64_t{1} << log2sb) - 1;
-        const uint64_t bmask = num_buckets_ - 1;
         const uint64_t cur = cur_segment_;
         while (head_[slot]) {
             Blk* blk = head_[slot];
@@ -818,7 +828,7 @@ private:
                                         // past L2 (1e17-1e18 tails).
                                         const uint64_t t2 = big::TABLE2310[pe & 4095];
                                         const uint64_t np = ((pe >> 12) & 0xffffff) + (pe >> 36) * ((t2 >> 8) & 0xff) + ((t2 >> 16) & 15);
-                                        __builtin_prefetch(tails[(cur + (np >> log2sb)) & bmask], 1, 3);
+                                        __builtin_prefetch(tails[cur + (np >> log2sb)], 1, 3);
                                     }
                                 }
                             }
@@ -852,7 +862,7 @@ private:
                             }
                         }
                         for (int k = 0; k < U; ++k) {
-                            sl[k] = (cur + (pos[k] >> log2sb)) & bmask;
+                            sl[k] = cur + (pos[k] >> log2sb);
                             e[k] = (ent[k] & ~((uint64_t{1} << 36) - 1)) | nidx[k] | ((pos[k] & modsb) << 12);
                         }
                         for (int k = 0; k < U; ++k) {
@@ -903,7 +913,7 @@ private:
                         }
                         e_keep = a << 9;
                     }
-                    uint64_t sl = (cur + (pos >> log2sb)) & bmask;
+                    uint64_t sl = cur + (pos >> log2sb);
                     uint64_t e = W2310 ? (e_keep | nidx | ((pos & modsb) << 12))
                                        : (e_keep | nidx | ((pos & modsb) << 32));
                     erat::DenseState* w = tails[sl];
@@ -954,7 +964,7 @@ private:
                            ((p / WHEEL_MOD) << 36);
             erat::DenseState e;
             std::memcpy(&e, &ent, sizeof(e));
-            stage_sparse_entry(static_cast<uint32_t>((cur_segment_ + ahead) & (num_buckets_ - 1)), e);
+            stage_sparse_entry(static_cast<uint32_t>(cur_segment_ + ahead), e);
             return;
         }
         uint64_t t = m / 210, sres = m % 210;
@@ -972,7 +982,21 @@ private:
                 "bucket sieve: a sparse prime's step exceeds the bucket ring's margin "
                 "(sizing bug in SegmentSieve's constructor)");
         }
-        stage_sparse_entry(static_cast<uint32_t>((cur_segment_ + ahead) & (num_buckets_ - 1)), e);
+        stage_sparse_entry(static_cast<uint32_t>(cur_segment_ + ahead), e);
+    }
+
+    // The ring's cursor reached num_buckets_: every slot below it has been
+    // drained (process_big empties this segment's slot before moving on),
+    // every pending entry sits in [num_buckets_, 2 x num_buckets_). Move
+    // that half down and start the cursor over -- a few hundred pointers
+    // once every num_buckets_ segments, in place of a mask on every hit.
+    void wrap_ring() {
+        const auto nb = static_cast<std::ptrdiff_t>(num_buckets_);
+        std::copy(head_.begin() + nb, head_.end(), head_.begin());
+        std::fill(head_.begin() + nb, head_.end(), nullptr);
+        std::copy(tail_.begin() + nb, tail_.end(), tail_.begin());
+        std::fill(tail_.begin() + nb, tail_.end(), nullptr);
+        cur_segment_ = 0;
     }
 
     // Activation push: straight into the ring, or (ERA_ACT_BATCH) staged in
@@ -1130,7 +1154,7 @@ private:
     uint64_t skip_below_k_ = 1; // first wheel index that counts (set_skip_below_k)
     uint32_t log2_sb_ = 0; // log2(segment width in bytes) -- see constructor
     uint64_t num_buckets_ = 1;
-    uint64_t cur_segment_ = 0;
+    uint64_t cur_segment_ = 0; // this segment's ring slot, in [0, num_buckets_) -- see wrap_ring
 
     size_t next_small_idx_ = 0;
     size_t next_med64_idx_ = 0;
