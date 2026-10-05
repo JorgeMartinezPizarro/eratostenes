@@ -114,6 +114,18 @@ static inline uint64_t low_bits(uint64_t v, uint32_t nbits, uint64_t mask) {
 #ifndef ERA_BIG_UNROLL
 #define ERA_BIG_UNROLL 2
 #endif
+// Sparse activation (d7d2203, see docs/RESEARCH.md): ERA_ACT_KCUT=0 restores
+// the per-prime `p * p >= high_n` test in place of the per-segment isqrt
+// bound; ERA_ACT_IDX=0 recomputes p / 30 and p % 30 from the prime instead
+// of taking them from its wheel index. Both 1 by default; the A/B knobs for
+// the Ivy Bridge regression (-18% instructions, +15% cycles at the 1e18
+// tail on the i5-3470, a tie-to-win everywhere else).
+#ifndef ERA_ACT_KCUT
+#define ERA_ACT_KCUT 1
+#endif
+#ifndef ERA_ACT_IDX
+#define ERA_ACT_IDX 1
+#endif
 
 class SegmentSieve {
 public:
@@ -289,20 +301,41 @@ public:
         // bucket ring, from its index -- the index already holds p / 30 and
         // the residue class, so nothing is divided by 30 per prime.
         size_t sparse_activated = 0;
-        const uint64_t k_cut = wheel_count_upto(isqrt(high_n - 1)); // primes with p*p < high_n have k < k_cut
-        const uint64_t k_stop = std::min(k_cut, sparse_primes.k_end);
         if (next_sparse_k_ < sparse_primes.k_begin) next_sparse_k_ = sparse_primes.k_begin;
-        while (next_sparse_k_ < k_stop) {
-            const uint64_t wi = next_sparse_k_ >> 6;
-            const uint64_t word_end = std::min((wi + 1) << 6, k_stop);
-            uint64_t bits = sparse_primes.words[wi] & (~uint64_t{0} << (next_sparse_k_ & 63));
-            if (word_end & 63) bits &= (uint64_t{1} << (word_end & 63)) - 1; // partial last word
-            while (bits) {
-                file_sparse((wi << 6) + static_cast<uint64_t>(__builtin_ctzll(bits)), low_n, k_low);
-                ++sparse_activated;
-                bits &= bits - 1;
+        if constexpr (ERA_ACT_KCUT) {
+            const uint64_t k_cut = wheel_count_upto(isqrt(high_n - 1)); // primes with p*p < high_n have k < k_cut
+            const uint64_t k_stop = std::min(k_cut, sparse_primes.k_end);
+            while (next_sparse_k_ < k_stop) {
+                const uint64_t wi = next_sparse_k_ >> 6;
+                const uint64_t word_end = std::min((wi + 1) << 6, k_stop);
+                uint64_t bits = sparse_primes.words[wi] & (~uint64_t{0} << (next_sparse_k_ & 63));
+                if (word_end & 63) bits &= (uint64_t{1} << (word_end & 63)) - 1; // partial last word
+                while (bits) {
+                    file_sparse((wi << 6) + static_cast<uint64_t>(__builtin_ctzll(bits)), low_n, k_low);
+                    ++sparse_activated;
+                    bits &= bits - 1;
+                }
+                next_sparse_k_ = word_end;
             }
-            next_sparse_k_ = word_end;
+        } else {
+            // The pre-d7d2203 walk: p * p against high_n per prime.
+            while (next_sparse_k_ < sparse_primes.k_end) {
+                const uint64_t wi = next_sparse_k_ >> 6;
+                const uint64_t word_end = std::min((wi + 1) << 6, sparse_primes.k_end);
+                uint64_t bits = sparse_primes.words[wi] & (~uint64_t{0} << (next_sparse_k_ & 63));
+                bool reached = false;
+                while (bits) {
+                    const uint64_t k = (wi << 6) + static_cast<uint64_t>(__builtin_ctzll(bits));
+                    if (k >= word_end) break;
+                    const uint64_t p = wheel_number(k);
+                    if (p * p >= high_n) { next_sparse_k_ = k; reached = true; break; }
+                    file_sparse(k, low_n, k_low);
+                    ++sparse_activated;
+                    bits &= bits - 1;
+                }
+                if (reached) break;
+                next_sparse_k_ = word_end;
+            }
         }
         flush_activation(); // ERA_ACT_BATCH: everything staged lands before this segment is sieved
         return next_small_idx_ + next_med64_idx_ + next_medium_idx_ - before + sparse_activated;
@@ -965,9 +998,18 @@ private:
     // class, which `p % 30` and `WHEEL_POS[]` recomputed per prime (18 of
     // ~83 instructions per activation, callgrind on the 1e17 tail).
     void file_sparse(uint64_t k, uint64_t low_n, uint64_t k_low) {
-        const uint64_t qp = k >> WHEEL_SIZE_LOG2;             // p / WHEEL_MOD
-        const uint64_t ri = k & (WHEEL_SIZE - 1);             // WHEEL_POS[p % WHEEL_MOD]
-        const uint64_t p = qp * WHEEL_MOD + WHEEL_R[ri];
+        uint64_t qp, ri, p;
+        if constexpr (ERA_ACT_IDX) {
+            qp = k >> WHEEL_SIZE_LOG2;             // p / WHEEL_MOD
+            ri = k & (WHEEL_SIZE - 1);             // WHEEL_POS[p % WHEEL_MOD]
+            p = qp * WHEEL_MOD + WHEEL_R[ri];
+        } else {
+            // The pre-d7d2203 derivation, from the prime: a constant division
+            // and a constant modulo per prime.
+            p = wheel_number(k);
+            qp = p / WHEEL_MOD;
+            ri = static_cast<uint64_t>(WHEEL_POS[p % WHEEL_MOD]);
+        }
         uint64_t start_val = std::max(p * p, low_n);
 #if ERA_FPDIV
         // ceil(start_val / p) via a double quotient (53 bits: off by a unit
