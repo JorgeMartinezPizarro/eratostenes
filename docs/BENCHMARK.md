@@ -2,25 +2,45 @@
 
 `eratostenes` against [primesieve](https://github.com/kimwalisch/primesieve), one section per machine, newest CPU first: the count table (`make benchmark`, pi(N)) and the tails table (`make benchmark-tails`, the last 1e11 numbers below each N), same thread count for both programs. Ratio = eratostenes / primesieve: below 1 means eratostenes is faster. Each time is the mean of REPS interleaved pairs (eratostenes, primesieve, eratostenes, ...); the line under each machine says how many, with the commit measured.
 
-## Intel Xeon Emerald Rapids (claude.ai sandbox)
+## Intel Xeon Emerald Rapids (claude.ai sandbox, host 1)
 
-Intel Xeon @ 2.10GHz (Emerald Rapids, 2023), 2 vCPU.
-
-| N | eratostenes | primesieve | ratio |
-|---|---:|---:|---:|
-| 1e10 | 0.76s | 0.751s | 1.01x |
-| 1e11 | 9.05s | 9.172s | 0.99x |
-| 1e12 | 108.78s | 112.085s | 0.97x |
-| 1e13 | 1358.15s | 1428.372s | 0.95x |
+Intel Xeon @ 2.10GHz (Emerald Rapids, 2023, family 6 model 207), 2 vCPU KVM (1 per core), 7.8 GiB. L1d 48 KiB and L2 2 MiB per core; L3 260 MiB. primesieve 12.0; eratostenes 5f7d213; mean of 3, pairs interleaved. Two sandboxes with this CPU model land on different hosts; both are listed.
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
-| 1e13 | 11.82s | 12.632s | 0.94x |
-| 1e14 | 14.30s | 15.028s | 0.95x |
-| 1e15 | 16.63s | 17.237s | 0.96x |
-| 1e16 | 19.55s | 21.624s | 0.90x |
-| 1e17 | 21.70s | 21.963s | 0.99x |
-| 1e18 | 25.58s | 26.598s | 0.96x |
+| 1e10 | 0.69s | 0.673s | 1.03x |
+| 1e11 | 8.43s | 7.626s | 1.11x |
+| 1e12 | 103.02s | 98.325s | 1.05x |
+| 1e13 | 1236.22s | 1236.634s | 1.00x |
+
+| N | eratostenes | primesieve | ratio |
+|---|---:|---:|---:|
+| 1e13 | 13.57s | 13.542s | 1.00x |
+| 1e14 | 15.09s | 16.355s | 0.92x |
+| 1e15 | 18.03s | 20.569s | 0.88x |
+| 1e16 | 20.74s | 23.390s | 0.89x |
+| 1e17 | 23.92s | 27.516s | 0.87x |
+| 1e18 | 29.19s | 33.746s | 0.86x |
+
+## Intel Xeon Emerald Rapids (claude.ai sandbox, host 2)
+
+Same CPU model and VM shape as host 1. primesieve 12.0; eratostenes 5f7d213; mean of 3, pairs interleaved.
+
+| N | eratostenes | primesieve | ratio |
+|---|---:|---:|---:|
+| 1e10 | 0.74s | 0.709s | 1.04x |
+| 1e11 | 8.93s | 8.640s | 1.03x |
+| 1e12 | 104.44s | 107.871s | 0.97x |
+| 1e13 | 1212.70s | 1343.147s | 0.90x |
+
+| N | eratostenes | primesieve | ratio |
+|---|---:|---:|---:|
+| 1e13 | 13.39s | 15.450s | 0.87x |
+| 1e14 | 15.96s | 17.067s | 0.94x |
+| 1e15 | 18.39s | 21.681s | 0.85x |
+| 1e16 | 20.60s | 21.764s | 0.95x |
+| 1e17 | 23.40s | 26.987s | 0.87x |
+| 1e18 | 26.59s | 31.251s | 0.85x |
 
 ## Intel Core i5-13500
 
@@ -85,23 +105,23 @@ Intel Core i5-11400F (Rocket Lake, 2021).
 
 ## Intel Xeon @ 2.80GHz (claude.ai sandbox)
 
-Intel Xeon @ 2.80GHz (Cascade Lake, 2019), 2 vCPU, 8 GB.
+Intel Xeon @ 2.80GHz (Cascade Lake, 2019; the hypervisor hides the exact model), 2 vCPU KVM (1 per core), 7 GB. L1d 32 KiB and L2 1 MiB per core; L3 33 MiB. primesieve 12.0; eratostenes 5f7d213; mean of 3, pairs interleaved.
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
-| 1e10 | 0.80s | 0.869s | 0.92x |
-| 1e11 | 9.32s | 9.739s | 0.96x |
-| 1e12 | 114.25s | 119.365s | 0.96x |
-| 1e13 | 1502.30s | 1478.500s | 1.02x |
+| 1e10 | 0.71s | 0.704s | 1.01x |
+| 1e11 | 8.79s | 7.991s | 1.10x |
+| 1e12 | 101.45s | 101.123s | 1.00x |
+| 1e13 | 1270.35s | 1265.516s | 1.00x |
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
-| 1e13 | 14.19s | 13.911s | 1.02x |
-| 1e14 | 17.69s | 16.266s | 1.09x |
-| 1e15 | 20.80s | 18.940s | 1.10x |
-| 1e16 | 24.07s | 21.798s | 1.10x |
-| 1e17 | 28.56s | 27.080s | 1.05x |
-| 1e18 | 33.57s | 32.590s | 1.03x |
+| 1e13 | 14.97s | 13.984s | 1.07x |
+| 1e14 | 17.00s | 16.635s | 1.02x |
+| 1e15 | 20.26s | 20.990s | 0.97x |
+| 1e16 | 23.15s | 23.547s | 0.98x |
+| 1e17 | 25.60s | 26.244s | 0.98x |
+| 1e18 | 28.87s | 32.806s | 0.88x |
 
 ## Intel Core i5-3470
 
