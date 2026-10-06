@@ -4,7 +4,7 @@
 
 ## Intel Xeon Emerald Rapids (claude.ai sandbox, host 1)
 
-Intel Xeon @ 2.10GHz (Emerald Rapids, 2023, family 6 model 207), 2 vCPU KVM (1 per core), 7.8 GiB. L1d 48 KiB and L2 2 MiB per core; L3 260 MiB. primesieve 12.0; eratostenes 3172ea8; mean of 3, pairs interleaved. Two sandboxes with this CPU model land on different hosts; both are listed.
+Intel Xeon @ 2.10GHz (Emerald Rapids, 2023, family 6 model 207), 2 vCPU KVM (1 per core), 7.8 GiB. L1d 48 KiB and L2 2 MiB per core; L3 260 MiB. primesieve 12.0; mean of 3, pairs interleaved; counts eratostenes 3172ea8, tails b53a814 (2026-10-07). Two sandboxes with this CPU model land on different hosts; both are listed (which host a sandbox lands on can't be told from inside, so the two sections are two samples, not two fixed machines).
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
@@ -15,16 +15,16 @@ Intel Xeon @ 2.10GHz (Emerald Rapids, 2023, family 6 model 207), 2 vCPU KVM (1 p
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
-| 1e13 | 14.12s | 13.817s | 1.02x |
-| 1e14 | 15.59s | 16.130s | 0.97x |
-| 1e15 | 17.92s | 20.449s | 0.88x |
-| 1e16 | 21.46s | 21.892s | 0.98x |
-| 1e17 | 24.61s | 28.304s | 0.87x |
-| 1e18 | 28.77s | 34.565s | 0.83x |
+| 1e13 | 13.92s | 13.944s | 1.00x |
+| 1e14 | 14.82s | 16.725s | 0.89x |
+| 1e15 | 17.42s | 19.058s | 0.91x |
+| 1e16 | 19.37s | 20.665s | 0.94x |
+| 1e17 | 21.98s | 26.557s | 0.83x |
+| 1e18 | 25.79s | 31.834s | 0.81x |
 
 ## Intel Xeon Emerald Rapids (claude.ai sandbox, host 2)
 
-Same CPU model and VM shape as host 1. primesieve 12.0; eratostenes 3172ea8; mean of 3, pairs interleaved.
+Same CPU model and VM shape as host 1. primesieve 12.0; mean of 3, pairs interleaved; counts eratostenes 3172ea8, tails b53a814 (2026-10-07).
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
@@ -35,12 +35,12 @@ Same CPU model and VM shape as host 1. primesieve 12.0; eratostenes 3172ea8; mea
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
-| 1e13 | 13.25s | 14.602s | 0.91x |
-| 1e14 | 16.14s | 17.388s | 0.93x |
-| 1e15 | 18.34s | 19.962s | 0.92x |
-| 1e16 | 20.81s | 22.838s | 0.91x |
-| 1e17 | 23.36s | 27.046s | 0.86x |
-| 1e18 | 26.52s | 30.806s | 0.86x |
+| 1e13 | 12.60s | 12.603s | 1.00x |
+| 1e14 | 13.78s | 15.439s | 0.89x |
+| 1e15 | 15.89s | 18.023s | 0.88x |
+| 1e16 | 18.72s | 22.062s | 0.85x |
+| 1e17 | 21.73s | 25.446s | 0.85x |
+| 1e18 | 24.30s | 30.074s | 0.81x |
 
 ## Intel Core i5-13500
 
@@ -105,7 +105,7 @@ Intel Core i5-11400F (Rocket Lake, 2021).
 
 ## Intel Xeon @ 2.80GHz (claude.ai sandbox)
 
-Intel Xeon @ 2.80GHz (Cascade Lake, 2019; the hypervisor hides the exact model), 2 vCPU KVM (1 per core), 7 GB. L1d 32 KiB and L2 1 MiB per core; L3 33 MiB. primesieve 12.0; eratostenes 3172ea8; mean of 3, pairs interleaved.
+Intel Xeon @ 2.80GHz (Cascade Lake, 2019; the hypervisor hides the exact model), 2 vCPU KVM (1 per core), 7 GB. L1d 32 KiB and L2 1 MiB per core; L3 33 MiB. primesieve 12.0; mean of 3, pairs interleaved; counts eratostenes 3172ea8, tails b53a814 (2026-10-07).
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
@@ -116,12 +116,12 @@ Intel Xeon @ 2.80GHz (Cascade Lake, 2019; the hypervisor hides the exact model),
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
-| 1e13 | 14.26s | 14.310s | 1.00x |
-| 1e14 | 17.41s | 17.225s | 1.01x |
-| 1e15 | 21.05s | 20.327s | 1.04x |
-| 1e16 | 23.50s | 24.398s | 0.96x |
-| 1e17 | 26.97s | 27.740s | 0.97x |
-| 1e18 | 30.48s | 34.380s | 0.89x |
+| 1e13 | 15.01s | 14.209s | 1.06x |
+| 1e14 | 17.06s | 16.835s | 1.01x |
+| 1e15 | 19.31s | 21.109s | 0.91x |
+| 1e16 | 22.08s | 22.235s | 0.99x |
+| 1e17 | 24.69s | 26.471s | 0.93x |
+| 1e18 | 28.30s | 33.352s | 0.85x |
 
 ## Intel Core i5-3470
 

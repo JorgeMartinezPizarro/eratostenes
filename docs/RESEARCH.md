@@ -3469,6 +3469,20 @@ no N worse beyond its noise on either machine, -0.5..-1.9% with one thread
 per core, -1.2..-4.7% wall at 1e16-1e18 with HT pairs, where the loop is
 issue-bound as predicted.
 
+The three claude.ai sandboxes (2 vCPU, one per core, wall only, b53a814
+against its `-DERA_BIG_FASTBLK=0` build, last 1e11 below N, x3; delta of
+the means, pairs where B is lower):
+
+| sandbox | 1e15 | 1e16 | 1e17 | 1e18 |
+|---|---:|---:|---:|---:|
+| Emerald Rapids, first | +1.71% (1/3) | -2.42% (3/3) | -1.33% (3/3) | -2.39% (3/3) |
+| Emerald Rapids, second | +0.36% (2/3) | -1.27% (3/3) | -3.59% (3/3) | -0.77% (2/3) |
+| Xeon @ 2.80GHz (Cascade Lake) | -2.72% (3/3) | -0.22% (2/3) | -2.65% (3/3) | -6.10% (3/3) |
+
+1e16-1e18 gain on every machine, more than the one-thread-per-core
+prediction said; 1e15 is mixed on Emerald Rapids (the first sandbox's B
+runs drifted up through the series, 17.17 -> 18.37 s).
+
 ### Activation at the top of N on old cores: 83 ns per prime on Nehalem, two flags to split it (open, 2026-10-04)
 
 The measurement above, taken: i7-620M (Nehalem, 2010), 1e18 tail, 1e11
@@ -3646,6 +3660,18 @@ everywhere. Unmeasured in between: Haswell to Skylake clients. Confirmed on
 the i5-3470 (5f7d213 vs 25f5c75, 1e17/1e18, x3): cycles +0.5% / +0.3%
 inside A's spread, instructions -0.8% / -1.6% -- a tie, the regression
 gone; the i5-13500's binary is unchanged from the d7d2203 measurement.
+
+**Cascade Lake (2026-10-07): the gate is right there, and the divider is
+not the explanation.** The `__BMI2__` gate turns `ERA_ACT_IDX` on for the
+whole Skylake family, which kept the slow non-pipelined 64-bit `div` of
+Ivy Bridge until Ice Lake -- so if the divider were the mechanism, the Xeon
+@ 2.80GHz sandbox (Cascade Lake) should lose like the i5-3470. It doesn't.
+b53a814 (index derivation) against its `-DERA_ACT_IDX=0` build, last 1e10
+below N, x3, wall: **-3.12% at 1e17 and -4.05% at 1e18, 3/3 both**. The two
+Emerald Rapids sandboxes: -2.78% and -1.17% at 1e18 (3/3 both), +4.40% and
++1.23% at 1e17 inside a 4-9% spread of 2.4-2.6 s runs. Gate unchanged;
+whatever costs Ivy Bridge 35 cycles per prime without the independent work,
+a slow divider alone does not reproduce it on Skylake-SP.
 
 ### i5-3470 profile at 1e12: the med64 tier over the whole-L2 segment is 59% of the cycles (open, 2026-10-04)
 
