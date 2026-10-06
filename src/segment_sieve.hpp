@@ -70,6 +70,15 @@ constexpr double MEDIUM_BAND_MAX_HITS = 8.0;
 #ifndef ERA_BIG_PFSPREAD
 #define ERA_BIG_PFSPREAD 1
 #endif
+// Sparse tier: process_big's mod-2310 loop in groups of 4 entries whose
+// count is worked out once per block, so the per-iteration tests that only
+// matter at a block's edges (is the next-block spread still running, is the
+// entry ERA_BIG_PF ahead still inside the block) leave the loop, and the
+// spread issues one prefetch per line instead of one per pair of entries.
+// -DERA_BIG_FASTBLK=0 restores the single loop with the tests (A/B).
+#ifndef ERA_BIG_FASTBLK
+#define ERA_BIG_FASTBLK 1
+#endif
 // Sparse activation experiments (--debug-idle prints the per-prime cost):
 // ERA_FPDIV=1 computes the first multiplier with a double division plus an
 // exact fixup instead of a 64-bit integer division (slow on pre-Ice-Lake
@@ -865,42 +874,39 @@ private:
                 // wrote. The constexpr inner loops unroll fully at -O3.
                 if constexpr (W2310 && ERA_BIG_UNROLL > 1) {
                     constexpr int U = ERA_BIG_UNROLL;
-                    for (; it + U <= end; it += U) {
-                        uint64_t ent[U], pos[U], te[U], e[U], sl[U];
-                        if constexpr (ERA_BIG_PFSPREAD) {
-                            // Line idx/4 of the next block during entries 0..255
-                            // of this one: 64 lines over half a block, each
-                            // requested twice (U = 2), never in a burst.
-                            const size_t idx = static_cast<size_t>(it - blk_base);
-                            if (idx < BLK_BYTES / 16) __builtin_prefetch(nb + (idx >> 2) * 64, 0, 2);
-                        }
-                        // The segment byte of the entries ERA_BIG_PF ahead
-                        // (same block, stale entries past `end` excluded):
-                        // pos is the entry's own bits, no table needed, and
-                        // that RMW is the load that misses once two threads
-                        // share an L2 (dev PC, 12 threads: -2..-5% at the
-                        // 1e15/1e18 tails; a tie with one thread per core).
-                        // 16 beat 8 and 32; see docs/RESEARCH.md.
+                    // The segment byte of the entries ERA_BIG_PF ahead of p,
+                    // cnt of them (same block, stale entries past `end`
+                    // excluded by the caller): pos is the entry's own bits, no
+                    // table needed, and that RMW is the load that misses once
+                    // two threads share an L2 (dev PC, 12 threads: -2..-5% at
+                    // the 1e15/1e18 tails; a tie with one thread per core). 16
+                    // beat 8 and 32; see docs/RESEARCH.md.
+                    auto seg_pf = [&](const erat::DenseState* p, size_t cnt) __attribute__((always_inline)) {
                         if constexpr (ERA_BIG_PF > 0) {
-                            if (it + ERA_BIG_PF + U <= end) {
-                                for (int k = 0; k < U; ++k) {
-                                    uint64_t pe;
-                                    std::memcpy(&pe, it + ERA_BIG_PF + k, sizeof(uint64_t));
-                                    __builtin_prefetch(s + ((pe >> 12) & 0xffffff), 1, 3);
-                                    if constexpr (ERA_BIG_PFPUSH) {
-                                        // The push target too: the tail block of the
-                                        // slot the entry's NEXT hit files into (its
-                                        // table row and step, computed early), for
-                                        // the regime where the ring's write set is
-                                        // past L2 (1e17-1e18 tails).
-                                        const uint64_t t2 = big::TABLE2310[pe & 4095];
-                                        const uint64_t np = ((pe >> 12) & 0xffffff) + (pe >> 36) * ((t2 >> 8) & 0xff) + ((t2 >> 16) & 15);
-                                        __builtin_prefetch(tails_cur[np >> log2sb], 1, 3);
-                                    }
+                            for (size_t k = 0; k < cnt; ++k) {
+                                uint64_t pe;
+                                std::memcpy(&pe, p + ERA_BIG_PF + k, sizeof(uint64_t));
+                                __builtin_prefetch(s + ((pe >> 12) & 0xffffff), 1, 3);
+                                if constexpr (ERA_BIG_PFPUSH) {
+                                    // The push target too: the tail block of the
+                                    // slot the entry's NEXT hit files into (its
+                                    // table row and step, computed early), for
+                                    // the regime where the ring's write set is
+                                    // past L2 (1e17-1e18 tails).
+                                    const uint64_t t2 = big::TABLE2310[pe & 4095];
+                                    const uint64_t np = ((pe >> 12) & 0xffffff) + (pe >> 36) * ((t2 >> 8) & 0xff) + ((t2 >> 16) & 15);
+                                    __builtin_prefetch(tails_cur[np >> log2sb], 1, 3);
                                 }
                             }
+                        } else {
+                            (void)p; (void)cnt;
                         }
-                        for (int k = 0; k < U; ++k) std::memcpy(&ent[k], it + k, sizeof(uint64_t));
+                    };
+                    // The U entries [p, p + U): loads, table rows and segment
+                    // RMWs first, then the pushes in order.
+                    auto body = [&](const erat::DenseState* p) __attribute__((always_inline)) {
+                        uint64_t ent[U], pos[U], te[U], e[U], sl[U];
+                        for (int k = 0; k < U; ++k) std::memcpy(&ent[k], p + k, sizeof(uint64_t));
                         for (int k = 0; k < U; ++k) {
                             pos[k] = (ent[k] >> 12) & 0xffffff;
                             te[k] = big::TABLE2310[ent[k] & 4095];
@@ -939,6 +945,46 @@ private:
                                 w = new_block(static_cast<uint32_t>(tp - tail_.data()));
                             std::memcpy(w, &e[k], sizeof(uint64_t));
                             *tp = w + 1;
+                        }
+                    };
+                    if constexpr (ERA_BIG_FASTBLK) {
+                        // Groups of G entries, counted once per block: the
+                        // first `spread` groups also prefetch line g of the
+                        // next block (64 lines over the block's first 256
+                        // entries, one request each), the rest only the segment
+                        // bytes ERA_BIG_PF ahead; the last entries, whose
+                        // ERA_BIG_PF-ahead neighbours are past `end`, go
+                        // through the plain pairs. No test inside either loop
+                        // but its own end.
+                        constexpr size_t G = 4;
+                        static_assert(G % U == 0, "ERA_BIG_FASTBLK: ERA_BIG_UNROLL must divide 4");
+                        constexpr size_t PF = ERA_BIG_PF > 0 ? ERA_BIG_PF : 0;
+                        const size_t n = static_cast<size_t>(end - it);
+                        const size_t groups = n >= PF + G ? (n - PF) / G : 0;
+                        const size_t spread = ERA_BIG_PFSPREAD ? std::min<size_t>(groups, BLK_BYTES / 64) : 0;
+                        const char* line = nb;
+                        for (erat::DenseState* const ge = it + spread * G; it != ge; it += G) {
+                            __builtin_prefetch(line, 0, 2);
+                            line += 64;
+                            seg_pf(it, G);
+                            for (size_t k = 0; k < G; k += U) body(it + k);
+                        }
+                        for (erat::DenseState* const ge = it + (groups - spread) * G; it != ge; it += G) {
+                            seg_pf(it, G);
+                            for (size_t k = 0; k < G; k += U) body(it + k);
+                        }
+                        for (; it + U <= end; it += U) body(it);
+                    } else {
+                        for (; it + U <= end; it += U) {
+                            if constexpr (ERA_BIG_PFSPREAD) {
+                                // Line idx/4 of the next block during entries 0..255
+                                // of this one: 64 lines over half a block, each
+                                // requested twice (U = 2), never in a burst.
+                                const size_t idx = static_cast<size_t>(it - blk_base);
+                                if (idx < BLK_BYTES / 16) __builtin_prefetch(nb + (idx >> 2) * 64, 0, 2);
+                            }
+                            if (it + ERA_BIG_PF + U <= end) seg_pf(it, U);
+                            body(it);
                         }
                     }
                 }

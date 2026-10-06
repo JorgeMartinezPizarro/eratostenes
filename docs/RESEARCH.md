@@ -72,6 +72,7 @@ throughout below).
   - [Sparse tier: mod-2310 multiplier wheel (kept, 2026-09-30)](#sparse-tier-mod-2310-multiplier-wheel-kept-2026-09-30)
   - [Sparse tier: next-block prefetch spread over the current block (kept, 2026-10-04)](#sparse-tier-next-block-prefetch-spread-over-the-current-block-kept-2026-10-04)
   - [Sparse tier: `process_big` is issue-bound at 12 threads; the ring's wrap mask and the spills are what is left (open, 2026-10-05)](#sparse-tier-process_big-is-issue-bound-at-12-threads-the-rings-wrap-mask-and-the-spills-are-what-is-left-open-2026-10-05)
+  - [Sparse tier: `process_big` in groups of 4 entries, no per-iteration edge tests (open, 2026-10-06)](#sparse-tier-process_big-in-groups-of-4-entries-no-per-iteration-edge-tests-open-2026-10-06)
   - [Activation at the top of N on old cores: 83 ns per prime on Nehalem, two flags to split it (open, 2026-10-04)](#activation-at-the-top-of-n-on-old-cores-83-ns-per-prime-on-nehalem-two-flags-to-split-it-open-2026-10-04)
   - [Sparse activation from the bitmap index: 18% fewer instructions per prime (kept, 2026-10-05)](#sparse-activation-from-the-bitmap-index-18-fewer-instructions-per-prime-kept-2026-10-05)
   - [i5-3470 profile at 1e12: the med64 tier over the whole-L2 segment is 59% of the cycles (open, 2026-10-04)](#i5-3470-profile-at-1e12-the-med64-tier-over-the-whole-l2-segment-is-59-of-the-cycles-open-2026-10-04)
@@ -3394,6 +3395,44 @@ laptop with callgrind:
   registers. Register allocation in this loop is a lottery: every change
   needs its own callgrind and asm read, the source-level intent predicts
   nothing. `make test` 87/87. Committed for the A/B against 4e03879.
+
+### Sparse tier: `process_big` in groups of 4 entries, no per-iteration edge tests (open, 2026-10-06)
+
+The U = 2 loop in the laptop's objdump (GCC 13, ffd8e7c) was 82-86
+instructions per pair of entries, ~42 per hit, and 15-19 of them per pair
+were about the edges of a block, paid on every iteration: the next-block
+spread's `idx < 256` test and address (its line pointer reloaded from the
+stack), the `it + ERA_BIG_PF + U <= end` test before the 16-ahead segment
+prefetch, and `end` itself compared from the stack. `ERA_BIG_FASTBLK`
+(default 1, `=0` restores the single loop): the number of groups of 4
+entries whose 16-ahead neighbours are still inside the block is worked out
+once per block; the first min(groups, 64) groups also prefetch line g of the
+next block (one request per line, not two), the rest only the segment
+bytes, and the last few entries go through the plain pairs. The pair body
+is unchanged, now an always_inline lambda both loop shapes share.
+
+objdump: 150 instructions per group of 4 in the spread loop, 147 in the
+other, ~37 per hit. callgrind, one thread, 1e8 windows, A = ffd8e7c:
+
+| tail | A `process_big<true>` | B | delta | program total |
+|---|---:|---:|---:|---:|
+| 1e15 | 211.1 M Ir | 187.1 M | **-11.4%** | -3.6% |
+| 1e17 | 331.2 M | 293.6 M | **-11.4%** | -1.0% |
+
+Counts identical between A, B and B with the knob off, and to primecount:
+1e10 with `-s 2000` and `-s 100000`, 1e11 `-s 2000000 -t 5`, the last 1e9
+below 1e15, 1e16, 1e17 and 1e18, the unaligned 2e16 start; `make test`
+passes. Wall on the laptop under WSL (1e10 windows, x5, 12 and 4 threads):
+-3.3% .. +7.4%, every row overlapping (one binary spread 1.14-1.96 s within
+a series): no instrument for this. Two leftovers in the asm: the spread's
+line pointer still lives on the stack (deriving it from `it` instead made
+GCC strength-reduce it back into the same stack slot, `addq $0x40`: -0.3%
+Ir, not kept), and the spread loop round-trips one table row through the
+stack to extract dm with `movzbl %ah` (the other loop doesn't). Expected:
+a few percent at the 1e15+ tails where `process_big` is issue-bound (HT
+pairs, 30-39% of the cycles there), little with one thread per core, where
+it is latency-bound. Pending: `scripts/perf_ab.sh` on the i5-3470 and the
+i5-13500.
 
 ### Activation at the top of N on old cores: 83 ns per prime on Nehalem, two flags to split it (open, 2026-10-04)
 
