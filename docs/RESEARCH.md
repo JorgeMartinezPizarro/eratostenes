@@ -114,6 +114,7 @@ throughout below).
   - [`fill()`: skip the `self_k` correction loop when it can't possibly match (kept, 2026-09-26)](#fill-skip-the-self_k-correction-loop-when-it-cant-possibly-match-kept-2026-09-26)
   - [Extending pre-sieve coverage past prime 163 (tried three ways, all reverted)](#extending-pre-sieve-coverage-past-prime-163-tried-three-ways-all-reverted)
 - [Makefile](#makefile)
+  - [Cascade Lake: branches kept off 32-byte boundaries (JCC erratum), `-Wa,-mbranches-within-32B-boundaries` (open, 2026-10-07)](#cascade-lake-branches-kept-off-32-byte-boundaries-jcc-erratum--wa-mbranches-within-32b-boundaries-open-2026-10-07)
   - [PGO training set: a natural 1e13 pass (tried, reverted, 2026-09-25, follow-up session)](#pgo-training-set-a-natural-1e13-pass-tried-reverted-2026-09-25-follow-up-session)
   - [Two power regimes on every machine: burst and sustained (open, 2026-10-04)](#two-power-regimes-on-every-machine-burst-and-sustained-open-2026-10-04)
   - [PGO overall: measured on the dev PC, not adopted on the production server](#pgo-overall-measured-on-the-dev-pc-not-adopted-on-the-production-server)
@@ -5148,6 +5149,39 @@ set, the binary copied aside and the default rebuilt): 12 threads 1e13 tail
 +2.4% (overlapping), 1e15 -1.9% (4/4), 2 threads 1e13 noise, full 1e12
 23.27 / 23.34 s against 23.13 / 23.13 s. Nothing to take; `-O3
 -march=native -flto=auto` stays, PGO stays unadopted.
+### Cascade Lake: branches kept off 32-byte boundaries (JCC erratum), `-Wa,-mbranches-within-32B-boundaries` (open, 2026-10-07)
+
+The Xeon @ 2.80GHz sandbox's tails at b53a814 put 1e13 at 1.06x (1.00x
+at 3172ea8), on a tail with no sparse tier (its plan, emulated with
+`--l1-bytes 32768 --l2-bytes 1048576 -t 2`: 106,410 med64, 120,673
+medium, 0 sparse), so `process_big` never runs there and the code that
+does is the previous round's. What moved is where it sits: b53a814 grew
+`process_big<true>` (0x5f9 -> 0xcbe bytes) and every hot dense kernel
+shifted with the same size and a new alignment (laptop build: `cross_off<0>`
+48 -> 16 mod 64, `run_med64` 0 -> 32, `Presieve::fill` 32 -> 48).
+Cascade Lake is a Skylake-family core with the JCC-erratum microcode: a jump
+that crosses or ends on a 32-byte boundary is not cached in the decoded-uop
+cache, and the dense kernels are a compare-and-branch per hit
+(`cross_off_checked210`'s 48 cases, `cross_off`'s checked chains). GNU as
+can pad branches off those boundaries; the flag reaches the LTO assembler
+through `make variant` (laptop: `run_med64` 0x2987 -> 0x2bf5 bytes,
+`cross_off<0>` 0x31c -> 0x344, counts exact).
+
+Same sandbox, same session, `scripts/perf_ab.sh`, last 1e11 below N, x3,
+wall:
+
+| A/B | 1e12 | 1e13 | 1e14 |
+|---|---:|---:|---:|
+| b53a814 vs ffd8e7c (at 1e12-1e13 only the layout differs) | +0.1% (A spread 8.6%) | +2.2% (B higher in 3/3 sorted pairs, overlapping) | +2.5% (1/3) |
+| b53a814 + the flag vs b53a814 | +0.1% (A spread 8.7%) | **-3.4%** (3/3, overlapping) | **-2.2%** (3/3, overlapping) |
+
+The move cost about 2% at 1e13, the aligned build is under both (1e13
+means 13.73 s against 13.87 s for ffd8e7c and 14.08-14.18 s for b53a814 in
+the two series), and the rest of the 1.06x was the host. x3 and
+overlapping on the one affected machine: a confirmation round (x5, 1e11 to
+1e18) comes before gating the flag in the Makefile on a Skylake-family
+`-march=native` (none of the other machines is on the erratum's list).
+
 ### PGO training set: a natural 1e13 pass (tried, reverted, 2026-09-25, follow-up session)
 
 Considered adding a natural `1e13` training pass (no `-s` override) to also give

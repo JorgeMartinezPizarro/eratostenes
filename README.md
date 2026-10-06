@@ -21,12 +21,12 @@ sudo apt-get install primecount-bin primesieve  # Debian/Ubuntu/WSL
 ```
 
 ```sh
-make            # release build: -O3 -march=native -flto, plus nth_prime
-make portable   # no -march=native, for a binary you'll copy to another machine
-make pgo        # profile-guided release build (training runs included)
-make debug      # ASan/UBSan, for debugging
-make test       # checks output against primecount across N and across
-                # several parameter combinations, plus .db vs text output
+make                  # release build: -O3 -march=native -flto, plus nth_prime
+make portable         # no -march=native, for a binary you'll copy to another machine
+make pgo              # profile-guided release build (training runs included)
+make debug            # ASan/UBSan, for debugging
+make test             # checks output against primecount across N and across
+                      # several parameter combinations, plus .db vs text output
 make benchmark        # Count-only times against primesieve, N = 1e10..1e13
 make benchmark-io     # .db size and write throughput, N = 1e8..1e12
 make benchmark-tails  # Count-only, the last 1e11 numbers below 1e13..1e18
@@ -35,8 +35,8 @@ make benchmark-tails  # Count-only, the last 1e11 numbers below 1e13..1e18
 ## Docker
 
 ```sh
-make docker                                      # build the image
-make run ARGS="100b -o /output/primes.txt -t 12" # run it
+make docker                             # build the image
+make run ARGS="100b -o primes.txt"      # run it
 ```
 
 `make run` mounts `./output` (host) at `/output` (container); use
