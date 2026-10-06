@@ -91,6 +91,7 @@ throughout below).
   - [Chunk-width floor: at least 4 segments per chunk (kept, 2026-09-27)](#chunk-width-floor-at-least-4-segments-per-chunk-kept-2026-09-27)
   - [i5-13500 server gap vs primesieve: medium-tier call count, sparse cutoff 1/2 gated on per-thread L2 (2026-09-28)](#i5-13500-server-gap-vs-primesieve-medium-tier-call-count-sparse-cutoff-12-gated-on-per-thread-l2-2026-09-28)
   - [`small_limit` cutoff tuning](#small_limit-cutoff-tuning)
+  - [Small cutoff 1/2 of the sub-block on a 256 KiB L2 core (kept, 2026-10-06)](#small-cutoff-12-of-the-sub-block-on-a-256-kib-l2-core-kept-2026-10-06)
   - [Cache-topology sizing: per-CPU-minimum step (kept)](#cache-topology-sizing-per-cpu-minimum-step-kept)
   - [Medium/sparse cutoff raised above `seg_k_width` (tried, reverted, 2026-09-27)](#mediumsparse-cutoff-raised-above-seg_k_width-tried-reverted-2026-09-27)
   - [EratBig-style sparse tier: forcing a power-of-2 segment width, and `sparse_limit = seg_k_width/4` (all attempts reverted)](#eratbig-style-sparse-tier-forcing-a-power-of-2-segment-width-and-sparse_limit--seg_k_width4-all-attempts-reverted)
@@ -4390,6 +4391,32 @@ K=1.5 (1.4920T, +1.1%, despite instructions:u -2.2%) -- both directions lost. Th
 per-hit gap between small (~2 instructions) and medium (~8-9, even after the
 mod-210 cut) is still ~4x, far bigger than medium's 14% improvement, so the optimal
 cutoff didn't move. /2 confirmed still optimal.
+
+### Small cutoff 1/2 of the sub-block on a 256 KiB L2 core (kept, 2026-10-06)
+
+`make benchmark-mini` on the i5-3470 (1e10 window, single runs, its own
+warning about noise) had one row outside the pack: `--tune small=1/2`
+0.97 s against auto 1.02-1.03 s. The reason it could be real: on that core
+the small tier ends at ~4K (526 primes: 1/4 of the 16 KiB half-L1d
+sub-block, and the cutoff stays there when `finish_threads` gives the
+sub-block the whole L1d) while primesieve's EratSmall runs L1-blocked to
+~23K, so the 4K-23K band goes through the med64 kernel, which on Ivy
+Bridge misses L1 on every byte (the 2026-10-04 entries). `make
+benchmark-ab`, x3 interleaved against auto: **1e13 tail (1e11 window)
+-2.8%, every B below every A**; `small=1/1` -1.1% with overlap, so 1/2 is
+the optimum; **1e12 tail -2.9%, 1e11 tail -1.6%, 1e15 tail -0.6%, all
+every-B-below-every-A; 1e14 tail 0.0%** (the sparse tier dominates there
+and the small cutoff doesn't touch it). Rule: `small_den = 2` on a core
+whose L2 is 256 KiB or less (the same proxy as the half-L2 and
+whole-segment-med64 rules), `--tune small` overrides, startup line `small
+cutoff: 1/2 of the sub-block (...)`, test.sh checks it with forced caches.
+The modern cores keep 1/4: it was re-tuned jointly with med64 on the
+i5-11400F (2026-09-26) and the i5-13500's own benchmark-mini (1e11 window)
+had `small=1/2` inside its +-3-5% noise. The same mini run on the i5-13500
+found nothing else outside the noise, and the i5-3470's other knobs
+(sparse 1/4, med64 1/12 or 1/4, NTA) all lost or tied: the static rules
+are at the optimum these two machines can measure, so a per-machine tuning
+profile has nothing to collect yet.
 
 ### Cache-topology sizing: per-CPU-minimum step (kept)
 

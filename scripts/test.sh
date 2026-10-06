@@ -380,6 +380,12 @@ expect_log "media L2: segmento de 128 KiB"      "segment=3932160," 10000000000 -
 expect_log "med64 entero con L2 de 256 KiB"      "med64 cutoff: the whole segment \(L2 of 256 KiB or less\)" $T13 --l1-bytes 32768 --l2-bytes 262144
 expect_log "med64 entero: poblacion"             "med64, 0 medium" $T13 --l1-bytes 32768 --l2-bytes 262144
 expect_log "med64 1/6 con L2 de 512 KiB"      "^Starting.*[1-9][0-9]* medium" $T13 --l1-bytes 32768 --l2-bytes 524288
+# small = 1/2 of the sub-block on a 256 KiB L2 (tuning.hpp's small-L2 rule): 990 primes below 8K
+# instead of 526 below 4K with the 16 KiB sub-block of --l1-bytes 32768; --tune small overrides.
+expect_log "small 1/2 con L2 de 256 KiB"      "small cutoff: 1/2 of the sub-block \(L2 of 256 KiB or less\)" $T13 --l1-bytes 32768 --l2-bytes 262144
+expect_log "small 1/2: poblacion"             "^Starting.* 990 small base primes" $T13 --l1-bytes 32768 --l2-bytes 262144
+expect_log "small 1/4 con L2 de 512 KiB"      "^Starting.* 526 small base primes" $T13 --l1-bytes 32768 --l2-bytes 524288
+expect_log "--tune small manda sobre la regla" "^Starting.* 526 small base primes" $T13 --l1-bytes 32768 --l2-bytes 262144 --tune small=1/4
 
 # The L3 gate (tuning.hpp): 1/4 from 4 MiB of L3 per active thread, also
 # below the sparse regime when an octave of base primes lands in the sparse
