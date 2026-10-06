@@ -374,9 +374,14 @@ expect_log "-s respetado sin tier sparse"     "segment=47185920,"               
 expect_log "--tune sparse en el log"          "sparse cutoff: 1/2 of the segment \(--tune sparse\)" $T15 --tune sparse=1/2
 expect_log "--tune medium_nta forzado"        "medium-tier prefetchnta: no \(forced" $T13 --tune medium_nta=0
 # med64 = the whole segment on a 256 KiB L2 (tuning.hpp's small-L2 rule), 1/6 on 512 KiB; --tune med64 overrides.
-# Same rule, few base primes (1e10: 9,592) and one thread per core: the base stays at half the L2.
-expect_log "media L2: L2 chica y pocos primos"  "segment: half the L2 \(L2 of 256 KiB or less, 9,592 base primes <= 40,000\)" 10000000000 -t 1 --l1-bytes 32768 --l2-bytes 262144
+# Few base primes (1e10: 9,592) and one thread per core: the base is half the whole-L2 width,
+# on any L2 (128 KiB from 256 KiB; 768 KiB from the 1.5 MiB that 32 x 48 KiB caps a 2 MiB L2 to);
+# with more base primes (1e12 tail: 78,498) the whole width, 1.5 MiB.
+expect_log "media L2: L2 chica y pocos primos"  "segment: half the whole-L2 width \(one thread per core, 9,592 base primes <= 40,000\)" 10000000000 -t 1 --l1-bytes 32768 --l2-bytes 262144
 expect_log "media L2: segmento de 128 KiB"      "segment=3932160," 10000000000 -t 1 --l1-bytes 32768 --l2-bytes 262144
+expect_log "media L2: L2 grande y pocos primos" "segment=23592960," 10000000000 -t 1 --l1-bytes 49152 --l2-bytes 2097152
+expect_log "L2 entera: L2 grande y muchos primos" "segment: whole L2 per thread" 1000000000000 --start 999999000000 -t 1 --l1-bytes 49152 --l2-bytes 2097152
+expect_log "L2 entera: segmento de 1.5 MiB"     "segment=47185920," 1000000000000 --start 999999000000 -t 1 --l1-bytes 49152 --l2-bytes 2097152
 expect_log "med64 entero con L2 de 256 KiB"      "med64 cutoff: the whole segment \(L2 of 256 KiB or less\)" $T13 --l1-bytes 32768 --l2-bytes 262144
 expect_log "med64 entero: poblacion"             "med64, 0 medium" $T13 --l1-bytes 32768 --l2-bytes 262144
 expect_log "med64 1/6 con L2 de 512 KiB"      "^Starting.*[1-9][0-9]* medium" $T13 --l1-bytes 32768 --l2-bytes 524288

@@ -82,7 +82,7 @@ struct SievePlan {
     bool sparse_l3_gate = false;   // the 1/4 came from the L3 per active thread
     bool med64_l2_gate = false;    // med64 = the whole segment, from the small-L2 rule
     bool small_l2_gate = false;    // small cutoff 1/2 of the sub-block, same rule
-    bool half_l2_few_primes = false; // base kept at half the L2: small L2, few base primes
+    bool half_l2_few_primes = false; // base at half the whole-L2 width: one per core, few base primes
     uint64_t base_count = 0;         // startup log
     uint64_t l3_per_thread = 0;    // bytes, 0 = undetected
     bool sparse_regime = false;
@@ -178,14 +178,19 @@ inline SievePlan plan_sieve(Options& opt, const BasePrimes& base, uint64_t base_
     // L1d: largest, not smallest -- sizing the P-cores' sub-block for
     // the E-cores' L1d measured slower on the i5-13500, see the same
     // RESEARCH.md entry.
-    if (!opt.l1_bytes_override && !topo.l1_raw.empty() && topo.l1_raw[0]) {
+    if (!topo.l1_raw.empty() && topo.l1_raw[0]) {
         uint64_t max_l1_raw = topo.l1_raw[0];
         for (uint64_t s : topo.l1_raw) if (s > max_l1_raw) max_l1_raw = s;
-        l1_max = max_l1_raw;
-        if (max_l1_raw > topo.l1_raw[0]) {
-            cfg.sub_block_bytes = sub_block_from_l1_bytes(max_l1_raw);
-            small_limit = cfg.sub_block_bytes * small_num / small_den;
+        if (!opt.l1_bytes_override) {
+            l1_max = max_l1_raw;
+            if (max_l1_raw > topo.l1_raw[0]) {
+                cfg.sub_block_bytes = sub_block_from_l1_bytes(max_l1_raw);
+                small_limit = cfg.sub_block_bytes * small_num / small_den;
+            }
         }
+        // The core count below is topology, not a size: --l1-bytes forces
+        // the L1d size but not how many cores there are, so the
+        // one-thread-per-core rules still apply under it.
         // One thread per core: half the L1d is the per-thread share of
         // an HT pair, which no thread has to give up when there are no
         // more threads than physical cores, so the sub-block takes the
@@ -251,24 +256,28 @@ inline SievePlan plan_sieve(Options& opt, const BasePrimes& base, uint64_t base_
     const bool sparse_regime = base_limit >= seg_k_width;
     const bool one_per_core = l1_big_cores && opt.threads <= l1_big_cores;
     cfg.huge_arenas = opt.huge >= 0 ? opt.huge != 0 : one_per_core;
-    bool whole_l2_base = false; // startup log
-    // A core with an L2 of 256 KiB or less (i5-3470) and few base primes:
-    // keep the base at half the L2. The whole-L2 segment fills all 8 ways
-    // of every L2 set, so the state streams evict the hot sieve lines in a
-    // cascade (1.78 G L2 misses at 1e11, 8x primesieve's); half the L2
-    // leaves 4 ways for the streams. Halving the segment also doubles the
-    // per-segment visit of every med64 entry, which wins as long as the
-    // base primes are few: `-s 3932160 --tune med64=1/1` vs the whole-L2
-    // auto, x3 each: -8.7% at 1e10, -4.8% at 1e11, -1.4% at 2e11, +1.2%
-    // at 3e11, +1.9% at 5e11, +5.5% at 1e12 -- the crossover is ~40K base
-    // primes (sqrt(N) ~ 500K). Only matters with the whole-L2 rule below.
-    // docs/RESEARCH.md#i5-3470-profile-at-1e12-the-med64-tier-over-the-whole-l2-segment-is-59-of-the-cycles-open-2026-10-04
+    bool whole_l2_base = false;      // startup log
+    bool half_l2_few_primes = false; // startup log
+    // With few base primes the whole-L2 width below doesn't pay: halving
+    // the segment doubles the per-segment visit of every med64 entry, which
+    // costs little while the base primes are few, and the smaller segment
+    // leaves L2 ways to the state streams (i5-3470: the whole-L2 segment
+    // fills all 8 ways of every set, 1.78 G L2 misses at 1e11, 8x
+    // primesieve's). The crossover is ~40K base primes (sqrt(N) ~ 500K):
+    // i5-3470, `-s 3932160 --tune med64=1/1` vs whole-L2, x3: -8.7% at
+    // 1e10, -4.8% at 1e11, -1.4% at 2e11, +1.2% at 3e11, +5.5% at 1e12. The
+    // same half-of-the-whole-L2 width on the 2-vCPU sandboxes at 1e11 (x3):
+    // Emerald Rapids 1.5 MiB -> 768 KiB -3.3% (every B below every A; 1 MiB
+    // was -1.7%, so it is half of the width, not half of the L2), Xeon
+    // @2.80GHz 1 MiB -> 512 KiB a tie; at 1e12 (78K base primes) both within
+    // noise. The cutoff is on base primes, not on L2 size: it was gated on
+    // L2 <= 256 KiB until 2026-10-06. See
+    // docs/RESEARCH.md#half-the-whole-l2-width-with-few-base-primes-on-every-one-per-core-machine-kept-2026-10-06
     constexpr uint64_t HALF_L2_MAX_BASE_PRIMES = 40000;
-    const bool half_l2_few_primes = small_l2_core && base.count <= HALF_L2_MAX_BASE_PRIMES; // small_l2_core: see the small cutoff above
     if (!opt.segment_width_set && sparse_regime) {
         seg_k_width *= 2;
         opt.segment_width = seg_k_width * WHEEL_MOD / WHEEL_SIZE; // keep the startup log's "segment=" accurate
-    } else if (!opt.segment_width_set && !opt.l2_bytes_override && one_per_core && min_l2_share && !half_l2_few_primes) {
+    } else if (!opt.segment_width_set && one_per_core) {
         // No sparse tier and a core to itself: the base segment is the
         // thread's whole L2 share, not half of it, within 32 x L1d. The
         // medium tier pays a fixed cost per prime per segment, and here
@@ -277,12 +286,24 @@ inline SievePlan plan_sieve(Options& opt, const BasePrimes& base, uint64_t base_
         // -8..-13% (two hosts, all runs below); on an SMT machine the share
         // is already half the L2 and nothing changes (dev PC: 256 KiB; a
         // forced 512 KiB there was neutral at 1e11, 1e12 and the 1e13 tail).
+        // --l2-bytes stands in for the detected share, so the rule (and the
+        // few-primes half below) can be checked with forced caches.
         // See docs/RESEARCH.md#whole-l2-base-segment-one-thread-per-core-no-sparse-tier-kept-2026-10-03.
-        const uint64_t base_k = std::min(min_l2_share, 32 * l1_max) * 8 / 64 * 64;
-        if (base_k > seg_k_width) {
-            seg_k_width = base_k;
-            opt.segment_width = seg_k_width * WHEEL_MOD / WHEEL_SIZE;
-            whole_l2_base = true;
+        const uint64_t l2_thread = opt.l2_bytes_override ? opt.l2_bytes_override : min_l2_share;
+        if (l2_thread) {
+            const uint64_t whole_k = std::min(l2_thread, 32 * l1_max) * 8 / 64 * 64;
+            if (base.count <= HALF_L2_MAX_BASE_PRIMES) {
+                const uint64_t half_k = std::max<uint64_t>(64, whole_k / 2 / 64 * 64);
+                if (half_k != seg_k_width) {
+                    seg_k_width = half_k;
+                    opt.segment_width = seg_k_width * WHEEL_MOD / WHEEL_SIZE;
+                }
+                half_l2_few_primes = true;
+            } else if (whole_k > seg_k_width) {
+                seg_k_width = whole_k;
+                opt.segment_width = seg_k_width * WHEEL_MOD / WHEEL_SIZE;
+                whole_l2_base = true;
+            }
         }
     }
 
@@ -556,7 +577,7 @@ inline SievePlan plan_sieve(Options& opt, const BasePrimes& base, uint64_t base_
     P.sparse_l3_gate = sparse_l3_gate;
     P.med64_l2_gate = med64_l2_gate;
     P.small_l2_gate = small_l2_gate;
-    P.half_l2_few_primes = half_l2_few_primes && !opt.segment_width_set;
+    P.half_l2_few_primes = half_l2_few_primes;
     P.base_count = base.count;
     P.l3_per_thread = l3_per_thread;
     P.sparse_regime = sparse_regime;
@@ -628,7 +649,7 @@ inline void print_plan(const SievePlan& P, const Options& opt, unsigned actual_t
                      cfg.huge_arenas ? "2 MiB huge-page" : "1 MiB",
                      opt.huge >= 0 ? " (--tune huge)" : cfg.huge_arenas ? " (one thread per core)" : "");
     if (P.half_l2_few_primes)
-        std::fprintf(stderr, "  segment: half the L2 (L2 of 256 KiB or less, %s base primes <= 40,000)\n",
+        std::fprintf(stderr, "  segment: half the whole-L2 width (one thread per core, %s base primes <= 40,000)\n",
                      format_thousands(P.base_count).c_str());
     if (P.small_l2_gate)
         std::fprintf(stderr, "  small cutoff: 1/2 of the sub-block (L2 of 256 KiB or less)\n");

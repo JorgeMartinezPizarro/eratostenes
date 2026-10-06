@@ -98,6 +98,7 @@ throughout below).
   - [`--start`: the primes in the rounded-down head of the first word were counted (bug, fixed 2026-10-04)](#--start-the-primes-in-the-rounded-down-head-of-the-first-word-were-counted-bug-fixed-2026-10-04)
   - [`--start`: the start itself was dropped when its wheel index was 63 mod 64 (bug, fixed 2026-10-05)](#--start-the-start-itself-was-dropped-when-its-wheel-index-was-63-mod-64-bug-fixed-2026-10-05)
   - [`ByteCounter`: digit count without `to_chars` (tried, tie, reverted, 2026-10-05)](#bytecounter-digit-count-without-to_chars-tried-tie-reverted-2026-10-05)
+  - [Half the whole-L2 width with few base primes, on every one-per-core machine (kept, 2026-10-06)](#half-the-whole-l2-width-with-few-base-primes-on-every-one-per-core-machine-kept-2026-10-06)
 - [arg_parser.hpp](#arg_parserhpp)
   - [`--zstd-level` default: 1 (kept, 2026-09-28)](#--zstd-level-default-1-kept-2026-09-28)
   - [Sub-block size: half the L1d, not all of it (kept, 2026-09-27)](#sub-block-size-half-the-l1d-not-all-of-it-kept-2026-09-27)
@@ -2523,6 +2524,37 @@ passes each of auto / `-s 15728640` (512 KiB) / `-s 31457280` (1 MiB)):
   Settled the next round on the clean host: 1.5 MiB 12.06, 11.73, 12.05 s vs
   1 MiB 12.45, 12.54, 12.64 s (-5%, 3/3); the noisy host spread 14.4-16.8 s
   on the same configuration and said nothing.
+
+### Half the whole-L2 width with few base primes, on every one-per-core machine (kept, 2026-10-06)
+
+The 2026-10-04 i5-3470 rule (base at half the L2 while the base primes are
+at most 40K, gated on L2 <= 256 KiB) turns out not to be about the small
+L2. Chasing the 1e11 counts on the 2-vCPU sandboxes (1.03-1.11x) with `make
+benchmark-ab`, x3 interleaved against auto, 1e11 (9e10 window) / 1e12 tail
+(1e11 window):
+
+| machine | auto | B | 1e11 | 1e12 |
+|---|---|---|---:|---:|
+| Emerald Rapids (48 KiB L1d, 2 MiB L2) | 1.5 MiB (32 x L1d cap) | `-s 23592960` (768 KiB) | **-3.3% (3/3)** | -2.1% (overlap) |
+| same | same | `-s 31457280` (1 MiB, half the L2) | -1.7% (3/3) | -0.5% (overlap) |
+| Xeon @ 2.80GHz (32 KiB L1d, 1 MiB L2) | 1 MiB | `-s 15728640` (512 KiB) | -0.5% (overlap) | +2.4% (overlap) |
+
+On Emerald Rapids the gain grows as the segment shrinks and the best point
+is half of the width the whole-L2 rule picked (768 KiB of 1.5 MiB), not
+half of the L2 (1 MiB) -- the same shape as the i5-3470's 128 KiB of 256
+KiB. On the Xeon @ 2.80GHz half the width is a tie. So the rule becomes:
+**one thread per core, no sparse tier, base primes <= 40K: the base segment
+is half the whole-L2 width** (min(L2 share, 32 x L1d) / 2), on any L2; with
+more base primes the whole width as before. `--l2-bytes` now stands in for
+the detected share inside this rule too (it used to skip it), so test.sh
+checks both branches with forced caches: 128 KiB from a 256 KiB L2, 768 KiB
+from a 2 MiB L2 with a 48 KiB L1d, and the whole 1.5 MiB once the base
+primes pass 40K. Nothing changes on SMT machines (the share is already half
+the L2 there, the whole-L2 rule is a no-op). The Xeon @ 2.80GHz's 1e11 also
+had the old 55e2808 binary 2.6% ahead of 5f7d213 (3/3, overlapping); its
+segment was the suspect, and this A/B clears it -- with the same 512 KiB
+the current binary is not faster, so whatever is left there is another
+change or that night's host.
 
 ### Sparse cutoff 1/4 from 1 MiB of L2 per thread (kept, 2026-10-03)
 
