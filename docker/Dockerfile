@@ -35,7 +35,14 @@ RUN make pgo
 # compile from source themselves (release build, -march=native against the
 # container's own CPU) rather than just running prebuilt binaries, so this
 # stage keeps gcc/make instead of shipping only the runtime image below.
-# primesieve is added on top for benchmark.sh's comparison column;
+# primesieve is added on top for benchmark.sh's comparison column, built
+# from its release tag rather than installed from apt: bookworm ships
+# primesieve 11.0 (frozen in early 2023) while the other benchmark machines
+# run 12.x, and 12 carries its own performance work, so the server's ratios
+# were measured against an older opponent than everyone else's until
+# 2026-10-06. Only the statically linked CLI is installed, into
+# /usr/local/bin (ahead of /usr/bin on PATH): primecount-bin below links
+# against bookworm's libprimesieve11, which is left alone.
 # primecount-bin is what scripts/test.sh checks pi(N)/nth-prime against
 # instead of hardcoded constants -- required for `make test` to even start.
 # linux-perf: per-tier cycle profiling on machines where perf only exists
@@ -44,9 +51,19 @@ RUN make pgo
 # perf_event_paranoid=3 level only lets CAP_SYS_ADMIN through (checked on
 # the i5-13500 server, 2026-09-28).
 FROM builder AS dev
+ARG PRIMESIEVE_VERSION=12.12
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        primesieve primecount-bin linux-perf \
-    && rm -rf /var/lib/apt/lists/*
+        primecount-bin linux-perf cmake git ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && git clone --depth 1 --branch "v${PRIMESIEVE_VERSION}" \
+        https://github.com/kimwalisch/primesieve.git /tmp/primesieve \
+    && cmake -S /tmp/primesieve -B /tmp/primesieve/build \
+        -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DBUILD_PRIMESIEVE=ON \
+        -DBUILD_TESTS=OFF -DBUILD_EXAMPLES=OFF \
+    && cmake --build /tmp/primesieve/build -j"$(nproc)" \
+    && install -m755 /tmp/primesieve/build/primesieve /usr/local/bin/primesieve \
+    && rm -rf /tmp/primesieve \
+    && primesieve --version
 COPY ./scripts ./scripts
 CMD ["make", "test"]
 
