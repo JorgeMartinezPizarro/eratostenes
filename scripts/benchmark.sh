@@ -105,7 +105,7 @@ for i in "${!NS[@]}"; do
         times_e+=("$t_e"); times_p+=("$t_p")
         echo "  n=$n rep=$r eratostenes=${t_e}s primesieve=${t_p}s [ok]" >&2
     done
-    ERATO_TIME["$n"]=$(mean_of 2 "${times_e[@]}")
+    ERATO_TIME["$n"]=$(mean_of 3 "${times_e[@]}")
     PRIMESIEVE_TIME["$n"]=$(mean_of 3 "${times_p[@]}")
 done
 

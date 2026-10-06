@@ -516,7 +516,7 @@ static int run_count(const RunPlan& plan) {
         : "up to " + format_thousands(plan.opt.limit);
     std::fprintf(stderr,
         "%sDone.%s %s%s%s primes found %s.\n"
-        "  %stotal:%s      %s%.2fs%s (%s%.1f M primes/s%s)\n",
+        "  %stotal:%s      %s%.3fs%s (%s%.1f M primes/s%s)\n",
         C.headline, C.reset,
         C.bold, format_thousands(total_primes).c_str(), C.reset,
         range_desc.c_str(),
@@ -571,7 +571,7 @@ static int run_db(const RunPlan& plan) {
 
     std::fprintf(stderr,
         "%sDone.%s %s%s%s primes found up to %s %s(%.2f GB, %.3f B/prime)%s.\n"
-        "  %stotal:%s      %s%6.2fs%s  (%s%.1f M primes/s%s)\n",
+        "  %stotal:%s      %s%7.3fs%s  (%s%.1f M primes/s%s)\n",
         C.headline, C.reset,
         C.bold, format_thousands(total_primes).c_str(), C.reset,
         format_thousands(opt.limit).c_str(),
@@ -654,9 +654,9 @@ static int run_text(const RunPlan& plan) {
 
     std::fprintf(stderr,
         "%sDone.%s %s%s%s primes found up to %s %s(%.2f GB)%s.\n"
-        "  %scount:%s      %s%6.2fs%s  (%s%.1f M primes/s%s)\n"
-        "  %swrite:%s      %s%6.2fs%s  (%s%.2f GB/s%s)\n"
-        "  %stotal:%s      %s%6.2fs%s  (%s%.1f M primes/s%s)\n",
+        "  %scount:%s      %s%7.3fs%s  (%s%.1f M primes/s%s)\n"
+        "  %swrite:%s      %s%7.3fs%s  (%s%.2f GB/s%s)\n"
+        "  %stotal:%s      %s%7.3fs%s  (%s%.1f M primes/s%s)\n",
         C.headline, C.reset,
         C.bold, format_thousands(total_primes).c_str(), C.reset,
         format_thousands(opt.limit).c_str(),

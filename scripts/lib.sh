@@ -24,8 +24,8 @@ to_dec() {
 num_lt() { awk -v a="$1" -v b="$2" 'BEGIN{exit !(a < b)}'; }
 
 # mean_of DECIMALS t1 t2 ...: the mean of the times, printed with that many
-# decimals (2 for eratostenes' own `total:`, 3 for primesieve's `Seconds:`,
-# as the tables have always shown them).
+# decimals (3 for both eratostenes' `total:` and primesieve's `Seconds:`;
+# eratostenes printed 2 until 2026-10-07).
 mean_of() {
     local prec=$1; shift
     printf '%s\n' "$@" | awk -v p="$prec" '{s += $1; n++} END{printf "%." p "f", s / n}'

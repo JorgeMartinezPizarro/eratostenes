@@ -81,7 +81,7 @@ for ((r = 1; r <= REPS; r++)); do
 done
 if [ "$ca" != "$cb" ]; then echo "  COUNT MISMATCH: A $ca vs B $cb" >&2; exit 1; fi
 
-mean() { printf '%s\n' "$@" | awk '{s += $1} END {printf "%.2f", s / NR}'; }
+mean() { printf '%s\n' "$@" | awk '{s += $1} END {printf "%.3f", s / NR}'; }
 ma=$(mean "${ta[@]}"); mb=$(mean "${tb[@]}")
 echo
 echo "A ${A_CFG:-auto}: ${ta[*]} -> mean ${ma}s"
