@@ -3431,8 +3431,23 @@ Ir, not kept), and the spread loop round-trips one table row through the
 stack to extract dm with `movzbl %ah` (the other loop doesn't). Expected:
 a few percent at the 1e15+ tails where `process_big` is issue-bound (HT
 pairs, 30-39% of the cycles there), little with one thread per core, where
-it is latency-bound. Pending: `scripts/perf_ab.sh` on the i5-3470 and the
-i5-13500.
+it is latency-bound.
+
+i5-3470 (4 threads, one per core; b53a814 against its own
+`-DERA_BIG_FASTBLK=0` build, which callgrind puts within 42 Ir of ffd8e7c's
+`process_big<true>`; `scripts/perf_ab.sh`, last 1e10 below N, x5, wall only:
+perf_event_paranoid was 4 on that boot):
+
+| tail | A (knob off) | B | delta | pairs B lower |
+|---|---:|---:|---:|---:|
+| 1e15 | 1.53-1.59 s | 1.51-1.52 s | -1.94% | 5/5 |
+| 1e16 | 1.86-1.87 s | 1.83-1.86 s | -0.54% | 5/5 |
+| 1e17 | 2.41-2.45 s | 2.36-2.42 s | -0.82% | 5/5 |
+| 1e18 | 3.48-3.60 s | 3.50-3.52 s | -0.85% | 4/5 |
+
+Small, and in the same direction at every N, on the one-thread-per-core
+core where the loop is latency-bound. Pending: the i5-13500 (HT pairs,
+issue-bound), where the gain should be larger.
 
 ### Activation at the top of N on old cores: 83 ns per prime on Nehalem, two flags to split it (open, 2026-10-04)
 
