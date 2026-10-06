@@ -49,9 +49,7 @@
 
 // Groups of pre-sieve primes: each group's own period is WHEEL_SIZE *
 // product(that group's primes), so keeping groups small keeps every
-// table's size small regardless of how many groups there are. Primes
-// already covered by the active WHEEL_PRIMES config are dropped
-// automatically in build_presieve (e.g. 7 for mod 210+).
+// table's size small regardless of how many groups there are.
 //
 // This is primesieve's own grouping (src/PreSieveTables.hpp), reused as-is
 // rather than re-derived: the first 3 groups triple up the smallest primes
@@ -221,8 +219,7 @@ private:
     }
 };
 
-// Builds one table for a single group of primes (all coprime with
-// WHEEL_MOD, already filtered by build_presieve below).
+// Builds one table for a single group of primes (all coprime with WHEEL_MOD).
 inline PresieveTable build_presieve_table(const std::vector<uint64_t>& primes,
                                            std::vector<uint64_t>& self_k_out) {
     PresieveTable tbl;
@@ -261,29 +258,18 @@ inline PresieveTable build_presieve_table(const std::vector<uint64_t>& primes,
         while (k < total_bits) {
             tbl.words[k >> 6] |= (1ULL << (k & 63));
             k += delta[j];
-            if constexpr (WHEEL_SIZE_IS_POW2) {
-                j = (j + 1) & (WHEEL_SIZE - 1);
-            } else {
-                ++j;
-                if (j == WHEEL_SIZE) j = 0;
-            }
+            j = (j + 1) & (WHEEL_SIZE - 1);
         }
         self_k_out.push_back(wheel_index(p));
     }
     return tbl;
 }
 
-// Builds one table per group in `groups`, dropping primes already covered
-// by the active WHEEL_PRIMES config (e.g. 7 is dropped for mod 210+) and
-// dropping any group that ends up empty as a result.
+// Builds one table per group in `groups` (every prime in them is >= 7, so
+// coprime to the wheel).
 inline Presieve build_presieve(const std::vector<std::vector<uint64_t>>& groups) {
     Presieve ps;
-    for (const auto& group : groups) {
-        std::vector<uint64_t> filtered;
-        for (uint64_t p : group) if (p >= FIRST_WHEEL_PRIME) filtered.push_back(p);
-        if (filtered.empty()) continue;
-        ps.tables.push_back(build_presieve_table(filtered, ps.self_k));
-    }
+    for (const auto& group : groups) ps.tables.push_back(build_presieve_table(group, ps.self_k));
     if (ps.tables.size() > Presieve::MAX_TABLES) {
         throw std::runtime_error("build_presieve: too many presieve groups");
     }

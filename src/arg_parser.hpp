@@ -3,9 +3,6 @@
 // count, output path (empty means count-only -- there's no default file,
 // see Options::output below), segment width, --tune knobs. The cache
 // detection the auto sizes come from lives in cpu_cache.hpp.
-//
-// The wheel (which primes to skip up front) is NOT here: it's a
-// compile-time constant in wheel.hpp, on purpose -- see that file.
 
 #include <algorithm>
 #include <cctype>
@@ -268,10 +265,6 @@ inline void print_usage(const char* prog) {
         "                         on once its state outgrows the L3 share)\n"
         "      huge=1|0           Sparse ring arenas as 2 MiB huge pages (default:\n"
         "                         on with one thread per core)\n"
-        "\n"
-        "The wheel (which primes are skipped up front) is fixed at compile\n"
-        "time in src/wheel.hpp (WHEEL_PRIMES) -- see that file for the\n"
-        "prepared configurations and why it isn't a CLI flag.\n"
         "\n"
         "Examples:\n"
         "  %s 1000000 -o primes_1M.txt\n"

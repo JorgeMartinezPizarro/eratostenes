@@ -1,7 +1,5 @@
-// Segmented, parallel, bit-packed Sieve of Eratosthenes, on a wheel that
-// skips multiples of a small fixed set of primes up front (WHEEL_PRIMES in
-// wheel.hpp -- see that file for why bigger isn't always better here, and
-// why it's a compile-time constant instead of a CLI flag).
+// Segmented, parallel, bit-packed Sieve of Eratosthenes on the mod-30 wheel
+// (wheel.hpp: one byte = 30 numbers).
 //
 // Strategy:
 //   1. Compute the base primes (<= sqrt(N)) with a simple sieve.

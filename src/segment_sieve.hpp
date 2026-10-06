@@ -407,14 +407,9 @@ private:
                 uint64_t bit_pos = static_cast<uint64_t>(__builtin_ctzll(bits));
                 uint64_t step2 = bit_pos - prev_bit;
                 prev_bit = bit_pos;
-                if constexpr (WHEEL_SIZE_IS_POW2) {
-                    uint64_t rq = r + step2;
-                    q += rq >> WHEEL_SIZE_LOG2;
-                    r = rq & (static_cast<uint64_t>(WHEEL_SIZE) - 1);
-                } else {
-                    r += step2;
-                    while (r >= static_cast<uint64_t>(WHEEL_SIZE)) { r -= WHEEL_SIZE; ++q; }
-                }
+                const uint64_t rq = r + step2;
+                q += rq >> WHEEL_SIZE_LOG2;
+                r = rq & (static_cast<uint64_t>(WHEEL_SIZE) - 1);
 
                 uint64_t value = q * WHEEL_MOD + WHEEL_R[r];
                 out.write_uint64(value);

@@ -9,16 +9,6 @@
 #      comparison column; the script aborts with a clear message if it's
 #      missing rather than silently only benchmarking eratostenes.
 #
-#      Only mod 30 (this project's shipped default) is swept -- mod 6 and
-#      mod 210 were tried against it up to 1e13 (see the i5-11400F section
-#      of README#benchmarks): mod 6 avoids mod 30's old L3-cliff ratio jump
-#      but isn't actually faster (less wheel-filtering costs about as much
-#      as the cache cliff saves), and mod 210's table grows too fast to be
-#      worth it past 1e10. If that ever changes, sweeping other wheels
-#      means rebuilding between them (see git history for how earlier
-#      versions of this script did that) -- not done here since there's
-#      currently only one worth tracking.
-#
 #      -s is deliberately *not* passed by default: the CLI's own auto
 #      default (sized from N and the machine's real L2/L3, see
 #      src/arg_parser.hpp) is what this project actually recommends running

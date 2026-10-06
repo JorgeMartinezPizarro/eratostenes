@@ -40,10 +40,8 @@ The mod-30 layout means **one byte is exactly 30 consecutive integers** (bit j o
 byte q is the number `30q + WHEEL_R[j]`). Everything fast in §6 is built on that:
 a prime's residue class mod 30 fully determines which bit it hits in each byte and
 by how many bytes it advances, so the marking masks are compile-time constants.
-`wheel.hpp` still carries commented-out mod-6/210/2310 configurations from before
-the tiered design, but they no longer compile: `erat_small.hpp` `static_assert`s
-mod 30, since its constant masks only exist for that layout (`wheel.hpp`'s own
-comment has the historical measurements).
+The layout is fixed at mod 30 (`wheel.hpp` `static_assert`s it); bigger wheels
+for the bits were measured before the tiered design and lost (RESEARCH.md).
 
 The wheel that numbers the *bits* (mod 30) is separate from the wheel that steps a
 prime's *multipliers*. Every marking prime is > 163, and the presieve (§3) always

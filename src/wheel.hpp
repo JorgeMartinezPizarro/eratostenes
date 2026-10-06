@@ -1,46 +1,18 @@
 #pragma once
-// Wheel factorization: skips multiples of a small fixed set of primes up
-// front. WHEEL_PRIMES below is a compile-time constant: to try a different
-// wheel, uncomment one of the labeled configs and recompile (`make`). The
-// wheel is compile-time (not a runtime flag) so the compiler can turn a
-// division by the wheel's modulus into a cheap multiply-shift, which it
-// can't do for a runtime value.
-//
-// Bigger wheels remove more candidates per number checked, but the
-// per-prime jump tables needed to do that grow
-// faster than the benefit: adding prime p multiplies the table by (p-1)
-// but only cuts marking work by (p-1)/p. Past a certain size that table
-// stops fitting the CPU's L3 cache and the sieve becomes
-// memory-bandwidth-bound rather than compute-bound. See docs/RESEARCH.md
-// (this file's own section) for the mod-6/30/210 table-size and timing
-// comparison behind that call -- from an early version of the codebase,
-// before the tiered small/medium/sparse marking this project uses today,
-// so treat the specific numbers as historical, not a claim about current
-// performance.
-//
-//   Some configs to try (uncomment one, comment the rest, then `make`):
-//
-//     constexpr std::array<uint64_t, 2> WHEEL_PRIMES = {2, 3};             // mod 6
-//     constexpr std::array<uint64_t, 3> WHEEL_PRIMES = {2, 3, 5};          // mod 30
-//     constexpr std::array<uint64_t, 4> WHEEL_PRIMES = {2, 3, 5, 7};       // mod 210
-//     constexpr std::array<uint64_t, 5> WHEEL_PRIMES = {2, 3, 5, 7, 11};   // mod 2310
-//
-// The array size (the std::array<uint64_t, N> template argument) must
-// match the number of primes listed.
-//
-// NOTE: the small-prime tier (erat_small.hpp) relies on the mod-30 byte
-// layout (one byte = 30 numbers) for its compile-time bit masks and
-// static_asserts WHEEL_MOD == 30; the other configs below no longer build
-// without deriving an equivalent for them. mod 30 was already the measured
-// best (see docs/RESEARCH.md).
+// The mod-30 wheel: the sieve only represents numbers coprime to 2, 3 and 5,
+// the 8 residues 1, 7, 11, 13, 17, 19, 23, 29 of every 30, so one byte of
+// the bit array is exactly 30 consecutive integers. A wheel index k numbers
+// those candidates (k = 0 is 1, k = 1 is 7, ...); wheel_number() and
+// wheel_index() convert. The layout is fixed: the dense tiers' masks and
+// offsets (erat_small.hpp) and the multiplier tables (wheel210_big.hpp) are
+// derived for it. Bigger wheels (mod 210, 2310) were measured before the
+// tiered design and lost; see docs/RESEARCH.md, wheel.hpp section. The
+// multiples of 7 and 11 are skipped by the multiplier wheels instead.
 
 #include <cstdint>
 #include <array>
 
-//     constexpr std::array<uint64_t, 2> WHEEL_PRIMES = {2, 3};             // mod 6
-     constexpr std::array<uint64_t, 3> WHEEL_PRIMES = {2, 3, 5};          // mod 30
-//     constexpr std::array<uint64_t, 4> WHEEL_PRIMES = {2, 3, 5, 7};       // mod 210
-//     constexpr std::array<uint64_t, 5> WHEEL_PRIMES = {2, 3, 5, 7, 11};   // mod 2310
+constexpr std::array<uint64_t, 3> WHEEL_PRIMES = {2, 3, 5};
 
 constexpr uint64_t wheel_gcd(uint64_t a, uint64_t b) {
     while (b != 0) {
@@ -67,24 +39,8 @@ constexpr int compute_wheel_size() {
 }
 constexpr int WHEEL_SIZE = compute_wheel_size();
 
-// Whether WHEEL_SIZE is a power of 2 (true for 2,3 -> 2 and 2,3,5 -> 8;
-// false for 2,3,5,7 -> 48 and 2,3,5,7,11 -> 480). When it is, phase
-// wraparound (j -> (j+1) mod WHEEL_SIZE) can use a mask instead of a
-// compare-and-reset branch -- see segment_sieve.hpp, via `if constexpr`.
-constexpr bool WHEEL_SIZE_IS_POW2 = (WHEEL_SIZE & (WHEEL_SIZE - 1)) == 0;
-
-constexpr int compute_wheel_size_log2() {
-    int v = WHEEL_SIZE;
-    int log = 0;
-    while (v > 1) { v >>= 1; ++log; }
-    return log;
-}
-// 0 (not -1) when not a power of 2: that branch is never taken at runtime
-// (see the `if constexpr` in segment_sieve.hpp), but since WHEEL_SIZE_IS_POW2
-// isn't template-dependent there, the compiler still type-checks the
-// discarded branch, and a negative shift count would warn (UB if it were
-// ever evaluated, even though it never is).
-constexpr int WHEEL_SIZE_LOG2 = WHEEL_SIZE_IS_POW2 ? compute_wheel_size_log2() : 0;
+static_assert(WHEEL_MOD == 30 && WHEEL_SIZE == 8, "the byte layout is one byte = 30 numbers (mod 30)");
+constexpr int WHEEL_SIZE_LOG2 = 3; // k / 8 and k % 8 as a shift and a mask
 
 constexpr bool is_prime_trial(uint64_t n) {
     if (n < 2) return false;

@@ -17,19 +17,12 @@
 // loop into 8 `s[b + o_j] |= M_j` per cycle: no per-hit phase counter, no
 // per-prime delta[] table load, no variable shift -- about 2 instructions
 // per hit instead of the ~9-12 of the generic k += delta[j] loop.
-//
-// Only valid for WHEEL_MOD == 30 (the byte <-> 30-number correspondence is
-// what makes the masks constant); the other wheel configs in wheel.hpp
-// would need their own derivation.
 
 #include <algorithm>
 #include <cstdint>
 
 #include "wheel.hpp"
 #include "wheel210_big.hpp"
-
-static_assert(WHEEL_MOD == 30 && WHEEL_SIZE == 8,
-              "erat_small.hpp: the unrolled byte marking only exists for the mod-30 wheel");
 
 namespace erat {
 
