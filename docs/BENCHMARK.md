@@ -4,7 +4,7 @@
 
 ## Intel Xeon Emerald Rapids (claude.ai sandbox, host 1)
 
-Intel Xeon @ 2.10GHz (Emerald Rapids, 2023, family 6 model 207), 2 vCPU KVM (1 per core), 7.8 GiB. L1d 48 KiB and L2 2 MiB per core; L3 260 MiB. primesieve 12.0; mean of 3, pairs interleaved; counts eratostenes 3172ea8, tails b53a814 (2026-10-07). Two sandboxes with this CPU model land on different hosts; both are listed (which host a sandbox lands on can't be told from inside, so the two sections are two samples, not two fixed machines).
+Intel Xeon @ 2.10GHz (Emerald Rapids, 2023, family 6 model 207), 2 vCPU KVM (1 per core), 7.8 GiB. L1d 48 KiB and L2 2 MiB per core; L3 260 MiB.
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
@@ -24,7 +24,7 @@ Intel Xeon @ 2.10GHz (Emerald Rapids, 2023, family 6 model 207), 2 vCPU KVM (1 p
 
 ## Intel Xeon Emerald Rapids (claude.ai sandbox, host 2)
 
-Same CPU model and VM shape as host 1. primesieve 12.0; mean of 3, pairs interleaved; counts eratostenes 3172ea8, tails b53a814 (2026-10-07).
+Same CPU model and VM shape as host 1.
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
@@ -44,7 +44,7 @@ Same CPU model and VM shape as host 1. primesieve 12.0; mean of 3, pairs interle
 
 ## Intel Core i5-13500
 
-Intel Core i5-13500 (Raptor Lake, 2023), 64 GB. 20 threads (2 per core); L1d 544 KiB (14 instances); L2 11.5 MiB (8 instances); L3 24 MiB. primesieve 11.0 (Debian, inside the `dev` container); eratostenes 5f7d213; mean of 3, pairs interleaved.
+Intel Core i5-13500 (Raptor Lake, 2023), 64 GB. 20 threads (2 per core); L1d 544 KiB (14 instances); L2 11.5 MiB (8 instances); L3 24 MiB.
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
@@ -106,7 +106,7 @@ Intel Core i5-11400F (Rocket Lake, 2021).
 
 ## Intel Xeon @ 2.80GHz (claude.ai sandbox)
 
-Intel Xeon @ 2.80GHz (Cascade Lake, 2019; the hypervisor hides the exact model), 2 vCPU KVM (1 per core), 7 GB. L1d 32 KiB and L2 1 MiB per core; L3 33 MiB. primesieve 12.0; mean of 3, pairs interleaved; counts eratostenes 3172ea8, tails b53a814 (2026-10-07).
+Intel Xeon @ 2.80GHz (Cascade Lake, 2019; the hypervisor hides the exact model), 2 vCPU KVM (1 per core), 7 GB. L1d 32 KiB and L2 1 MiB per core; L3 33 MiB.
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
@@ -126,27 +126,27 @@ Intel Xeon @ 2.80GHz (Cascade Lake, 2019; the hypervisor hides the exact model),
 
 ## Intel Core i5-3470
 
-Intel Core i5-3470 (Ivy Bridge, 2012), 8 GB. 4 threads (1 per core); L1d 128 KiB (4 instances); L2 1 MiB (4 instances); L3 6 MiB. primesieve 12.12 (Ubuntu live USB); eratostenes 5f7d213; mean of 3, pairs interleaved.
+Intel Core i5-3470 (Ivy Bridge, 2012), 8 GB. 4 threads (1 per core); L1d 128 KiB (4 instances); L2 1 MiB (4 instances); L3 6 MiB.
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
-| 1e10 | 0.44s | 0.439s | 1.00x |
-| 1e11 | 5.54s | 5.514s | 1.00x |
-| 1e12 | 69.48s | 70.212s | 0.99x |
-| 1e13 | 882.43s | 909.756s | 0.97x |
+| 1e10 | 0.44s | 0.440s | 1.00x |
+| 1e11 | 5.52s | 5.526s | 1.00x |
+| 1e12 | 69.43s | 70.143s | 0.99x |
+| 1e13 | 873.75s | 906.237s | 0.96x |
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
-| 1e13 | 9.74s | 10.505s | 0.93x |
-| 1e14 | 12.21s | 14.469s | 0.84x |
-| 1e15 | 13.84s | 18.306s | 0.76x |
-| 1e16 | 15.66s | 21.545s | 0.73x |
-| 1e17 | 17.83s | 21.865s | 0.82x |
-| 1e18 | 20.75s | 25.292s | 0.82x |
+| 1e13 | 9.65s | 10.355s | 0.93x |
+| 1e14 | 12.62s | 14.538s | 0.87x |
+| 1e15 | 14.80s | 18.569s | 0.80x |
+| 1e16 | 17.28s | 21.489s | 0.80x |
+| 1e17 | 20.18s | 26.164s | 0.77x |
+| 1e18 | 21.84s | 27.588s | 0.79x |
 
 ## Intel Core i7-620M
 
-Intel Core i7-620M (Arrandale, 2010), 8 GB, running at 1.2 GHz (no battery: the SMC caps the clock; at its nominal 2.66 GHz it overheats).
+Intel Core i7-620M (Arrandale, 2010), 8 GB.
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
