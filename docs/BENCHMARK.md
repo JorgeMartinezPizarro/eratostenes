@@ -28,10 +28,10 @@ Same CPU model and VM shape as host 1. primesieve 12.0; eratostenes 5f7d213; mea
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
-| 1e10 | 0.74s | 0.709s | 1.04x |
-| 1e11 | 8.93s | 8.640s | 1.03x |
-| 1e12 | 104.44s | 107.871s | 0.97x |
-| 1e13 | 1212.70s | 1343.147s | 0.90x |
+| 1e10 | 0.71s | 0.709s | 1.00x |
+| 1e11 | 8.7s | 8.640s | 1.01x |
+| 1e12 | 104.31s | 107.871s | 0.97x |
+| 1e13 | 12100.94s | 1343.147s | 0.90x |
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
