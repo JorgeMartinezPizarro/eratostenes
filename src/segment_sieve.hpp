@@ -28,36 +28,10 @@
 #include "wheel.hpp"
 #include "wheel210_big.hpp"
 
-// Sparse tier: bucket entries process_big takes per iteration (see its
-// comment); -DERA_BIG_UNROLL=1 restores one per iteration for an A/B.
 // Sparse tier: process_big prefetches the segment byte of the entries this
 // many positions ahead in the bucket (see its comment); 0 turns it off.
 #ifndef ERA_BIG_PF
 #define ERA_BIG_PF 16
-#endif
-// Sparse tier: the next block's prefetch spread over the first half of the
-// current block (one line per 4 entries, default) instead of 64 prefetcht1
-// in a burst at the block boundary (-DERA_BIG_PFSPREAD=0 for the A/B). The
-// burst filled the core's miss queue and stalled on it: 22% of process_big's
-// cycles sat on that prefetch loop (dev PC, perf annotate, 1e15 tail).
-// Spread: -4.8..-5.3% at the 1e14-1e17 tails with 12 threads, -6.6% at
-// 1e15 with one thread per core, 3/3 each; cycles:u -3..-4.4% with +3.4%
-// instructions. See docs/RESEARCH.md#sparse-tier-next-block-prefetch-spread-over-the-current-block-kept-2026-10-04.
-#ifndef ERA_BIG_PFSPREAD
-#define ERA_BIG_PFSPREAD 1
-#endif
-// Sparse tier: process_big's mod-2310 loop in groups of 4 entries whose
-// count is worked out once per block, so the per-iteration tests that only
-// matter at a block's edges (is the next-block spread still running, is the
-// entry ERA_BIG_PF ahead still inside the block) leave the loop, and the
-// spread issues one prefetch per line instead of one per pair of entries.
-// callgrind: -11.4% of process_big<true>'s instructions; wall at the
-// 1e15-1e18 tails -0.5..-1.9% on the i5-3470 (one thread per core),
-// -1.2..-4.7% at 1e16-1e18 on the i5-13500 (20 threads). See
-// docs/RESEARCH.md#sparse-tier-process_big-in-groups-of-4-entries-no-per-iteration-edge-tests-kept-2026-10-06.
-// -DERA_BIG_FASTBLK=0 restores the single loop with the tests (A/B).
-#ifndef ERA_BIG_FASTBLK
-#define ERA_BIG_FASTBLK 1
 #endif
 // Sparse tier: with one thread per core the bucket arenas are 2 MiB regions
 // advised MADV_HUGEPAGE (SegmentSieve's huge_arenas, decided in tuning.hpp),
@@ -86,22 +60,13 @@ static inline uint64_t low_bits(uint64_t v, uint32_t nbits, uint64_t mask) {
     return v & mask;
 #endif
 }
-#ifndef ERA_BIG_UNROLL
-#define ERA_BIG_UNROLL 2
-#endif
-// Sparse activation (d7d2203, see docs/RESEARCH.md). ERA_ACT_KCUT=0 restores
-// the per-prime `p * p >= high_n` test in place of the per-segment isqrt
-// bound (on everywhere: neutral-to-better on every core measured).
-// ERA_ACT_IDX=0 recomputes p / 30 and p % 30 from the prime instead of
-// taking them from its wheel index: fewer instructions, and -7.3% cycles
-// at the 1e18 tail on the i5-13500, but +13% on the i5-3470 -- the same
-// division per prime stalls ~35 cycles longer there once the independent
-// work around it is gone (perf annotate, bisected with these knobs). On by
-// default only where BMI2 exists, i.e. Haswell and newer; Ivy Bridge and
-// the portable build take the old derivation.
-#ifndef ERA_ACT_KCUT
-#define ERA_ACT_KCUT 1
-#endif
+// Sparse activation (d7d2203, see docs/RESEARCH.md). ERA_ACT_IDX=0
+// recomputes p / 30 and p % 30 from the prime instead of taking them from
+// its wheel index: fewer instructions, and -7.3% cycles at the 1e18 tail on
+// the i5-13500, but +13% on the i5-3470 -- the same division per prime
+// stalls ~35 cycles longer there once the independent work around it is
+// gone (perf annotate). On by default only where BMI2 exists, i.e. Haswell
+// and newer; Ivy Bridge and the portable build take the old derivation.
 #ifndef ERA_ACT_IDX
 #ifdef __BMI2__
 #define ERA_ACT_IDX 1
@@ -131,13 +96,12 @@ public:
     // flooring seg_k_width to the nearest power of 2 (in bytes) whenever
     // has_sparse is true; this constructor just verifies that was done.
     SegmentSieve(uint64_t seg_k_width, uint64_t base_prime_max, const Presieve& presieve,
-                 uint64_t sub_block_bytes, bool has_sparse, bool medium_nta, bool big2310,
+                 uint64_t sub_block_bytes, bool has_sparse, bool medium_nta,
                  bool huge_arenas = false)
         : words_((seg_k_width + 63) / 64, 0),
           seg_k_width_(seg_k_width),
           sub_block_bytes_(sub_block_bytes),
           medium_nta_(medium_nta),
-          big2310_(big2310),
           presieve_(presieve),
           arena_bytes_(huge_arenas ? (size_t{2} << 20) : BLK_BYTES * 256),
           huge_arenas_(huge_arenas) {
@@ -166,23 +130,17 @@ public:
         log2_sb_ = 0;
         while ((uint64_t{1} << log2_sb_) < sb) ++log2_sb_;
         sb_mask_ = (uint64_t{1} << log2_sb_) - 1;
+        // The packed sparse entry (see file_sparse) holds pos in 24 bits and
+        // qp in 28.
+        if (log2_sb_ > 24 || base_prime_max / WHEEL_MOD >= (uint64_t{1} << 28)) {
+            throw std::runtime_error("SegmentSieve: segment or base prime too large for the sparse tier");
+        }
         // Largest BYTE step between one sparse prime's consecutive hits:
-        // qp * max(dm) + max(corr), with max(dm) = 10 on the mod-210
-        // multiplier wheel (the largest gap between consecutive 210-
-        // coprime residues) -- a few extra WHEEL_SIZE's of slack (+16)
-        // cost nothing (buckets are cheap) and keep this comfortably safe.
-        // mod-2310 (big2310_): max(dm) = 14, and the packed entry (see
-        // activation) holds pos in 24 bits and qp in 28.
-        if (big2310_ && (log2_sb_ > 24 || base_prime_max / WHEEL_MOD >= (uint64_t{1} << 28))) {
-            throw std::runtime_error("SegmentSieve: segment or base prime too large for the mod-2310 sparse tier");
-        }
-        // mod-210 (--tune big2310=0): qw = (qp << 9) | idx in 32 bits, so qp
-        // < 2^23, i.e. p < ~2.5e8 and N < ~6.3e16 -- this wrapped silently.
-        if (!big2310_ && base_prime_max / WHEEL_MOD >= (uint64_t{1} << 23)) {
-            throw std::runtime_error("SegmentSieve: base prime too large for the mod-210 sparse tier "
-                                     "(N must be below ~6.3e16 with --tune big2310=0)");
-        }
-        uint64_t maxstep = base_prime_max / WHEEL_MOD * (big2310_ ? 14 : 10) + 16;
+        // qp * max(dm) + max(corr), with max(dm) = 14 on the mod-2310
+        // multiplier wheel (the largest gap between consecutive 2310-coprime
+        // residues) -- a few extra WHEEL_SIZE's of slack (+16) cost nothing
+        // (buckets are cheap) and keep this comfortably safe.
+        uint64_t maxstep = base_prime_max / WHEEL_MOD * 14 + 16;
         uint64_t ahead = (maxstep >> log2_sb_) + 2;
         num_buckets_ = 1;
         while (num_buckets_ < ahead * 2) num_buckets_ <<= 1; // power of 2, 2x margin
@@ -271,40 +229,19 @@ public:
         // the residue class, so nothing is divided by 30 per prime.
         size_t sparse_activated = 0;
         if (next_sparse_k_ < sparse_primes.k_begin) next_sparse_k_ = sparse_primes.k_begin;
-        if constexpr (ERA_ACT_KCUT) {
-            const uint64_t k_cut = wheel_count_upto(isqrt(high_n - 1)); // primes with p*p < high_n have k < k_cut
-            const uint64_t k_stop = std::min(k_cut, sparse_primes.k_end);
-            while (next_sparse_k_ < k_stop) {
-                const uint64_t wi = next_sparse_k_ >> 6;
-                const uint64_t word_end = std::min((wi + 1) << 6, k_stop);
-                uint64_t bits = sparse_primes.words[wi] & (~uint64_t{0} << (next_sparse_k_ & 63));
-                if (word_end & 63) bits &= (uint64_t{1} << (word_end & 63)) - 1; // partial last word
-                while (bits) {
-                    file_sparse((wi << 6) + static_cast<uint64_t>(__builtin_ctzll(bits)), low_n, k_low);
-                    ++sparse_activated;
-                    bits &= bits - 1;
-                }
-                next_sparse_k_ = word_end;
+        const uint64_t k_cut = wheel_count_upto(isqrt(high_n - 1)); // primes with p*p < high_n have k < k_cut
+        const uint64_t k_stop = std::min(k_cut, sparse_primes.k_end);
+        while (next_sparse_k_ < k_stop) {
+            const uint64_t wi = next_sparse_k_ >> 6;
+            const uint64_t word_end = std::min((wi + 1) << 6, k_stop);
+            uint64_t bits = sparse_primes.words[wi] & (~uint64_t{0} << (next_sparse_k_ & 63));
+            if (word_end & 63) bits &= (uint64_t{1} << (word_end & 63)) - 1; // partial last word
+            while (bits) {
+                file_sparse((wi << 6) + static_cast<uint64_t>(__builtin_ctzll(bits)), low_n, k_low);
+                ++sparse_activated;
+                bits &= bits - 1;
             }
-        } else {
-            // The pre-d7d2203 walk: p * p against high_n per prime.
-            while (next_sparse_k_ < sparse_primes.k_end) {
-                const uint64_t wi = next_sparse_k_ >> 6;
-                const uint64_t word_end = std::min((wi + 1) << 6, sparse_primes.k_end);
-                uint64_t bits = sparse_primes.words[wi] & (~uint64_t{0} << (next_sparse_k_ & 63));
-                bool reached = false;
-                while (bits) {
-                    const uint64_t k = (wi << 6) + static_cast<uint64_t>(__builtin_ctzll(bits));
-                    if (k >= word_end) break;
-                    const uint64_t p = wheel_number(k);
-                    if (p * p >= high_n) { next_sparse_k_ = k; reached = true; break; }
-                    file_sparse(k, low_n, k_low);
-                    ++sparse_activated;
-                    bits &= bits - 1;
-                }
-                if (reached) break;
-                next_sparse_k_ = word_end;
-            }
+            next_sparse_k_ = word_end;
         }
         return next_small_idx_ + next_med64_idx_ + next_medium_idx_ - before + sparse_activated;
     }
@@ -387,10 +324,7 @@ public:
         // avoids paying a real (non-inlined) call's overhead every single
         // segment for N where this tier never has anything to do (every N
         // tested up to 1e12 on this machine, see README#benchmarks).
-        if (!sparse_primes.empty()) {
-            if (big2310_) process_big<true>();
-            else process_big<false>();
-        }
+        if (!sparse_primes.empty()) process_big();
         if (++cur_segment_ == num_buckets_) wrap_ring();
 
         // Extraction: bit=0 => prime candidate. Three paths, by what the
@@ -675,17 +609,16 @@ private:
     // docs/RESEARCH.md#sparse-tier-block-size-4-kib-kept-2026-10-02.
     //
     // Drains this segment's ring slot: for each due entry, mark its one
-    // hit (byte marking, mod-210 table lookup for mask/step -- see
+    // hit (byte marking, a table lookup for mask/step -- see
     // wheel210_big.hpp), advance to the next hit, and re-file it by byte
     // position with a shift/mask instead of a division. `pos` in a live
     // entry is always relative to whichever segment it's due in, so no
     // k_low/k_high parameters are needed here.
     //
-    // W2310 (the default; --tune big2310=0 goes back to mod-210):
-    // mod-2310 multiplier wheel instead, entry packed as
-    // idx | pos << 12 | qp << 36 and big::TABLE2310 (32-bit rows, next index
-    // included) -- same work per hit (38 instructions vs 37), ~9.1% fewer
-    // hits. See docs/RESEARCH.md#sparse-tier-mod-2310-multiplier-wheel-kept-2026-09-30.
+    // Multipliers step on the mod-2310 wheel (11 is presieved too): entry
+    // packed as idx | pos << 12 | qp << 36, and big::TABLE2310 (32-bit rows,
+    // next index included) -- ~9.1% fewer hits than mod 210. See
+    // docs/RESEARCH.md#sparse-tier-mod-2310-multiplier-wheel-kept-2026-09-30.
     // Ring slots: this segment's is cur_segment_ (kept below num_buckets_,
     // see wrap_ring), a hit `ahead` segments on files into cur_segment_ +
     // ahead, always below the 2 x num_buckets_ slots allocated (the ring's
@@ -693,7 +626,6 @@ private:
     // file_sparse checks ahead < num_buckets_ for an activation). No wrap
     // mask in the loop: `& bmask` was one of ~47 instructions per hit and
     // kept bmask live across an issue-bound loop (see docs/RESEARCH.md).
-    template <bool W2310>
     __attribute__((noinline))
     void process_big() {
         const uint32_t slot = static_cast<uint32_t>(cur_segment_);
@@ -721,23 +653,16 @@ private:
                 // Chain blocks are scattered in memory (LIFO free list), so
                 // the hardware streamer restarts at every block boundary;
                 // the next block is prefetched into L2 one block's worth of
-                // work ahead -- spread over this block's first half (the
-                // loop below, ERA_BIG_PFSPREAD) or, the 2026-09-27 form, as
-                // a burst of 64 prefetcht1 here. See
+                // work ahead, one line at a time over this block's first half
+                // (a burst of 64 prefetches at the boundary filled the miss
+                // queue and stalled on it). See
                 // docs/RESEARCH.md#sparse-tier-prefetch-the-next-block-of-the-chain-once-per-block-kept-2026-09-27
                 // and docs/RESEARCH.md#sparse-tier-next-block-prefetch-spread-over-the-current-block-kept-2026-10-04.
                 // The last block of a chain has no next: its prefetch target
-                // is itself (already cached, harmless) so the spread loop
-                // below has no `next_blk != nullptr` test per iteration --
-                // that flag was a stack load and a branch on every pair of
-                // hits.
+                // is itself (already cached, harmless), so the loops below
+                // have no `next_blk != nullptr` test.
                 const char* nb = reinterpret_cast<const char*>(next_blk ? next_blk : blk);
-                if constexpr (!ERA_BIG_PFSPREAD) {
-                    if (next_blk)
-                        for (size_t off = 0; off < BLK_BYTES; off += 64) __builtin_prefetch(nb + off, 0, 2);
-                }
                 erat::DenseState* it = blk->entries();
-                [[maybe_unused]] erat::DenseState* const blk_base = it;
                 erat::DenseState* end = next_blk ? blk->block_end() : last_end;
                 // One 8-byte load per entry and per table row (fields split
                 // with shifts), the entry rebuilt as one 8-byte store, and the
@@ -745,126 +670,93 @@ private:
                 // field-by-field loads plus spills of the loop constants
                 // around the inline allocation cost ~12 loads per hit.
                 //
-                // ERA_BIG_UNROLL entries per iteration (mod-2310 path): every
-                // entry's load, table row and segment RMW is issued before any
-                // push, so one entry's misses overlap the others' -- EratBig's
-                // own loop shape (it takes two). The pushes stay in order: a
-                // shared slot's later push reads the tail the earlier one just
-                // wrote. The constexpr inner loops unroll fully at -O3.
-                if constexpr (W2310 && ERA_BIG_UNROLL > 1) {
-                    constexpr int U = ERA_BIG_UNROLL;
-                    // The segment byte of the entries ERA_BIG_PF ahead of p,
-                    // cnt of them (same block, stale entries past `end`
-                    // excluded by the caller): pos is the entry's own bits, no
-                    // table needed, and that RMW is the load that misses once
-                    // two threads share an L2 (dev PC, 12 threads: -2..-5% at
-                    // the 1e15/1e18 tails; a tie with one thread per core). 16
-                    // beat 8 and 32; see docs/RESEARCH.md.
-                    auto seg_pf = [&](const erat::DenseState* p, size_t cnt) __attribute__((always_inline)) {
-                        if constexpr (ERA_BIG_PF > 0) {
-                            for (size_t k = 0; k < cnt; ++k) {
-                                uint64_t pe;
-                                std::memcpy(&pe, p + ERA_BIG_PF + k, sizeof(uint64_t));
-                                __builtin_prefetch(s + ((pe >> 12) & 0xffffff), 1, 3);
-                            }
-                        } else {
-                            (void)p; (void)cnt;
+                // Two entries per step: both entries' loads, table rows and
+                // segment RMWs are issued before either push, so one entry's
+                // misses overlap the other's -- EratBig's own loop shape. The
+                // pushes stay in order: a shared slot's second push reads the
+                // tail the first one just wrote. The constexpr inner loops
+                // unroll fully at -O3.
+                constexpr int U = 2;
+                // The segment byte of the entries ERA_BIG_PF ahead of p,
+                // cnt of them (same block, stale entries past `end`
+                // excluded by the caller): pos is the entry's own bits, no
+                // table needed, and that RMW is the load that misses once
+                // two threads share an L2 (dev PC, 12 threads: -2..-5% at
+                // the 1e15/1e18 tails; a tie with one thread per core). 16
+                // beat 8 and 32; see docs/RESEARCH.md.
+                auto seg_pf = [&](const erat::DenseState* p, size_t cnt) __attribute__((always_inline)) {
+                    if constexpr (ERA_BIG_PF > 0) {
+                        for (size_t k = 0; k < cnt; ++k) {
+                            uint64_t pe;
+                            std::memcpy(&pe, p + ERA_BIG_PF + k, sizeof(uint64_t));
+                            __builtin_prefetch(s + ((pe >> 12) & 0xffffff), 1, 3);
                         }
-                    };
-                    // The U entries [p, p + U): loads, table rows and segment
-                    // RMWs first, then the pushes in order.
-                    auto body = [&](const erat::DenseState* p) __attribute__((always_inline)) {
-                        uint64_t ent[U], pos[U], te[U], e[U], sl[U];
-                        for (int k = 0; k < U; ++k) std::memcpy(&ent[k], p + k, sizeof(uint64_t));
-                        for (int k = 0; k < U; ++k) {
-                            pos[k] = (ent[k] >> 12) & 0xffffff;
-                            te[k] = big::TABLE2310[ent[k] & 4095];
-                        }
-                        for (int k = 0; k < U; ++k) s[pos[k]] |= static_cast<uint8_t>(te[k]);
-                        uint64_t nidx[U];
-                        for (int k = 0; k < U; ++k) {
-                            pos[k] += (ent[k] >> 36) * ((te[k] >> 8) & 0xff) + ((te[k] >> 16) & 15);
-                            nidx[k] = te[k] >> 20;
-                        }
-                        for (int k = 0; k < U; ++k) {
-                            sl[k] = pos[k] >> log2sb; // segments ahead: the slot is tails_cur[sl]
-                            e[k] = (ent[k] & ~((uint64_t{1} << 36) - 1)) | nidx[k] | (low_bits(pos[k], log2sb, modsb) << 12);
-                        }
-                        for (int k = 0; k < U; ++k) {
-                            erat::DenseState** const tp = tails_cur + sl[k];
-                            erat::DenseState* w = *tp;
-                            if ((reinterpret_cast<uintptr_t>(w) & (BLK_BYTES - 1)) == 0) [[unlikely]]
-                                w = new_block(static_cast<uint32_t>(tp - tail_.data()));
-                            std::memcpy(w, &e[k], sizeof(uint64_t));
-                            *tp = w + 1;
-                        }
-                    };
-                    if constexpr (ERA_BIG_FASTBLK) {
-                        // Groups of G entries, counted once per block: the
-                        // first `spread` groups also prefetch line g of the
-                        // next block (64 lines over the block's first 256
-                        // entries, one request each), the rest only the segment
-                        // bytes ERA_BIG_PF ahead; the last entries, whose
-                        // ERA_BIG_PF-ahead neighbours are past `end`, go
-                        // through the plain pairs. No test inside either loop
-                        // but its own end.
-                        constexpr size_t G = 4;
-                        static_assert(G % U == 0, "ERA_BIG_FASTBLK: ERA_BIG_UNROLL must divide 4");
-                        constexpr size_t PF = ERA_BIG_PF > 0 ? ERA_BIG_PF : 0;
-                        const size_t n = static_cast<size_t>(end - it);
-                        const size_t groups = n >= PF + G ? (n - PF) / G : 0;
-                        const size_t spread = ERA_BIG_PFSPREAD ? std::min<size_t>(groups, BLK_BYTES / 64) : 0;
-                        const char* line = nb;
-                        for (erat::DenseState* const ge = it + spread * G; it != ge; it += G) {
-                            __builtin_prefetch(line, 0, 2);
-                            line += 64;
-                            seg_pf(it, G);
-                            for (size_t k = 0; k < G; k += U) body(it + k);
-                        }
-                        for (erat::DenseState* const ge = it + (groups - spread) * G; it != ge; it += G) {
-                            seg_pf(it, G);
-                            for (size_t k = 0; k < G; k += U) body(it + k);
-                        }
-                        for (; it + U <= end; it += U) body(it);
                     } else {
-                        for (; it + U <= end; it += U) {
-                            if constexpr (ERA_BIG_PFSPREAD) {
-                                // Line idx/4 of the next block during entries 0..255
-                                // of this one: 64 lines over half a block, each
-                                // requested twice (U = 2), never in a burst.
-                                const size_t idx = static_cast<size_t>(it - blk_base);
-                                if (idx < BLK_BYTES / 16) __builtin_prefetch(nb + (idx >> 2) * 64, 0, 2);
-                            }
-                            if (it + ERA_BIG_PF + U <= end) seg_pf(it, U);
-                            body(it);
-                        }
+                        (void)p; (void)cnt;
                     }
+                };
+                // The U entries [p, p + U): loads, table rows and segment
+                // RMWs first, then the pushes in order.
+                auto body = [&](const erat::DenseState* p) __attribute__((always_inline)) {
+                    uint64_t ent[U], pos[U], te[U], e[U], sl[U];
+                    for (int k = 0; k < U; ++k) std::memcpy(&ent[k], p + k, sizeof(uint64_t));
+                    for (int k = 0; k < U; ++k) {
+                        pos[k] = (ent[k] >> 12) & 0xffffff;
+                        te[k] = big::TABLE2310[ent[k] & 4095];
+                    }
+                    for (int k = 0; k < U; ++k) s[pos[k]] |= static_cast<uint8_t>(te[k]);
+                    uint64_t nidx[U];
+                    for (int k = 0; k < U; ++k) {
+                        pos[k] += (ent[k] >> 36) * ((te[k] >> 8) & 0xff) + ((te[k] >> 16) & 15);
+                        nidx[k] = te[k] >> 20;
+                    }
+                    for (int k = 0; k < U; ++k) {
+                        sl[k] = pos[k] >> log2sb; // segments ahead: the slot is tails_cur[sl]
+                        e[k] = (ent[k] & ~((uint64_t{1} << 36) - 1)) | nidx[k] | (low_bits(pos[k], log2sb, modsb) << 12);
+                    }
+                    for (int k = 0; k < U; ++k) {
+                        erat::DenseState** const tp = tails_cur + sl[k];
+                        erat::DenseState* w = *tp;
+                        if ((reinterpret_cast<uintptr_t>(w) & (BLK_BYTES - 1)) == 0) [[unlikely]]
+                            w = new_block(static_cast<uint32_t>(tp - tail_.data()));
+                        std::memcpy(w, &e[k], sizeof(uint64_t));
+                        *tp = w + 1;
+                    }
+                };
+                // Groups of G entries, counted once per block: the first
+                // `spread` groups also prefetch line g of the next block (64
+                // lines over the block's first 256 entries, one request
+                // each), the rest only the segment bytes ERA_BIG_PF ahead;
+                // the last entries, whose ERA_BIG_PF-ahead neighbours are
+                // past `end`, go through the plain pairs. No test inside
+                // either loop but its own end (the per-pair edge tests were
+                // ~11% of the loop's instructions, docs/RESEARCH.md).
+                constexpr size_t G = 4;
+                constexpr size_t PF = ERA_BIG_PF > 0 ? ERA_BIG_PF : 0;
+                const size_t n = static_cast<size_t>(end - it);
+                const size_t groups = n >= PF + G ? (n - PF) / G : 0;
+                const size_t spread = std::min<size_t>(groups, BLK_BYTES / 64);
+                const char* line = nb;
+                for (erat::DenseState* const ge = it + spread * G; it != ge; it += G) {
+                    __builtin_prefetch(line, 0, 2);
+                    line += 64;
+                    seg_pf(it, G);
+                    for (size_t k = 0; k < G; k += U) body(it + k);
                 }
+                for (erat::DenseState* const ge = it + (groups - spread) * G; it != ge; it += G) {
+                    seg_pf(it, G);
+                    for (size_t k = 0; k < G; k += U) body(it + k);
+                }
+                for (; it + U <= end; it += U) body(it);
+                // An odd last entry, one at a time.
                 for (; it != end; ++it) {
                     uint64_t ent;
-                    std::memcpy(&ent, it, sizeof(ent));
-                    uint64_t pos, e_keep, nidx;
-                    if constexpr (W2310) { // idx | pos << 12 | qp << 36
-                        uint64_t idx = ent & 4095;
-                        pos = (ent >> 12) & 0xffffff;
-                        uint64_t a = ent >> 36;
-                        uint64_t te = big::TABLE2310[idx]; // mask | dm << 8 | corr << 16 | next << 20
-                        s[pos] |= static_cast<uint8_t>(te);
-                        pos += a * ((te >> 8) & 0xff) + ((te >> 16) & 15);
-                        nidx = te >> 20;
-                        e_keep = ent & ~((uint64_t{1} << 36) - 1);
-                    } else { // qw | pos << 32
-                        uint64_t qw = static_cast<uint32_t>(ent);
-                        pos = ent >> 32;
-                        uint64_t a = qw >> 9;
-                        uint64_t te = big::TABLE64[qw & 511]; // mask | dm << 8 | corr << 16 | next << 32
-                        s[pos] |= static_cast<uint8_t>(te);
-                        pos += a * ((te >> 8) & 0xff) + ((te >> 16) & 0xff);
-                        nidx = te >> 32;
-                        e_keep = a << 9;
-                    }
-                    uint64_t e = W2310 ? (e_keep | nidx | (low_bits(pos, log2sb, modsb) << 12))
-                                       : (e_keep | nidx | (low_bits(pos, log2sb, modsb) << 32));
+                    std::memcpy(&ent, it, sizeof(ent)); // idx | pos << 12 | qp << 36
+                    uint64_t pos = (ent >> 12) & 0xffffff;
+                    const uint64_t te = big::TABLE2310[ent & 4095]; // mask | dm << 8 | corr << 16 | next << 20
+                    s[pos] |= static_cast<uint8_t>(te);
+                    pos += (ent >> 36) * ((te >> 8) & 0xff) + ((te >> 16) & 15);
+                    const uint64_t e = (ent & ~((uint64_t{1} << 36) - 1)) | (te >> 20) | (low_bits(pos, log2sb, modsb) << 12);
                     erat::DenseState** const tp = tails_cur + (pos >> log2sb);
                     erat::DenseState* w = *tp;
                     // Null (empty slot) or on a block boundary (block full).
@@ -880,10 +772,9 @@ private:
     }
 
     // Files the sparse prime of wheel index k (EratBig-style activation, see
-    // the header comment): the smallest multiplier m coprime to 210 (2310
-    // with big2310_) with p*m >= max(p*p, low_n), packed with qp/residue
-    // class/phase into one word exactly like the dense tiers' DenseState,
-    // into the bucket ring by byte position (shift/mask, no division). From
+    // the header comment): the smallest multiplier m coprime to 2310 with
+    // p*m >= max(p*p, low_n), packed with qp/residue class/phase into one
+    // word, into the bucket ring by byte position (shift/mask, no division). From
     // the index, not the prime: k >> 3 is p / 30 and k & 7 its residue
     // class, which `p % 30` and `WHEEL_POS[]` recomputed per prime (18 of
     // ~83 instructions per activation, callgrind on the 1e17 tail).
@@ -902,40 +793,22 @@ private:
         }
         uint64_t start_val = std::max(p * p, low_n);
         uint64_t m = (start_val + p - 1) / p;
-        if (big2310_) {
-            // Packed as one word: idx (ri * 480 + w) in bits 0-11, pos
-            // in 12-35, qp in 36-63 -- see process_big<true>.
-            uint64_t t = m / 2310, sres = m % 2310;
-            uint64_t w = big::NEXT_W2310[sres];
-            if (w == big::W2310) { ++t; w = 0; }
-            m = t * 2310 + big::M2310[w];
-            uint64_t pos = p * m / WHEEL_MOD - k_low / 8;
-            uint64_t ahead = pos >> log2_sb_;
-            if (ahead >= num_buckets_) {
-                throw std::runtime_error(
-                    "bucket sieve: a sparse prime's step exceeds the bucket ring's margin "
-                    "(sizing bug in SegmentSieve's constructor)");
-            }
-            uint64_t ent = (ri * big::W2310 + w) | ((pos & sb_mask_) << 12) | (qp << 36);
-            erat::DenseState e;
-            std::memcpy(&e, &ent, sizeof(e));
-            push_sparse_entry(static_cast<uint32_t>(cur_segment_ + ahead), e);
-            return;
-        }
-        uint64_t t = m / 210, sres = m % 210;
-        uint64_t w = big::NEXT_W[sres];
-        if (w == 48) { ++t; w = 0; }
-        m = t * 210 + big::M210[w];
-        uint64_t n = p * m;
-        uint64_t pos = n / WHEEL_MOD - k_low / 8;
-        erat::DenseState e{static_cast<uint32_t>((qp << 9) | (ri * 48 + w)), 0};
+        // Packed as one word: idx (ri * 480 + w) in bits 0-11, pos in 12-35,
+        // qp in 36-63 -- see process_big.
+        uint64_t t = m / 2310, sres = m % 2310;
+        uint64_t w = big::NEXT_W2310[sres];
+        if (w == big::W2310) { ++t; w = 0; }
+        m = t * 2310 + big::M2310[w];
+        uint64_t pos = p * m / WHEEL_MOD - k_low / 8;
         uint64_t ahead = pos >> log2_sb_;
-        e.pos = static_cast<uint32_t>(pos & sb_mask_);
         if (ahead >= num_buckets_) {
             throw std::runtime_error(
                 "bucket sieve: a sparse prime's step exceeds the bucket ring's margin "
                 "(sizing bug in SegmentSieve's constructor)");
         }
+        uint64_t ent = (ri * big::W2310 + w) | ((pos & sb_mask_) << 12) | (qp << 36);
+        erat::DenseState e;
+        std::memcpy(&e, &ent, sizeof(e));
         push_sparse_entry(static_cast<uint32_t>(cur_segment_ + ahead), e);
     }
 
@@ -1015,7 +888,6 @@ private:
     uint64_t seg_k_width_;
     uint64_t sub_block_bytes_;
     bool medium_nta_; // prefetchnta the medium state (erat_small.hpp::cross_off_medium)
-    bool big2310_;    // sparse tier on the mod-2310 wheel (process_big<true>)
     static constexpr ptrdiff_t MED64_NTA_DIST = 32; // entries ahead (4 cache lines)
     const Presieve& presieve_;
 

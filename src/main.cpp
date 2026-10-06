@@ -192,8 +192,7 @@ static void sieve_chunk(ChunkRange range, const TierSet& t, uint64_t base_prime_
     if (slot->tiers != &t) {
         slot->sieve = std::make_unique<SegmentSieve>(t.width, base_prime_max, presieve, cfg.sub_block_bytes,
                                                      !t.sparse.empty(),
-                                                     t.medium.size() >= cfg.medium_nta_min_primes, cfg.big2310,
-                                                     cfg.huge_arenas);
+                                                     t.medium.size() >= cfg.medium_nta_min_primes, cfg.huge_arenas);
         slot->sieve->set_skip_below_k(cfg.skip_below_k);
         slot->tiers = &t;
         slot->next_k = UINT64_MAX;
@@ -738,16 +737,16 @@ int main(int argc, char** argv) {
     // run_parallel_chunks for why: work per chunk isn't uniform across the
     // range) and hand them out from a shared queue instead of one static
     // chunk per thread.
-    // Floored so each chunk spans at least MIN_SEGS_PER_CHUNK segments (1 by
-    // default, --tune minsegs=N): at small N, threads*150 chunks would be
-    // narrower than one segment, and per-chunk setup (SegmentSieve,
-    // re-activating every base prime) would dominate. No effect at large N,
-    // where chunks span thousands of segments. See
+    // Floored so each chunk spans at least MIN_SEGS_PER_CHUNK segments: at
+    // small N, threads*150 chunks would be narrower than one segment, and
+    // per-chunk setup (SegmentSieve, re-activating every base prime) would
+    // dominate. No effect at large N, where chunks span thousands of
+    // segments. See
     // docs/RESEARCH.md#chunk-width-floor-at-least-4-segments-per-chunk-kept-2026-09-27
     // (4 until 2026-10-02, when sieve_chunk started carrying the sieve
     // across a worker's consecutive chunks).
     constexpr unsigned CHUNKS_PER_THREAD = 150;
-    const uint64_t MIN_SEGS_PER_CHUNK = opt.minsegs;
+    constexpr uint64_t MIN_SEGS_PER_CHUNK = 1;
     uint64_t width_cap = wheel_count_upto(opt.limit) / (MIN_SEGS_PER_CHUNK * P.seg_k_width);
     // No floor of one chunk per thread either: a range under threads *
     // MIN_SEGS_PER_CHUNK segments runs on fewer threads (actual_threads

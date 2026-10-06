@@ -58,8 +58,7 @@ hit `pos += qp*dm + corr`, no division).
 The sparse tier goes one step further, to the 480 residues coprime to 2310: the
 presieve covers 11 as well, so multipliers divisible by 11 are redundant too
 (~9.1% fewer sparse hits). `big::TABLE2310` holds its rows as one 32-bit word
-(`mask | dm << 8 | corr << 16 | next << 20`, 15 KiB); `--tune big2310=0`
-switches back to mod-210.
+(`mask | dm << 8 | corr << 16 | next << 20`, 15 KiB).
 The small tier stays on mod-30 multipliers: its unrolled loop depends on the
 8-hits-per-p-bytes cycle, and the mod-210 version tried lost (see
 [RESEARCH.md](RESEARCH.md#erat_smallhpp)).

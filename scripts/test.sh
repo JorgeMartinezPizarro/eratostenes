@@ -182,7 +182,7 @@ check_combo "combo 1h/cache chica/bloque chico" -t 1 -s 2000 --l1-bytes 16384 --
 check_combo "combo 2h/segmento grande/bloque grande" -t 2 -s 5000000 --db-block-size 500000 --zstd-level 1
 check_combo "combo cache forzada grande"       -t "$THREADS" --l1-bytes 1048576 --l2-bytes 8388608 --db-block-size 65536 --zstd-level 9
 check_combo "combo segmento minimo"            -t "$THREADS" -s 64 --db-block-size 100 --zstd-level 1
-check_combo "combo disperso mod 210"           -t 3 -s 2000 --tune big2310=0 --db-block-size 1000
+check_combo "combo disperso"                   -t 3 -s 2000 --db-block-size 1000
 check_combo "combo cortes rebajados"           -t "$THREADS" -s 100000 --tune small=1/2 --tune med64=1/8 --tune sparse=1/2
 check_combo "combo sin med64/disperso"         -t 2 -s 2000 --tune med64=0 --zstd-level 3
 check_combo "combo NTA medio forzado"          -t "$THREADS" -s 100000 --tune medium_nta=1
@@ -240,8 +240,7 @@ done
 # --- 5: caminos de N grande y --start, modo conteo, contra primecount ---
 N5=10000000000
 expected_pi_1e10=$("$PRIMECOUNT" "$N5")
-check_count_only "$N5" "$expected_pi_1e10" "disperso forzado (mod 2310)"   -t "$THREADS" -s 100000
-check_count_only "$N5" "$expected_pi_1e10" "disperso forzado (mod 210)"    -t "$THREADS" -s 100000 --tune big2310=0
+check_count_only "$N5" "$expected_pi_1e10" "disperso forzado"              -t "$THREADS" -s 100000
 check_count_only "$N5" "$expected_pi_1e10" "sin med64, disperso forzado"   -t 5 -s 500000 --tune med64=0
 check_count_only "$N5" "$expected_pi_1e10" "cortes small/med64/sparse"     -t "$THREADS" --tune small=1/8 --tune med64=1/6 --tune sparse=1/4
 check_count_only "$N5" "$expected_pi_1e10" "NTA medio forzado on"          -t "$THREADS" --tune medium_nta=1
@@ -258,7 +257,7 @@ check_start() {
 check_start "$N5" 9000000000 -t "$THREADS"
 check_start "$N5" 9999000001 -t 3 -s 100000
 check_start 1000000 2 -t "$THREADS"
-check_start 100000000 7 -t 2 --tune big2310=0 -s 20000
+check_start 100000000 7 -t 2 -s 20000
 # Por encima de 2^53 (~9.007e15): 9007199254740997 es primo y = 1 mod 4, asi
 # que leerlo via double lo redondeaba a ...996 y el tramo perdia ese primo.
 check_start 9007199254740997 9007199254739761 -t "$THREADS"
@@ -266,7 +265,7 @@ check_start 9007199254740997 9007199254739761 -t "$THREADS"
 # split_ranges redondea hacia abajo y los primos de esa cabecera no cuentan
 # (3 de mas hasta 2026-10-04).
 check_start 20000000000000000 19999900000000000 -t 2
-check_start 20000000000000000 19999900000000000 -t 1 --tune big2310=0
+check_start 20000000000000000 19999900000000000 -t 1
 # Un primo de arranque cuyo indice de rueda es 63 mod 64 (239 -> 63, 2399 ->
 # 639): split_ranges lo dejaba fuera del primer chunk (una menos que
 # primesieve hasta 2026-10-05); 240 con --start 239 cribaba un rango vacio.
@@ -335,7 +334,6 @@ expect_reject "opcion desconocida"       1000 --bogus
 expect_reject "--tune desconocido"       1000 --tune foo=1
 expect_reject "--tune sparse=2/1"        1000 --tune sparse=2/1
 expect_reject "--tune sparse=0"          1000 --tune sparse=0
-expect_reject "--tune big2310=2"         1000 --tune big2310=2
 expect_reject "--zstd-level abc"         1000 --zstd-level abc
 expect_reject "--zstd-level 99"          1000 --zstd-level 99
 

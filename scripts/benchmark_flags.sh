@@ -9,13 +9,13 @@
 # Usage: make benchmark-flags   (or: bash scripts/benchmark_flags.sh)
 # Env: FLAGS (space-separated list of -D... entries, one variant each; a
 #      variant needing two defines joins them with a comma, e.g.
-#      "-DERA_BIG_UNROLL=1,-DERA_BIG_PF=0"), N (default 1e15: the sparse
+#      "-DERA_BIG_PF=0,-DERA_BLK_BYTES=8192"), N (default 1e15: the sparse
 #      knobs need the sparse tier), WIDTH (default 1e10), THREADS (default
 #      nproc), REPS (default 2)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-FLAGS="${FLAGS:--DERA_BIG_UNROLL=1 -DERA_BIG_PF=0 -DERA_BLK_BYTES=1024 -DERA_BLK_BYTES=8192}"
+FLAGS="${FLAGS:--DERA_BIG_PF=0 -DERA_BLK_BYTES=1024 -DERA_BLK_BYTES=8192}"
 export N="${N:-1e15}"
 export WIDTH="${WIDTH:-1e10}"
 export THREADS="${THREADS:-$(nproc)}"

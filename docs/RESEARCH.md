@@ -26,8 +26,15 @@ machine they were measured on were removed with their code: `ERA_MED_BANDS`,
 `ERA_MED_PAIRS`, `ERA_BIG_LOOP`, `ERA_BIG_PFPUSH`, `ERA_FPDIV`,
 `ERA_ACT_BATCH`, `ERA_BLK_COLOR`, and the runtime `--tune med64s` (the
 sub-blocked med64 band). Their entries below keep the measurements; the code
-is in git history up to 83aebae. The default binary executes the same
-instructions in every hot kernel (callgrind, function by function).
+is in git history up to 83aebae. Then the old paths kept only as A/B
+controls once the new one was settled everywhere: `ERA_BIG_PFSPREAD=0` (the
+burst next-block prefetch), `ERA_BIG_FASTBLK=0` (the per-pair edge tests),
+`ERA_ACT_KCUT=0` (the per-prime `p * p` test), `ERA_BIG_UNROLL` (two
+entries per step is fixed), `--tune big2310=0` (the whole mod-210 sparse
+path, which also capped N below ~6.3e16) and `--tune minsegs` (1 since
+2026-10-02); code in git history up to e2874b0. After each step the default
+binary executes the same instructions in every hot kernel (callgrind,
+function by function).
 
 Unless noted otherwise, measurements are from the project's dev PC (i5-11400F, 6C/
 12T, no E-cores) using `perf stat cycles:u` (not wall-clock -- see the project's own

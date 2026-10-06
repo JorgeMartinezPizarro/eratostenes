@@ -36,9 +36,6 @@ struct SieveConfig {
     // chunk's tier set when it has at least this many medium primes, i.e.
     // when their state (8 bytes each) outgrows the per-thread L3 share.
     uint64_t medium_nta_min_primes = UINT64_MAX;
-    // Sparse tier on the mod-2310 multiplier wheel (SegmentSieve::process_big<true>),
-    // on by default; --tune big2310=0 goes back to mod-210 (A/B). See docs/RESEARCH.md.
-    bool big2310 = true;
     // --debug-idle: run_parallel_chunks prints how far apart the threads finished.
     bool debug_idle = false;
     // Smallest piece (wheel indices) a worker steals from another's run in
@@ -107,7 +104,6 @@ inline SievePlan plan_sieve(Options& opt, const BasePrimes& base, uint64_t base_
     SieveConfig& cfg = P.cfg;
     cfg.debug_idle = opt.debug_idle;
     cfg.skip_below_k = opt.start ? std::max<uint64_t>(wheel_count_upto(opt.start - 1), 1) : 1;
-    cfg.big2310 = opt.big2310;
 
     // --segment-width is a numeric width (so the option keeps meaning the
     // same thing to the user); it's converted to a width in wheel indices
@@ -623,7 +619,6 @@ inline void print_plan(const SievePlan& P, const Options& opt, unsigned actual_t
                                                                    : " (L3 per active thread >= 1.5 MiB)")
                      : P.sparse_den_auto == 4 ? " (L2 per thread >= 1 MiB)"
                      : P.sparse_den_auto == 2 ? " (L2 per thread >= 512 KiB)" : "");
-    if (!cfg.big2310 && !P.wide.sparse.empty()) std::fprintf(stderr, "  sparse tier on the mod-210 wheel (--tune big2310=0)\n");
     if (!P.wide.sparse.empty())
         std::fprintf(stderr, "  sparse ring: %s arenas%s\n",
                      cfg.huge_arenas ? "2 MiB huge-page" : "1 MiB",
