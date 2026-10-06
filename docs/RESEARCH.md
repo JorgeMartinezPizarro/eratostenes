@@ -21,6 +21,14 @@ decision was settled were removed together with the code they switched off
 `NARROW_EARLY`, `MIN_SEGS_PER_CHUNK`). The entries keep the names they were
 measured with.
 
+**Cleanup of 2026-10-07:** the compile-time experiments that lost on every
+machine they were measured on were removed with their code: `ERA_MED_BANDS`,
+`ERA_MED_PAIRS`, `ERA_BIG_LOOP`, `ERA_BIG_PFPUSH`, `ERA_FPDIV`,
+`ERA_ACT_BATCH`, `ERA_BLK_COLOR`, and the runtime `--tune med64s` (the
+sub-blocked med64 band). Their entries below keep the measurements; the code
+is in git history up to 83aebae. The default binary executes the same
+instructions in every hot kernel (callgrind, function by function).
+
 Unless noted otherwise, measurements are from the project's dev PC (i5-11400F, 6C/
 12T, no E-cores) using `perf stat cycles:u` (not wall-clock -- see the project's own
 lesson on why cycles:u is trusted over wall-clock on contended machines, referenced

@@ -186,8 +186,6 @@ check_combo "combo disperso mod 210"           -t 3 -s 2000 --tune big2310=0 --d
 check_combo "combo cortes rebajados"           -t "$THREADS" -s 100000 --tune small=1/2 --tune med64=1/8 --tune sparse=1/2
 check_combo "combo sin med64/disperso"         -t 2 -s 2000 --tune med64=0 --zstd-level 3
 check_combo "combo NTA medio forzado"          -t "$THREADS" -s 100000 --tune medium_nta=1
-check_combo "combo med64 sin banda sub-bloque"   -t "$THREADS" -s 100000 --tune med64s=0
-check_combo "combo med64 banda sub-bloque ancha" -t 3 -s 2000000 --tune med64s=8/1 --tune med64=1/2
 
 # --- 4: round-trip texto vs .db, posicion por posicion ---
 NS2=(100000 1000000 10000000)
@@ -248,8 +246,6 @@ check_count_only "$N5" "$expected_pi_1e10" "sin med64, disperso forzado"   -t 5 
 check_count_only "$N5" "$expected_pi_1e10" "cortes small/med64/sparse"     -t "$THREADS" --tune small=1/8 --tune med64=1/6 --tune sparse=1/4
 check_count_only "$N5" "$expected_pi_1e10" "NTA medio forzado on"          -t "$THREADS" --tune medium_nta=1
 check_count_only "$N5" "$expected_pi_1e10" "NTA medio forzado off"         -t "$THREADS" -s 100000 --tune medium_nta=0
-check_count_only "$N5" "$expected_pi_1e10" "med64 banda sub-bloque off / ancha" -t "$THREADS" --tune med64s=0
-check_count_only "$N5" "$expected_pi_1e10" "med64 banda sub-bloque 6x"         -t "$THREADS" --tune med64s=6/1
 check_count_only "$N5" "$expected_pi_1e10" "anillo sparse: paginas grandes on"  -t "$THREADS" -s 100000 --tune huge=1
 check_count_only "$N5" "$expected_pi_1e10" "anillo sparse: paginas grandes off" -t 2 -s 100000 --tune huge=0
 

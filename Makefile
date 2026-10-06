@@ -68,10 +68,9 @@ $(NTH_BIN): $(NTH_OBJ)
 	$(CXX) $(CXXFLAGS_RELEASE) -o $@ $(NTH_OBJ) $(LDLIBS)
 
 # Binario de prueba con flags de compilacion extra para un A/B contra el
-# binario normal (los mandos ERA_* de segment_sieve.hpp / erat_small.hpp:
-# ERA_MED_BANDS, ERA_MED_PAIRS, ERA_BIG_LOOP, ERA_BIG_UNROLL, ERA_BIG_PF,
-# ERA_BLK_BYTES; todos medidos en docs/RESEARCH.md). Se recompila siempre:
-#   make variant DEFS=-DERA_MED_BANDS=1
+# binario normal: los mandos ERA_* de segment_sieve.hpp (medidos en
+# docs/RESEARCH.md) o cualquier flag del compilador. Se recompila siempre:
+#   make variant DEFS=-DERA_BIG_PF=8
 #   BIN_B=./eratostenes_variant make benchmark-ab
 BIN_VARIANT := eratostenes_variant
 $(BIN_VARIANT): $(SRC_DIR)/main.cpp $(HEADERS)

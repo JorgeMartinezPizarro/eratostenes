@@ -32,32 +32,8 @@
 // comment); -DERA_BIG_UNROLL=1 restores one per iteration for an A/B.
 // Sparse tier: process_big prefetches the segment byte of the entries this
 // many positions ahead in the bucket (see its comment); 0 turns it off.
-// Medium tier in predicated bands (erat_small.hpp::cross_off_medium_banded):
-// -DERA_MED_BANDS=1 for an A/B on CPUs where bad speculation dominates.
-#ifndef ERA_MED_BANDS
-#define ERA_MED_BANDS 0
-#endif
-// Medium tier two primes per iteration (erat_small.hpp::cross_off_medium_pairs):
-// -DERA_MED_PAIRS=1 for an A/B (`make variant DEFS=-DERA_MED_PAIRS=1`).
-#ifndef ERA_MED_PAIRS
-#define ERA_MED_PAIRS 0
-#endif
-constexpr double MEDIUM_BAND_FACTOR = 1.2;
-constexpr double MEDIUM_BAND_MAX_HITS = 8.0;
-
 #ifndef ERA_BIG_PF
 #define ERA_BIG_PF 16
-#endif
-// Sparse tier: a prime with more hits in the current segment marks them in a
-// loop before being re-filed (EratBig's loop), instead of one re-file per hit
-// (process_big). -DERA_BIG_LOOP=1 for the A/B (`make variant DEFS=-DERA_BIG_LOOP=1`).
-#ifndef ERA_BIG_LOOP
-#define ERA_BIG_LOOP 0
-#endif
-// Sparse tier: also prefetch the push target (the tail block of the slot the
-// entry's next hit files into) ERA_BIG_PF entries ahead. -DERA_BIG_PFPUSH=1.
-#ifndef ERA_BIG_PFPUSH
-#define ERA_BIG_PFPUSH 0
 #endif
 // Sparse tier: the next block's prefetch spread over the first half of the
 // current block (one line per 4 entries, default) instead of 64 prefetcht1
@@ -82,20 +58,6 @@ constexpr double MEDIUM_BAND_MAX_HITS = 8.0;
 // -DERA_BIG_FASTBLK=0 restores the single loop with the tests (A/B).
 #ifndef ERA_BIG_FASTBLK
 #define ERA_BIG_FASTBLK 1
-#endif
-// Sparse activation experiments (--debug-idle prints the per-prime cost):
-// ERA_FPDIV=1 computes the first multiplier with a double division plus an
-// exact fixup instead of a 64-bit integer division (slow on pre-Ice-Lake
-// cores: ~40-90 cycles on Nehalem/Ivy Bridge, ~15 on Rocket Lake, where it
-// was neutral-to-slower). ERA_ACT_BATCH=1 stages the activation's pushes
-// per group of 64 ring slots and drains a group when it fills, so the
-// ring's thousands of tail lines are touched in L1-sized groups instead of
-// one random RFO per prime. -DERA_FPDIV=1 / -DERA_ACT_BATCH=1.
-#ifndef ERA_FPDIV
-#define ERA_FPDIV 0
-#endif
-#ifndef ERA_ACT_BATCH
-#define ERA_ACT_BATCH 0
 #endif
 // Sparse tier: with one thread per core the bucket arenas are 2 MiB regions
 // advised MADV_HUGEPAGE (SegmentSieve's huge_arenas, decided in tuning.hpp),
@@ -168,20 +130,17 @@ public:
     // shift/mask instead of a division -- tuning.hpp is responsible for
     // flooring seg_k_width to the nearest power of 2 (in bytes) whenever
     // has_sparse is true; this constructor just verifies that was done.
-    // m64s_limit: med64 primes below it are crossed off one L1 sub-block at
-    // a time (process_med64s), like the small tier; 0 turns that band off.
     SegmentSieve(uint64_t seg_k_width, uint64_t base_prime_max, const Presieve& presieve,
-                 uint64_t sub_block_bytes, uint64_t m64s_limit, bool has_sparse, bool medium_nta, bool big2310,
+                 uint64_t sub_block_bytes, bool has_sparse, bool medium_nta, bool big2310,
                  bool huge_arenas = false)
-        : words_((seg_k_width + 63) / 64 + 1, 0), // +1 word: s[bytes_needed] is the banded medium tier's spare byte
+        : words_((seg_k_width + 63) / 64, 0),
           seg_k_width_(seg_k_width),
           sub_block_bytes_(sub_block_bytes),
           medium_nta_(medium_nta),
           big2310_(big2310),
           presieve_(presieve),
           arena_bytes_(huge_arenas ? (size_t{2} << 20) : BLK_BYTES * 256),
-          huge_arenas_(huge_arenas),
-          m64s_limit_(m64s_limit) {
+          huge_arenas_(huge_arenas) {
         // The byte-addressed dense tiers (erat_small.hpp) need every
         // segment to start on a byte (k multiple of 8) and to stay a whole
         // number of words; callers align chunk starts to 64 too.
@@ -233,10 +192,6 @@ public:
         // once the cursor reaches num_buckets_. See process_big.
         head_.assign(2 * num_buckets_, nullptr);
         tail_.assign(2 * num_buckets_, nullptr);
-        if (ERA_ACT_BATCH) {
-            act_groups_.resize(static_cast<size_t>(std::max<uint64_t>(1, (2 * num_buckets_) >> 6)));
-            for (std::vector<ActEnt>& g : act_groups_) g.reserve(ACT_GROUP_CAP);
-        }
     }
 
     // Wheel indices below k are marked composite before extraction (the
@@ -258,12 +213,8 @@ public:
         for (auto& v : small_) v.clear();
         for (auto& v : m64_cur_) v.clear();
         for (auto& v : m64_nxt_) v.clear();
-        for (auto& v : m64s_cur_) v.clear();
-        for (auto& v : m64s_nxt_) v.clear();
-        m64s_count_ = 0;
         for (auto& v : medium_dyn_) v.clear();
         for (auto& v : medium_qd_) v.clear();
-        for (auto& v : medium_bands_) v.clear();
         std::fill(head_.begin(), head_.end(), nullptr);
         std::fill(tail_.begin(), tail_.end(), nullptr);
         // Blocks aren't freed, just handed back to the pool: every block
@@ -304,15 +255,12 @@ public:
             size_t per_list = med64_primes.size() / 384 * 2 + 16;
             for (auto& v : m64_cur_) v.reserve(per_list);
             for (auto& v : m64_nxt_) v.reserve(per_list);
-            for (auto& v : m64s_cur_) v.reserve(per_list);
-            for (auto& v : m64s_nxt_) v.reserve(per_list);
             med64_reserved_ = true;
         }
         activate_dense(small_primes, next_small_idx_, small_, high_n, low_n, k_low);
-        activate_med64(med64_primes, next_med64_idx_, m64_cur_.data(), m64s_cur_.data(), m64s_limit_, m64s_count_,
-                       high_n, low_n, k_low);
+        activate_med64(med64_primes, next_med64_idx_, m64_cur_.data(), high_n, low_n, k_low);
         activate_medium(medium_primes, next_medium_idx_, medium_dyn_, medium_qd_, medium_qp_base_, medium_qp_last_,
-                        medium_bands_, seg_k_width_ / 8, high_n, low_n, k_low);
+                        high_n, low_n, k_low);
 
         // Sparse tier: its primes are a run of the base-prime bitmap
         // (base_sieve.hpp's SparsePrimes), walked in increasing order from
@@ -358,7 +306,6 @@ public:
                 next_sparse_k_ = word_end;
             }
         }
-        flush_activation(); // ERA_ACT_BATCH: everything staged lands before this segment is sieved
         return next_small_idx_ + next_med64_idx_ + next_medium_idx_ - before + sparse_activated;
     }
 
@@ -395,8 +342,6 @@ public:
             erat::cross_off_class<5>(bytes, se, small_[5].data(), small_[5].data() + small_[5].size(), rebase);
             erat::cross_off_class<6>(bytes, se, small_[6].data(), small_[6].data() + small_[6].size(), rebase);
             erat::cross_off_class<7>(bytes, se, small_[7].data(), small_[7].data() + small_[7].size(), rebase);
-            // The sub-blocked med64 band, while the sub-block is still in L1.
-            if (m64s_count_) run_med64s(bytes, se, rebase);
         }
         // Wheel indices below skip_below_k_ are not part of the range: index
         // 0 (the number 1, nothing marks it) and, with --start, the head of
@@ -581,11 +526,8 @@ private:
     // cross_off_checked210<PR> call in one inner loop shares entry phase w.
     // (A mod-30 version with 64 lists was the default until 2026-09-30; see
     // docs/RESEARCH.md.)
-    // Primes below m64s_limit go to the sub-blocked band's lists (state384s)
-    // instead, counted in m64s_count.
     __attribute__((noinline)) static void activate_med64(const std::vector<uint64_t>& primes, size_t& next,
                                    std::vector<erat::DenseState>* state384,
-                                   std::vector<erat::DenseState>* state384s, uint64_t m64s_limit, size_t& m64s_count,
                                    uint64_t high_n, uint64_t low_n, uint64_t k_low) {
         while (next < primes.size()) {
             uint64_t p = primes[next];
@@ -598,10 +540,8 @@ private:
             if (w == 48) { ++t; w = 0; }
             uint64_t m = t * 210 + big::M210[w];
             uint64_t pos = (p * m) / WHEEL_MOD - k_low / 8;
-            std::vector<erat::DenseState>* target = state384;
-            if (p < m64s_limit) { target = state384s; ++m64s_count; }
-            target[pr * 48 + w].push_back({static_cast<uint32_t>(((p / WHEEL_MOD) << 6) | w),
-                                           static_cast<uint32_t>(pos)});
+            state384[pr * 48 + w].push_back({static_cast<uint32_t>(((p / WHEEL_MOD) << 6) | w),
+                                             static_cast<uint32_t>(pos)});
             ++next;
         }
     }
@@ -617,31 +557,15 @@ private:
     //
     // qp goes in as a 1-byte delta from the class's previous prime (see
     // cross_off_medium); the first prime of a class sets qp_base.
-    //
-    // Bands (erat_small.hpp::MedBand, ERA_MED_BANDS): a prime's fixed
-    // iteration count is its expected hits per segment (6.857 * segment
-    // bytes / p: a 210-multiplier cycle is 7p bytes and 48 hits) times
-    // MEDIUM_BAND_FACTOR, plus one; above MEDIUM_BAND_MAX_HITS expected,
-    // h = 0 (plain loop). Consecutive primes with the same h share a band.
     __attribute__((noinline)) static void activate_medium(const std::vector<uint64_t>& primes, size_t& next,
                                  std::vector<uint32_t>* dyn, std::vector<uint8_t>* qds,
                                  uint32_t* qp_base, uint32_t* qp_last,
-                                 std::vector<erat::MedBand>* bands, uint64_t seg_bytes,
                                  uint64_t high_n, uint64_t low_n, uint64_t k_low) {
         while (next < primes.size()) {
             uint64_t p = primes[next];
             if (p * p >= high_n) break;
             uint64_t start_val = std::max(p * p, low_n);
             uint64_t pr = static_cast<uint64_t>(WHEEL_POS[p % WHEEL_MOD]);
-            if constexpr (ERA_MED_BANDS) {
-                uint8_t h = 0;
-                const double mean = 6.857 * static_cast<double>(seg_bytes) / static_cast<double>(p);
-                if (mean <= MEDIUM_BAND_MAX_HITS) h = static_cast<uint8_t>(std::min(250.0, mean * MEDIUM_BAND_FACTOR) + 1);
-                if (bands[pr].empty() || bands[pr].back().h != h) bands[pr].push_back({static_cast<uint32_t>(dyn[pr].size() + 1), h});
-                else bands[pr].back().end = static_cast<uint32_t>(dyn[pr].size() + 1);
-            } else {
-                (void)bands; (void)seg_bytes;
-            }
             uint64_t m0 = (start_val + p - 1) / p;
             uint64_t t = m0 / 210, sres = m0 % 210;
             uint32_t w = big::NEXT_W[sres];
@@ -710,64 +634,15 @@ private:
         process_med64<7>(bytes, bytes_needed);
     }
 
-    // The sub-blocked med64 band: the same kernel and the same (class, phase)
-    // lists as process_med64, run once per L1 sub-block [.., se) right after
-    // the small tier, so every one of its marks lands in a sub-block that is
-    // still L1-resident. Measured on the i5-11400F at one thread (1e13 tail,
-    // perf): the whole-segment med64 took 0.81 L1 misses per hit, 3.2 cycles
-    // per hit against the small tier's 1.16 -- 44% of the cycles and 67% of
-    // the program's L1 misses once the cutoffs moved. Primes below
-    // m64s_limit_ (about 2 x the sub-block: 14+ hits per sub-block, 64% of
-    // the med64 hits for 17% of its primes) pay one list entry copy per
-    // sub-block instead of one per segment; `rebase` is bytes_needed on the
-    // segment's last sub-block (the entry's pos becomes relative to the next
-    // segment), 0 before. An entry whose next hit is past `se` just passes
-    // through (one compare, one push).
-    template <int PR>
-    void process_med64s(uint8_t* bytes, uint64_t se, uint64_t rebase) {
-        for (int w = 0; w < 48; ++w) {
-            for (erat::DenseState& st : m64s_cur_[PR * 48 + w]) {
-                uint64_t i = st.pos;
-                uint64_t qp = st.qw >> 6;
-                uint32_t ww = st.qw & 63;
-                erat::cross_off_checked210<PR>(bytes, se, qp, i, ww);
-                m64s_nxt_[PR * 48 + ww].push_back(
-                    {static_cast<uint32_t>((qp << 6) | ww), static_cast<uint32_t>(i - rebase)});
-            }
-        }
-    }
-    __attribute__((noinline)) void run_med64s(uint8_t* bytes, uint64_t se, uint64_t rebase) {
-        process_med64s<0>(bytes, se, rebase);
-        process_med64s<1>(bytes, se, rebase);
-        process_med64s<2>(bytes, se, rebase);
-        process_med64s<3>(bytes, se, rebase);
-        process_med64s<4>(bytes, se, rebase);
-        process_med64s<5>(bytes, se, rebase);
-        process_med64s<6>(bytes, se, rebase);
-        process_med64s<7>(bytes, se, rebase);
-        for (auto& v : m64s_cur_) v.clear();
-        std::swap(m64s_cur_, m64s_nxt_);
-    }
-
     // Medium tier over the whole segment, one call per residue class; the
     // rebase is the segment's own width, like process_med64's.
     // One call per residue class PR (a compile-time template parameter in
     // erat_small.hpp's kernels, like cross_off_class<PR> for the small tier).
     template <bool NTA, int PR>
     void run_medium_class(uint8_t* bytes, uint64_t bytes_needed) {
-        if constexpr (ERA_MED_BANDS) {
-            erat::cross_off_medium_banded<PR, NTA>(bytes, bytes_needed, medium_dyn_[PR].data(), medium_qd_[PR].data(),
-                                                   medium_qp_base_[PR], bytes_needed, medium_bands_[PR].data(),
-                                                   medium_bands_[PR].data() + medium_bands_[PR].size());
-        } else if constexpr (ERA_MED_PAIRS) {
-            erat::cross_off_medium_pairs<PR, NTA>(bytes, bytes_needed, medium_dyn_[PR].data(),
-                                                  medium_dyn_[PR].data() + medium_dyn_[PR].size(), medium_qd_[PR].data(),
-                                                  medium_qp_base_[PR], bytes_needed);
-        } else {
-            erat::cross_off_medium<PR, NTA>(bytes, bytes_needed, medium_dyn_[PR].data(),
-                                            medium_dyn_[PR].data() + medium_dyn_[PR].size(), medium_qd_[PR].data(),
-                                            medium_qp_base_[PR], bytes_needed);
-        }
+        erat::cross_off_medium<PR, NTA>(bytes, bytes_needed, medium_dyn_[PR].data(),
+                                        medium_dyn_[PR].data() + medium_dyn_[PR].size(), medium_qd_[PR].data(),
+                                        medium_qp_base_[PR], bytes_needed);
     }
     template <bool NTA, int... PR>
     void run_medium_all(uint8_t* bytes, uint64_t bytes_needed, std::integer_sequence<int, PR...>) {
@@ -891,16 +766,6 @@ private:
                                 uint64_t pe;
                                 std::memcpy(&pe, p + ERA_BIG_PF + k, sizeof(uint64_t));
                                 __builtin_prefetch(s + ((pe >> 12) & 0xffffff), 1, 3);
-                                if constexpr (ERA_BIG_PFPUSH) {
-                                    // The push target too: the tail block of the
-                                    // slot the entry's NEXT hit files into (its
-                                    // table row and step, computed early), for
-                                    // the regime where the ring's write set is
-                                    // past L2 (1e17-1e18 tails).
-                                    const uint64_t t2 = big::TABLE2310[pe & 4095];
-                                    const uint64_t np = ((pe >> 12) & 0xffffff) + (pe >> 36) * ((t2 >> 8) & 0xff) + ((t2 >> 16) & 15);
-                                    __builtin_prefetch(tails_cur[np >> log2sb], 1, 3);
-                                }
                             }
                         } else {
                             (void)p; (void)cnt;
@@ -920,23 +785,6 @@ private:
                         for (int k = 0; k < U; ++k) {
                             pos[k] += (ent[k] >> 36) * ((te[k] >> 8) & 0xff) + ((te[k] >> 16) & 15);
                             nidx[k] = te[k] >> 20;
-                        }
-                        if constexpr (ERA_BIG_LOOP) {
-                            // EratBig's loop: a prime whose next hit is still in
-                            // this segment marks on, instead of being re-filed
-                            // into this same slot and read back later in the
-                            // pass (one 8-byte copy, a tail update and maybe a
-                            // new block per extra hit). With the cutoff at 1/4
-                            // the primes between K/4 and K/2 have 2-4 hits per
-                            // segment, ~15-20% of the tier's hits at 1e14-1e15.
-                            for (int k = 0; k < U; ++k) {
-                                while (pos[k] <= modsb) {
-                                    const uint64_t t2 = big::TABLE2310[nidx[k]];
-                                    s[pos[k]] |= static_cast<uint8_t>(t2);
-                                    pos[k] += (ent[k] >> 36) * ((t2 >> 8) & 0xff) + ((t2 >> 16) & 15);
-                                    nidx[k] = t2 >> 20;
-                                }
-                            }
                         }
                         for (int k = 0; k < U; ++k) {
                             sl[k] = pos[k] >> log2sb; // segments ahead: the slot is tails_cur[sl]
@@ -1004,14 +852,6 @@ private:
                         s[pos] |= static_cast<uint8_t>(te);
                         pos += a * ((te >> 8) & 0xff) + ((te >> 16) & 15);
                         nidx = te >> 20;
-                        if constexpr (ERA_BIG_LOOP) { // see the unrolled path above
-                            while (pos <= modsb) {
-                                const uint64_t t2 = big::TABLE2310[nidx];
-                                s[pos] |= static_cast<uint8_t>(t2);
-                                pos += a * ((t2 >> 8) & 0xff) + ((t2 >> 16) & 15);
-                                nidx = t2 >> 20;
-                            }
-                        }
                         e_keep = ent & ~((uint64_t{1} << 36) - 1);
                     } else { // qw | pos << 32
                         uint64_t qw = static_cast<uint32_t>(ent);
@@ -1021,14 +861,6 @@ private:
                         s[pos] |= static_cast<uint8_t>(te);
                         pos += a * ((te >> 8) & 0xff) + ((te >> 16) & 0xff);
                         nidx = te >> 32;
-                        if constexpr (ERA_BIG_LOOP) {
-                            while (pos <= modsb) {
-                                const uint64_t t2 = big::TABLE64[nidx];
-                                s[pos] |= static_cast<uint8_t>(t2);
-                                pos += a * ((t2 >> 8) & 0xff) + ((t2 >> 16) & 0xff);
-                                nidx = t2 >> 32;
-                            }
-                        }
                         e_keep = a << 9;
                     }
                     uint64_t e = W2310 ? (e_keep | nidx | (low_bits(pos, log2sb, modsb) << 12))
@@ -1069,15 +901,7 @@ private:
             ri = static_cast<uint64_t>(WHEEL_POS[p % WHEEL_MOD]);
         }
         uint64_t start_val = std::max(p * p, low_n);
-#if ERA_FPDIV
-        // ceil(start_val / p) via a double quotient (53 bits: off by a unit
-        // or two at 1e18) made exact by the two fixups.
-        uint64_t m = static_cast<uint64_t>(static_cast<double>(start_val) / static_cast<double>(p));
-        while (m * p < start_val) ++m;
-        while (m > 0 && (m - 1) * p >= start_val) --m;
-#else
         uint64_t m = (start_val + p - 1) / p;
-#endif
         if (big2310_) {
             // Packed as one word: idx (ri * 480 + w) in bits 0-11, pos
             // in 12-35, qp in 36-63 -- see process_big<true>.
@@ -1095,7 +919,7 @@ private:
             uint64_t ent = (ri * big::W2310 + w) | ((pos & sb_mask_) << 12) | (qp << 36);
             erat::DenseState e;
             std::memcpy(&e, &ent, sizeof(e));
-            stage_sparse_entry(static_cast<uint32_t>(cur_segment_ + ahead), e);
+            push_sparse_entry(static_cast<uint32_t>(cur_segment_ + ahead), e);
             return;
         }
         uint64_t t = m / 210, sres = m % 210;
@@ -1112,7 +936,7 @@ private:
                 "bucket sieve: a sparse prime's step exceeds the bucket ring's margin "
                 "(sizing bug in SegmentSieve's constructor)");
         }
-        stage_sparse_entry(static_cast<uint32_t>(cur_segment_ + ahead), e);
+        push_sparse_entry(static_cast<uint32_t>(cur_segment_ + ahead), e);
     }
 
     // The ring's cursor reached num_buckets_: every slot below it has been
@@ -1127,35 +951,6 @@ private:
         std::copy(tail_.begin() + nb, tail_.end(), tail_.begin());
         std::fill(tail_.begin() + nb, tail_.end(), nullptr);
         cur_segment_ = 0;
-    }
-
-    // Activation push: straight into the ring, or (ERA_ACT_BATCH) staged in
-    // act_buf_ and flushed in slot groups by flush_activation().
-    struct ActEnt { uint32_t slot; erat::DenseState e; };
-    static constexpr size_t ACT_GROUP_CAP = 512;
-    void stage_sparse_entry(uint32_t slot, erat::DenseState e) {
-#if ERA_ACT_BATCH
-        // One sequential append into the slot group's buffer (slot >> 6:
-        // <= num_buckets_/64 groups, one hot line each); a full group is
-        // pushed on the spot, 64 slots at a time, so its 64 tail lines and
-        // 8 lines of tail_ stay in L1 while it drains. The first version
-        // staged everything in one buffer and counting-sorted it: 4 memory
-        // ops per entry, +6 ns per prime on a Xeon @2.10GHz (operator 3).
-        std::vector<ActEnt>& g = act_groups_[slot >> 6];
-        g.push_back({slot, e});
-        if (g.size() == ACT_GROUP_CAP) flush_group(g);
-#else
-        push_sparse_entry(slot, e);
-#endif
-    }
-    void flush_group(std::vector<ActEnt>& g) {
-        for (const ActEnt& a : g) push_sparse_entry(a.slot, a.e);
-        g.clear();
-    }
-    void flush_activation() {
-#if ERA_ACT_BATCH
-        for (std::vector<ActEnt>& g : act_groups_) if (!g.empty()) flush_group(g);
-#endif
     }
 
     // Blocks are BLK_BYTES-aligned: a tail pointer that lands exactly on a
@@ -1193,27 +988,10 @@ private:
 #define ERA_BLK_BYTES 4096
 #endif
     static constexpr size_t BLK_BYTES = ERA_BLK_BYTES; // -DERA_BLK_BYTES for A/B
-    // ERA_BLK_COLOR: the entries of a block start ERA_BLK_COLOR-1 lines at
-    // most past its header, by the block's address. All slots fill at about
-    // the same rate, so without it the ring's thousands of tail pointers sit
-    // at the same offset inside their 4 KiB blocks -- the same cache-set
-    // index bits 6-11 -- and only ways x (sets with those bits) of them can
-    // be cached at once: 64 lines in a 256 KiB 8-way L2, 1024 in a 4 MiB
-    // 16-way L3 (i7-620M: 83 ns per activated prime, DRAM). Costs
-    // (ERA_BLK_COLOR-1)/2 lines of capacity per block on average.
-#ifndef ERA_BLK_COLOR
-#define ERA_BLK_COLOR 1
-#endif
     struct Blk {
         Blk* next;
         uint64_t pad;
-        erat::DenseState* entries() {
-            if constexpr (ERA_BLK_COLOR > 1) {
-                const size_t c = (reinterpret_cast<uintptr_t>(this) / BLK_BYTES) % ERA_BLK_COLOR;
-                return reinterpret_cast<erat::DenseState*>(reinterpret_cast<char*>(this + 1) + 64 * c);
-            }
-            return reinterpret_cast<erat::DenseState*>(this + 1);
-        }
+        erat::DenseState* entries() { return reinterpret_cast<erat::DenseState*>(this + 1); }
         erat::DenseState* block_end() { return reinterpret_cast<erat::DenseState*>(reinterpret_cast<char*>(this) + BLK_BYTES); }
     };
     struct AlignedFree { void operator()(char* p) const { std::free(p); } };
@@ -1250,7 +1028,6 @@ private:
     // 1-byte deltas from the class's first prime (medium_qp_base_).
     std::vector<uint32_t> medium_dyn_[8];
     std::vector<uint8_t> medium_qd_[8];
-    std::vector<erat::MedBand> medium_bands_[8]; // ERA_MED_BANDS: fixed-iteration bands over each class's list
     uint32_t medium_qp_base_[8] = {};
     uint32_t medium_qp_last_[8] = {}; // activation only: qp of the class's last activated prime
 
@@ -1264,22 +1041,10 @@ private:
     std::array<std::vector<erat::DenseState>, 384> m64_cur_{};
     std::array<std::vector<erat::DenseState>, 384> m64_nxt_{};
     bool med64_reserved_ = false;
-    // The sub-blocked med64 band (p < m64s_limit_, see process_med64s): the
-    // same (class, phase) lists, swapped once per SUB-BLOCK instead of once
-    // per segment. m64s_count_: entries activated so far in the chunk, so
-    // the sub-block loop skips the band's calls while it is empty.
-    std::array<std::vector<erat::DenseState>, 384> m64s_cur_{};
-    std::array<std::vector<erat::DenseState>, 384> m64s_nxt_{};
     // Bucket arena: 256 blocks (1 MiB), or one 2 MiB huge page (huge_arenas_,
     // decided in tuning.hpp). Declared here in the constructor's order.
     size_t arena_bytes_;
     bool huge_arenas_;
-    uint64_t m64s_limit_ = 0;
-    size_t m64s_count_ = 0;
-
-    // ERA_ACT_BATCH staging (see stage_sparse_entry): one buffer of
-    // ACT_GROUP_CAP entries x 12 B per group of 64 ring slots.
-    std::vector<std::vector<ActEnt>> act_groups_;
 
     uint64_t skip_below_k_ = 1; // first wheel index that counts (set_skip_below_k)
     uint32_t log2_sb_ = 0; // log2(segment width in bytes) -- see constructor

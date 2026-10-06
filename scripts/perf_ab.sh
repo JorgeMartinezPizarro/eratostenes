@@ -9,7 +9,7 @@
 #   git worktree add -f /tmp/era_A <commit> && make -C /tmp/era_A -B eratostenes
 #   BIN_A=/tmp/era_A/eratostenes bash scripts/perf_ab.sh
 #   git worktree remove --force /tmp/era_A    # when done
-# Or an ERA_* flag build: make variant DEFS=-DERA_BIG_LOOP=1; BIN_A=./eratostenes_variant ...
+# Or an ERA_* flag build: make variant DEFS=-DERA_BIG_PF=8; BIN_A=./eratostenes_variant ...
 #
 # Env: BIN_A (required), BIN_B (default ./eratostenes), NS (default
 #      "1e14 1e15 1e16 1e17"), WIDTH (default 1e10), THREADS (default nproc),
