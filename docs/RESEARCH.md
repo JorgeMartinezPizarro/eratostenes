@@ -4418,6 +4418,21 @@ found nothing else outside the noise, and the i5-3470's other knobs
 are at the optimum these two machines can measure, so a per-machine tuning
 profile has nothing to collect yet.
 
+The same `small=1/2` on the rest of the fleet, x3 interleaved, 1e11 (9e10
+window) / 1e12 (1e11 window): **Emerald Rapids sandbox -3.6% / -2.6%,
+every B below every A**; Xeon @ 2.80GHz +0.9% / 0.0% (overlap); i5-13500
+(20 threads, HT, 24 KiB sub-block) +1.9 / +1.6 / +0.3 / -4.2% at
+1e11..1e14 (all overlap); and the dev PC's own table above (2026-10-01,
+`-t 1`, 48 KiB sub-block) has the 12K cutoff **+3.4% / +2%** worse than 6K.
+Same sub-block, same cutoff, opposite signs on Golden Cove and Rocket Lake:
+the small cutoff's optimum is a property of the microarchitecture, not of
+any cache size, so there is no rule to write (the one above, for L2 <= 256
+KiB, stays). Left as the manual knob: `--tune small=1/2` on an Emerald
+Rapids-class VM for runs up to ~1e12. A per-machine tuning profile
+(`make tune` writing a config file) was considered and declined: the
+project's configuration stays derivable from caches, threads and CPU
+flags, like primesieve's, with `--tune` for long runs on a known machine.
+
 ### Cache-topology sizing: per-CPU-minimum step (kept)
 
 On a hybrid P-core/E-core CPU, `detect_l2_cache_bytes()`/`detect_l1d_cache_bytes()`
