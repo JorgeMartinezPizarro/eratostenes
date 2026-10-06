@@ -36,6 +36,7 @@ throughout below).
   - [`cross_off_medium`: 4-way interleaved stepping (tried, reverted)](#cross_off_medium-4-way-interleaved-stepping-tried-reverted)
   - [`cross_off_medium`: class-specialized layout (kept, 2026-09-24)](#cross_off_medium-class-specialized-layout-kept-2026-09-24)
   - [`cross_off_medium`: 2-ahead software prefetch (tried, reverted, 2026-09-25, follow-up session)](#cross_off_medium-2-ahead-software-prefetch-tried-reverted-2026-09-25-follow-up-session)
+  - [med64: segment-byte prefetch K * qp ahead (tried, reverted, 2026-10-06)](#med64-segment-byte-prefetch-k--qp-ahead-tried-reverted-2026-10-06)
   - [`cross_off_medium`: EratMedium-style 64-list restructuring](#cross_off_medium-eratmedium-style-64-list-restructuring)
   - [med64: mod-210 stepping, two variants (tried, both reverted, 2026-09-26, external review, Opus 5.5)](#med64-mod-210-stepping-two-variants-tried-both-reverted-2026-09-26-external-review-opus-55)
   - [Small tier: mod-210 stepping as 7 unrolled mod-30 copies (tried, reverted, 2026-09-27)](#small-tier-mod-210-stepping-as-7-unrolled-mod-30-copies-tried-reverted-2026-09-27)
@@ -357,6 +358,27 @@ costs even more table-lookup overhead per hit for a diminishing latency-hiding
 return, so it's not expected to flip the sign); hardware prefetcher tuning (outside
 this codebase's control). This closes off software prefetching for this loop's RMW
 store specifically, not just the one implementation shape.
+
+### med64: segment-byte prefetch K * qp ahead (tried, reverted, 2026-10-06)
+
+The dense regime's profile is the med64 kernel (51% of the cycles at 1e11
+on the laptop with the Emerald Rapids plan emulated, `--l1-bytes 49152
+--l2-bytes 2097152 -t 2`, which reproduces that sandbox's 1.04x and its
+`small=1/2` gain, -2.9% 3/3), and the kernel is bound by the segment-byte
+RMW missing L1. The medium tier's exact 2-ahead prefetch (above) lost on
+its table lookups, so this tried the cheapest possible form: one
+`prefetcht0 (s + K * qp, i)` per hit in `cross_off_checked210`, the base
+`s + K * qp` precomputed per prime, no lookup -- the mean byte step on the
+mod-210 wheel is 7p/48 = 4.4 qp, so K = 9 / 13 / 20 is ~2 / 3 / 5 hits
+ahead, give or take the phase. `make variant DEFS=-DERA_M64_PF=K` against
+the plain binary, interleaved: Emerald Rapids plan, 1e11 (9e10 window), -t
+2, x3: **+14.3% / +12.6% / +8.6%** (every B above every A for 9 and 13);
+default plan, 1e12 tail (1e10 window), -t 12, x5: **+12.5% / +19.8% /
++18.6%** (every B above every A for 20). Same verdict as the medium tier,
+with a prefetch five times cheaper: the out-of-order core already overlaps
+these RMWs by itself, and one more instruction per ~5-instruction hit costs
+more than any latency it hides. Software prefetching of the segment byte is
+closed for both dense tiers; knob removed.
 
 ### `cross_off_medium`: EratMedium-style 64-list restructuring
 

@@ -139,6 +139,13 @@ done:
 // (what sank the earlier mod-210 med64 attempts): the byte step from phase w
 // to w+1 is qp*dm + corr with dm in {2,4,6,8,10}, so 5 multiples of qp in
 // registers plus compile-time constants (big::TABLE) cover all 48 cases.
+// No software prefetch of the segment byte here: a one-instruction
+// `prefetcht0 (s + K * qp, i)` per hit (K = 9, 13, 20 ~ 2-5 hits ahead) was
+// +9..+20% wall on the laptop in both the dense 1e11 plan and the 1e12
+// tail (2026-10-06), as the medium tier's exact 2-ahead prefetch was in
+// 2026-09-25: the core already overlaps these RMWs on its own, and any
+// instruction added to a ~5-instruction hit costs more than the latency it
+// hides. See docs/RESEARCH.md#med64-segment-byte-prefetch-k--qp-ahead-tried-reverted-2026-10-06.
 template <int PR>
 __attribute__((always_inline)) inline void cross_off_checked210(uint8_t* s, uint64_t end, uint64_t qp, uint64_t& i_io, uint32_t& w_io) {
     const uint64_t q2 = qp * 2, q4 = qp * 4, q8 = qp * 8;
