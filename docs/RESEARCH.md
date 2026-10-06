@@ -114,7 +114,7 @@ throughout below).
   - [`fill()`: skip the `self_k` correction loop when it can't possibly match (kept, 2026-09-26)](#fill-skip-the-self_k-correction-loop-when-it-cant-possibly-match-kept-2026-09-26)
   - [Extending pre-sieve coverage past prime 163 (tried three ways, all reverted)](#extending-pre-sieve-coverage-past-prime-163-tried-three-ways-all-reverted)
 - [Makefile](#makefile)
-  - [Cascade Lake: branches kept off 32-byte boundaries (JCC erratum), `-Wa,-mbranches-within-32B-boundaries` (open, 2026-10-07)](#cascade-lake-branches-kept-off-32-byte-boundaries-jcc-erratum--wa-mbranches-within-32b-boundaries-open-2026-10-07)
+  - [Cascade Lake: branches kept off 32-byte boundaries (JCC erratum), `-Wa,-mbranches-within-32B-boundaries` (measured, not adopted, 2026-10-07)](#cascade-lake-branches-kept-off-32-byte-boundaries-jcc-erratum--wa-mbranches-within-32b-boundaries-measured-not-adopted-2026-10-07)
   - [PGO training set: a natural 1e13 pass (tried, reverted, 2026-09-25, follow-up session)](#pgo-training-set-a-natural-1e13-pass-tried-reverted-2026-09-25-follow-up-session)
   - [Two power regimes on every machine: burst and sustained (open, 2026-10-04)](#two-power-regimes-on-every-machine-burst-and-sustained-open-2026-10-04)
   - [PGO overall: measured on the dev PC, not adopted on the production server](#pgo-overall-measured-on-the-dev-pc-not-adopted-on-the-production-server)
@@ -5149,7 +5149,7 @@ set, the binary copied aside and the default rebuilt): 12 threads 1e13 tail
 +2.4% (overlapping), 1e15 -1.9% (4/4), 2 threads 1e13 noise, full 1e12
 23.27 / 23.34 s against 23.13 / 23.13 s. Nothing to take; `-O3
 -march=native -flto=auto` stays, PGO stays unadopted.
-### Cascade Lake: branches kept off 32-byte boundaries (JCC erratum), `-Wa,-mbranches-within-32B-boundaries` (open, 2026-10-07)
+### Cascade Lake: branches kept off 32-byte boundaries (JCC erratum), `-Wa,-mbranches-within-32B-boundaries` (measured, not adopted, 2026-10-07)
 
 The Xeon @ 2.80GHz sandbox's tails at b53a814 put 1e13 at 1.06x (1.00x
 at 3172ea8), on a tail with no sparse tier (its plan, emulated with
@@ -5177,10 +5177,17 @@ wall:
 
 The move cost about 2% at 1e13, the aligned build is under both (1e13
 means 13.73 s against 13.87 s for ffd8e7c and 14.08-14.18 s for b53a814 in
-the two series), and the rest of the 1.06x was the host. x3 and
-overlapping on the one affected machine: a confirmation round (x5, 1e11 to
-1e18) comes before gating the flag in the Makefile on a Skylake-family
-`-march=native` (none of the other machines is on the erratum's list).
+the two series), and the rest of the 1.06x was the host.
+
+**Not adopted** (user, 2026-10-07): the only way to apply it where it
+helps is a rule on the CPU model (a Skylake-family `-march=native`; no other
+machine in the fleet is on the erratum's list), and the build and the plan
+stay derived from caches, threads and CPU feature flags, never from a model
+name. For a long run on a Skylake-family machine: `make variant
+DEFS=-Wa,-mbranches-within-32B-boundaries`. What the episode leaves for
+every A/B: on this core a change anywhere in the binary can move an
+unrelated hot kernel by ~2-3%, so a Cascade Lake result under that size is
+not attributable to the code that changed without a layout control.
 
 ### PGO training set: a natural 1e13 pass (tried, reverted, 2026-09-25, follow-up session)
 
