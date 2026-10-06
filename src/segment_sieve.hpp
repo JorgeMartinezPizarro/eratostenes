@@ -75,6 +75,10 @@ constexpr double MEDIUM_BAND_MAX_HITS = 8.0;
 // matter at a block's edges (is the next-block spread still running, is the
 // entry ERA_BIG_PF ahead still inside the block) leave the loop, and the
 // spread issues one prefetch per line instead of one per pair of entries.
+// callgrind: -11.4% of process_big<true>'s instructions; wall at the
+// 1e15-1e18 tails -0.5..-1.9% on the i5-3470 (one thread per core),
+// -1.2..-4.7% at 1e16-1e18 on the i5-13500 (20 threads). See
+// docs/RESEARCH.md#sparse-tier-process_big-in-groups-of-4-entries-no-per-iteration-edge-tests-kept-2026-10-06.
 // -DERA_BIG_FASTBLK=0 restores the single loop with the tests (A/B).
 #ifndef ERA_BIG_FASTBLK
 #define ERA_BIG_FASTBLK 1

@@ -72,7 +72,7 @@ throughout below).
   - [Sparse tier: mod-2310 multiplier wheel (kept, 2026-09-30)](#sparse-tier-mod-2310-multiplier-wheel-kept-2026-09-30)
   - [Sparse tier: next-block prefetch spread over the current block (kept, 2026-10-04)](#sparse-tier-next-block-prefetch-spread-over-the-current-block-kept-2026-10-04)
   - [Sparse tier: `process_big` is issue-bound at 12 threads; the ring's wrap mask and the spills are what is left (open, 2026-10-05)](#sparse-tier-process_big-is-issue-bound-at-12-threads-the-rings-wrap-mask-and-the-spills-are-what-is-left-open-2026-10-05)
-  - [Sparse tier: `process_big` in groups of 4 entries, no per-iteration edge tests (open, 2026-10-06)](#sparse-tier-process_big-in-groups-of-4-entries-no-per-iteration-edge-tests-open-2026-10-06)
+  - [Sparse tier: `process_big` in groups of 4 entries, no per-iteration edge tests (kept, 2026-10-06)](#sparse-tier-process_big-in-groups-of-4-entries-no-per-iteration-edge-tests-kept-2026-10-06)
   - [Activation at the top of N on old cores: 83 ns per prime on Nehalem, two flags to split it (open, 2026-10-04)](#activation-at-the-top-of-n-on-old-cores-83-ns-per-prime-on-nehalem-two-flags-to-split-it-open-2026-10-04)
   - [Sparse activation from the bitmap index: 18% fewer instructions per prime (kept, 2026-10-05)](#sparse-activation-from-the-bitmap-index-18-fewer-instructions-per-prime-kept-2026-10-05)
   - [i5-3470 profile at 1e12: the med64 tier over the whole-L2 segment is 59% of the cycles (open, 2026-10-04)](#i5-3470-profile-at-1e12-the-med64-tier-over-the-whole-l2-segment-is-59-of-the-cycles-open-2026-10-04)
@@ -3396,7 +3396,7 @@ laptop with callgrind:
   needs its own callgrind and asm read, the source-level intent predicts
   nothing. `make test` 87/87. Committed for the A/B against 4e03879.
 
-### Sparse tier: `process_big` in groups of 4 entries, no per-iteration edge tests (open, 2026-10-06)
+### Sparse tier: `process_big` in groups of 4 entries, no per-iteration edge tests (kept, 2026-10-06)
 
 The U = 2 loop in the laptop's objdump (GCC 13, ffd8e7c) was 82-86
 instructions per pair of entries, ~42 per hit, and 15-19 of them per pair
@@ -3446,8 +3446,28 @@ perf_event_paranoid was 4 on that boot):
 | 1e18 | 3.48-3.60 s | 3.50-3.52 s | -0.85% | 4/5 |
 
 Small, and in the same direction at every N, on the one-thread-per-core
-core where the loop is latency-bound. Pending: the i5-13500 (HT pairs,
-issue-bound), where the gain should be larger.
+core where the loop is latency-bound.
+
+i5-13500 (20 threads, HT pairs; inside `eratostenes:dev` with `--cap-add
+SYS_ADMIN`, A = the same image's `-DERA_BIG_FASTBLK=0` build), last 1e11
+below N, x4, wall:
+
+| tail | A | B | delta (means) | pairs B lower |
+|---|---|---|---:|---:|
+| 1e15 | 3.72, 4.44, 4.42, 4.38 s | 4.26, 4.26, 4.26, 4.40 s | +1.3% (-2.4% without A's first run) | 3/4 |
+| 1e16 | 5.11, 5.04, 5.01, 5.18 s | 5.05, 5.03, 5.03, 4.99 s | -1.2% | 4/4 |
+| 1e17 | 5.93, 6.03, 6.41, 5.98 s | 5.70, 5.78, 5.85, 5.88 s | **-4.7%** (every B under every A) | 4/4 |
+| 1e18 | 7.59, 7.35, 7.47, 7.58 s | 7.42, 7.28, 7.41, 7.40 s | -1.6% | 4/4 |
+
+A's 3.72 s at 1e15 is the machine's usual fast first run (the burst
+regime, see the Makefile section). The perf counters of one binary spread
+21% and 38% between reps at 1e15 and 1e16 (as in the 2026-10-05 entry on
+this machine), so those two N say nothing in cycles (-15.6% and +0.6%);
+at 1e17 and 1e18, with a 5-7% spread, instructions:u -8.0% and -7.6% (4/4
+both) and cycles:u -2.5% (2/4) and -2.2% (4/4). **Kept** (default on):
+no N worse beyond its noise on either machine, -0.5..-1.9% with one thread
+per core, -1.2..-4.7% wall at 1e16-1e18 with HT pairs, where the loop is
+issue-bound as predicted.
 
 ### Activation at the top of N on old cores: 83 ns per prime on Nehalem, two flags to split it (open, 2026-10-04)
 
