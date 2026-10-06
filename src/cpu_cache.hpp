@@ -120,28 +120,15 @@ inline uint64_t detect_cpu_cache_share(int cpu_id, int target_level) {
 }
 
 // Per-logical-CPU cache sizing, indexed by CPU id, for every online CPU
-// sysfs will admit to. Empty (both vectors) if CPU 0 alone can't be read,
-// so callers can tell "topology detection isn't available here" from
-// "this machine only has one CPU" without a special case: a single-CPU
-// vector of size 1 is a valid, if trivial, per-CPU table.
+// sysfs lists. Empty if CPU 0 alone can't be read, so callers can tell
+// "no topology here" from "one CPU".
 //
-// L2 and L1d get different treatment here, on purpose: L2 genuinely is a
-// capacity multiple threads draw from at once, so its per-thread fair
-// share (l2_share) is total/sharers -- on an i5-13500 (2026-09), cpu0
-// (a P-core) reports 1280K/2 sharers = 640K/thread, while an E-core
-// cluster reports 2048K/4 sharers = 512K/thread, a ~25% mismatch applied
-// uniformly to every E-core thread before this existed. L1d on a
-// hyperthread pair isn't reserved/split that way -- SMT time-slices which
-// logical thread is actually running, not a strict half held aside up
-// front -- and this project's own tuning already settled on using the
-// RAW detected L1d size directly with no halving for the single-value
-// fallback (see tuning.hpp's sub-block comment); l1_raw keeps that
-// same, already-validated philosophy per CPU instead of inventing a new
-// one, only splitting by CPU to catch a P-core/E-core L1d size difference
-// if there is one, not to model HT sharing a second, different way.
-// l1_sharers is used for one thing only: counting physical cores (SMT
-// siblings share one L1d), so tuning.hpp can give the sub-block the whole
-// L1d instead of half when there are no more threads than cores.
+// l2_share is the L2 divided by the CPUs that share it (an i5-13500 P-core:
+// 1280K / 2 = 640K; an E-core cluster: 2048K / 4 = 512K). l1_raw is the
+// L1d undivided: tuning.hpp sizes the sub-block from the raw size and only
+// needs the per-CPU values to catch a P-core/E-core difference. l1_sharers
+// counts physical cores (SMT siblings share one L1d), for the
+// one-thread-per-core rules.
 struct CpuCacheTopology {
     std::vector<uint64_t> l1_raw;   // index = logical CPU id, 0 = undetected
     std::vector<int> l1_sharers;    // logical CPUs on that L1d, 0 = undetected
@@ -161,13 +148,12 @@ inline CpuCacheTopology detect_cpu_cache_topology() {
     return topo;
 }
 
-// Wheel-index segment width (word-aligned to 64, ready for SegmentSieve)
-// that fills half of `l2_bytes` -- same derivation as the auto -s formula
-// below, but returning k-width directly. Also used in tuning.hpp's
-// per-CPU-minimum step, deliberately applying this same /2 margin even on
-// top of an already-per-thread L2 share -- counterintuitive, see
+// Wheel-index segment width (a multiple of 64) that fills half of
+// `l2_bytes` -- the same derivation as parse_args' automatic -s, returning
+// the width in wheel indices. tuning.hpp's hybrid step applies this /2 on
+// top of an already per-thread L2 share, on purpose (measured faster), see
 // docs/RESEARCH.md#seg_k_width_from_l2_bytess-extra-2-margin-applied-on-top-of-an-already-per-thread-l2-share-kept-counterintuitive.
-// 0 falls back to a conservative 256KiB.
+// 0 falls back to 256 KiB.
 inline uint64_t seg_k_width_from_l2_bytes(uint64_t l2_bytes) {
     if (l2_bytes == 0) l2_bytes = 256 * 1024;
     uint64_t l2_target_bytes = l2_bytes / 2;
@@ -175,12 +161,9 @@ inline uint64_t seg_k_width_from_l2_bytes(uint64_t l2_bytes) {
     return std::max<uint64_t>(64, (numeric_width * WHEEL_SIZE / WHEEL_MOD) / 64 * 64);
 }
 
-// L1-sized sub-block (bytes, word-aligned to 8) for the small tier -- same
-// derivation as tuning.hpp's sub-block sizing, callable per-CPU with a RAW
-// (undivided -- see CpuCacheTopology's comment on l1_raw) L1d size. 0
-// falls back to the same conservative 32KiB the global path uses.
-// Half the L1d, not all of it: leaves room in L1 for the small tier's own
-// state and the presieve window alongside the sub-block. See
+// The small tier's sub-block (bytes, a multiple of 8) from a raw L1d size:
+// half of it, the per-thread share of an HT pair (tuning.hpp doubles it
+// with one thread per core). 0 falls back to 32 KiB. See
 // docs/RESEARCH.md#sub-block-size-half-the-l1d-not-all-of-it-kept-2026-09-27.
 inline uint64_t sub_block_from_l1_bytes(uint64_t l1_bytes) {
     if (l1_bytes == 0) l1_bytes = 32 * 1024;

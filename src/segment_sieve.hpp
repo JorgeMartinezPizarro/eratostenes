@@ -1,16 +1,10 @@
 #pragma once
-// Segmented sieve on a compile-time wheel (see wheel.hpp), bit-packed into
-// uint64_t words. Four prime tiers by expected hits per segment -- small,
-// med64, medium, sparse (cutoffs computed in tuning.hpp) -- mirroring
-// primesieve's own EratSmall/EratMedium/EratBig split, plus this project's
-// own med64 sub-band. See docs/ALGORITHM.md §6 for how and why each tier
-// works the way it does, and docs/RESEARCH.md for every tried-and-reverted
-// alternative along the way (64-list medium restructurings, dTLB pressure,
-// sparse-tier stepping-math variants, the 7-byte SparseEntry attempt).
-//
-// Extraction (turning the finished bit array into actual prime values):
-// invert each word, decompose into (q, r) = (k / WHEEL_SIZE, k %
-// WHEEL_SIZE) once per word, then walk set bits with ctz + clear-lowest-bit.
+// One thread's sieve: a segment of the bit array (bit k = wheel index k,
+// set = composite) and the state of every active base prime, in four tiers
+// by hits per segment -- small, med64, medium, sparse; cutoffs from
+// tuning.hpp. primesieve's EratSmall/EratMedium/EratBig split plus a med64
+// band of this project's own. docs/ALGORITHM.md §6 explains each tier,
+// docs/RESEARCH.md what else was tried.
 
 #include <array>
 #include <cstdint>
@@ -33,24 +27,18 @@
 #ifndef ERA_BIG_PF
 #define ERA_BIG_PF 16
 #endif
-// Sparse tier: with one thread per core the bucket arenas are 2 MiB regions
-// advised MADV_HUGEPAGE (SegmentSieve's huge_arenas, decided in tuning.hpp),
-// so the ring's active write set (slots x block: 4 MiB at the 1e18 tail, a
-// thousand 4 KiB pages) costs a couple of TLB entries. Dev PC, 2 threads:
-// -2.9% on the 1e17 tail (4/4), -3.5% on 1e18, -12% on the 1e18 tail with a
-// 1e10 window (the activation of 50M primes files into that write set); 6
-// threads neutral; 12 threads (HT pairs) +10.5% worse (6/6), hence the gate.
-// Best effort: THP in "madvise" (Ubuntu's default) or "always" mode.
+// madvise(MADV_HUGEPAGE) for the sparse ring's arenas (SegmentSieve's
+// huge_arenas, decided in tuning.hpp). Best effort: THP in "madvise" or
+// "always" mode.
 #include <sys/mman.h>
 #ifdef __BMI2__
 #include <immintrin.h>
 #endif
 
 // v mod 2^nbits, with mask = 2^nbits - 1: one BMI2 instruction (bzhi) that
-// takes the bit count from a register instead of an `and` with a mask the
-// hot loop had to keep live (process_big reloaded it from the stack every
-// iteration); plain `and` where there is no BMI2 (Ivy Bridge, the portable
-// build).
+// takes the bit count from a register, so process_big's loop needn't keep
+// the mask live; plain `and` where there is no BMI2 (Ivy Bridge, the
+// portable build).
 static inline uint64_t low_bits(uint64_t v, uint32_t nbits, uint64_t mask) {
 #ifdef __BMI2__
     (void)mask;
@@ -60,13 +48,11 @@ static inline uint64_t low_bits(uint64_t v, uint32_t nbits, uint64_t mask) {
     return v & mask;
 #endif
 }
-// Sparse activation (d7d2203, see docs/RESEARCH.md). ERA_ACT_IDX=0
-// recomputes p / 30 and p % 30 from the prime instead of taking them from
-// its wheel index: fewer instructions, and -7.3% cycles at the 1e18 tail on
-// the i5-13500, but +13% on the i5-3470 -- the same division per prime
-// stalls ~35 cycles longer there once the independent work around it is
-// gone (perf annotate). On by default only where BMI2 exists, i.e. Haswell
-// and newer; Ivy Bridge and the portable build take the old derivation.
+// Sparse activation: ERA_ACT_IDX takes p / 30 and p % 30 from the prime's
+// wheel index instead of dividing. Fewer instructions and faster on modern
+// cores, but slower on Ivy Bridge (its 64-bit division stalls longer once
+// the independent work around it is gone), so it is on only where BMI2
+// exists. See docs/RESEARCH.md#sparse-activation-from-the-bitmap-index-18-fewer-instructions-per-prime-kept-2026-10-05.
 #ifndef ERA_ACT_IDX
 #ifdef __BMI2__
 #define ERA_ACT_IDX 1
@@ -77,24 +63,16 @@ static inline uint64_t low_bits(uint64_t v, uint32_t nbits, uint64_t mask) {
 
 class SegmentSieve {
 public:
-    // seg_k_width: wheel-index width of a normal (non-final) segment, same
-    // as passed to sieve_and_emit's k_high-k_low in every call but the
-    // last of a chunk.
-    // base_prime_max: the largest base prime this sieve will ever be given
-    // (i.e. isqrt(limit)) -- used to size the bucket ring generously
-    // enough that no sparse prime's skip between hits can ever wrap around
-    // it.
-    // presieve: shared, read-only pre-sieve pattern (see presieve.hpp) used
-    // to fill each segment instead of zeroing it; its primes must already
-    // be excluded from small/medium/sparse primes by the caller.
-    // sub_block_bytes: L1-sized slice the small tier (and presieve fill)
-    // is run over, one slice at a time -- see sieve_and_emit.
-    // has_sparse: true when this run actually has any sparse-tier primes.
-    // The new EratBig-style tier below needs seg_k_width/8 (the segment
-    // width in BYTES) to be a power of 2 so its bucket-slot math is a
-    // shift/mask instead of a division -- tuning.hpp is responsible for
-    // flooring seg_k_width to the nearest power of 2 (in bytes) whenever
-    // has_sparse is true; this constructor just verifies that was done.
+    // seg_k_width: wheel-index width of a full segment (the last one of a
+    // chunk may be shorter).
+    // base_prime_max: the largest base prime (isqrt(limit)); sizes the
+    // bucket ring so no sparse prime's step can wrap around it.
+    // presieve: the shared pre-sieve pattern (presieve.hpp) each segment is
+    // filled with instead of zeroed; its primes are excluded from the tiers.
+    // sub_block_bytes: the L1-sized slice the small tier is crossed off in.
+    // has_sparse: this run has sparse primes, so the segment must be a power
+    // of 2 in bytes (the ring's slot math is a shift); tuning.hpp rounds it,
+    // the constructor checks.
     SegmentSieve(uint64_t seg_k_width, uint64_t base_prime_max, const Presieve& presieve,
                  uint64_t sub_block_bytes, bool has_sparse, bool medium_nta,
                  bool huge_arenas = false)
@@ -198,17 +176,14 @@ public:
         uint64_t high_n = wheel_number(k_high); // exclusive numeric bound, valid for the p*p cutoff
         uint64_t low_n = wheel_number(k_low);
 
-        // Activate any base primes that just became relevant (p*p < high_n).
-        // Each of the four lists is sorted by p and gets its own
-        // monotonically-advancing pointer, so every prime is visited here
-        // exactly once for the whole chunk, not once per segment.
+        // Each tier's primes are sorted and walked by a pointer that only
+        // advances, so every prime is activated once per chunk, not once per
+        // segment.
         //
-        // med64_'s own lists reserve capacity once, on this SegmentSieve's
-        // very first activation (not per chunk -- a vector's capacity
-        // survives clear(), and main.cpp's sieve_chunk reuses one instance
-        // per thread across chunks), to avoid growing 384 small vectors one
-        // push_back at a time while hot. Distribution across (class, phase)
-        // is expected to be close to uniform, not exact, hence the margin.
+        // The 384 med64 lists reserve their capacity once per SegmentSieve
+        // (capacity survives clear() and the instance is reused across
+        // chunks), with a margin: the spread over (class, phase) is close
+        // to uniform, not exact.
         if (!med64_reserved_ && !med64_primes.empty()) {
             size_t per_list = med64_primes.size() / 384 * 2 + 16;
             for (auto& v : m64_cur_) v.reserve(per_list);
@@ -221,12 +196,9 @@ public:
                         high_n, low_n, k_low);
 
         // Sparse tier: its primes are a run of the base-prime bitmap
-        // (base_sieve.hpp's SparsePrimes), walked in increasing order from
-        // next_sparse_k_ up to k_stop, the first index whose prime's square
-        // reaches this segment's end (one isqrt per segment, in place of a
-        // p * p compare per prime); file_sparse files each one into the
-        // bucket ring, from its index -- the index already holds p / 30 and
-        // the residue class, so nothing is divided by 30 per prime.
+        // (base_sieve.hpp's SparsePrimes), walked up to k_stop, the first
+        // index whose prime's square reaches this segment's end (one isqrt
+        // per segment instead of a p * p compare per prime).
         size_t sparse_activated = 0;
         if (next_sparse_k_ < sparse_primes.k_begin) next_sparse_k_ = sparse_primes.k_begin;
         const uint64_t k_cut = wheel_count_upto(isqrt(high_n - 1)); // primes with p*p < high_n have k < k_cut
@@ -282,48 +254,30 @@ public:
         }
         // Wheel indices below skip_below_k_ are not part of the range: index
         // 0 (the number 1, nothing marks it) and, with --start, the head of
-        // the first word (split_ranges rounds the start down to a multiple
-        // of 64 indices; without this the primes in it were counted -- 3
-        // extra at the 2e16 tail from 19999900000000000, found 2026-10-04).
+        // the first word that split_ranges rounded the start down into.
         if (k_low < skip_below_k_) {
             for (uint64_t k = k_low; k < std::min(skip_below_k_, k_high); ++k)
                 words_[(k - k_low) >> 6] |= uint64_t{1} << ((k - k_low) & 63);
         }
 
-        // med64 tier (see docs/RESEARCH.md and this class's header comment
-        // for why this is scoped to a bounded sub-band rather than the
-        // whole medium tier): byte marking like the small tier, but one
-        // pass over the WHOLE segment (no sub-blocking -- this tier's
-        // point is amortizing cross_off<PR>'s entry/exit cost over many
-        // hits, not L1 residency for a huge population). process_med64<PR>
-        // reads this segment's due entries from m64_cur_ and pushes each
-        // one's next hit into m64_nxt_, grouped by its OUTGOING phase so
-        // next segment's calls again share one entry phase per list; the
-        // segment-wide rebase (pos -= bytes_needed) matches cross_off_class's
-        // own end-of-sub-block rebase above. Skipped entirely when this
-        // run has no med64 primes, matching the sparse tier's own
-        // skip-when-empty guard below.
+        // med64 tier: one pass over the whole segment (see process_med64).
+        // Its entries are re-filed into m64_nxt_ by their exit phase; the
+        // two buffers swap here, so the next segment reads what this one
+        // wrote.
         if (!med64_primes.empty()) {
             run_med64(bytes, bytes_needed);
             for (auto& v : m64_cur_) v.clear();
             std::swap(m64_cur_, m64_nxt_);
         }
 
-        // Medium tier: one pass over the whole segment each, one list per
-        // residue class so PR is a compile-time template parameter in
-        // cross_off_medium<PR>, same reasoning as the small tier's
-        // cross_off_class<PR> calls just above; NTA picked per TierSet (see
-        // tuning.hpp's SieveConfig::medium_nta_min_primes).
+        // Medium tier: one pass over the whole segment, one list per residue
+        // class; the prefetchnta variant is picked per tier set (tuning.hpp's
+        // medium_nta_min_primes).
         if (medium_nta_) run_medium<true>(bytes, bytes_needed);
         else run_medium<false>(bytes, bytes_needed);
 
-        // Sparse tier: see process_sparse_bucket below (pulled out of this
-        // function on purpose -- see its own comment). sparse_primes is
-        // either empty for the whole run or not -- never changes segment
-        // to segment -- so skipping the call entirely when it's empty
-        // avoids paying a real (non-inlined) call's overhead every single
-        // segment for N where this tier never has anything to do (every N
-        // tested up to 1e12 on this machine, see README#benchmarks).
+        // Sparse tier: only when the run has sparse primes at all (decided
+        // once per run), so dense-only runs never pay the call.
         if (!sparse_primes.empty()) process_big();
         if (++cur_segment_ == num_buckets_) wrap_ring();
 
@@ -335,12 +289,10 @@ public:
     }
 
 private:
-    // count-only (NullSink): a plain popcount over the full words, four
-    // independent accumulators, and the partial last word masked once
-    // after the loop. A generic loop that checked "last word?" and "zero
-    // word?" on every word was kept by GCC as a cmove chain on the running
-    // sum: ~13 instructions per word instead of ~4, ~60% of sieve_chunk's
-    // own cycles on the i5-13500 (perf annotate, 1e14 tail).
+    // Count-only (NullSink): a plain popcount over the full words with four
+    // accumulators, the partial last word masked once after the loop (a
+    // per-word "last word?" test made GCC build a cmove chain, ~3x the
+    // instructions).
     uint64_t count_primes(uint64_t count) const {
         const uint64_t* wp = words_.data();
         const size_t full = count / 64;
@@ -420,10 +372,10 @@ private:
         return n;
     }
 
-    // Small tier: activates (appends state for) every prime in `primes`
-    // from `next` on whose square falls below this segment's end; `primes`
-    // is sorted, so this touches each prime exactly once per chunk. Byte
-    // positions, one output list per residue class (state[pr]).
+    // Small tier: appends the state of every prime from `next` on whose
+    // square falls below this segment's end, one list per residue class
+    // (state[pr]): the pending hit's byte position and the packing
+    // (qp << 6) | (pr << 3) | j that erat_small.hpp::cross_off_class reads.
     __attribute__((noinline)) static void activate_dense(const std::vector<uint64_t>& primes, size_t& next,
                                std::vector<erat::DenseState>* state,
                                uint64_t high_n, uint64_t low_n, uint64_t k_low) {
@@ -432,9 +384,7 @@ private:
             if (p * p >= high_n) break;
             uint64_t start_val = std::max(p * p, low_n);
             uint64_t pr = static_cast<uint64_t>(WHEEL_POS[p % WHEEL_MOD]);
-            // Small tier: smallest m coprime with WHEEL_MOD (30) with
-            // p*m >= start_val -- byte position, (qp<<6)|(pr<<3)|j
-            // packing (erat_small.hpp::cross_off_class).
+            // Smallest m coprime with 30 with p*m >= start_val.
             uint64_t m = (start_val + p - 1) / p;
             uint64_t r = m % WHEEL_MOD;
             uint64_t step = STEP_TO_COPRIME[r];
@@ -449,12 +399,10 @@ private:
         }
     }
 
-    // med64 tier, on the mod-210 multiplier wheel: activate_medium's start
-    // derivation (smallest m coprime with 210, byte position), filed under
-    // state[pr*48+w] with qw = (qp << 6) | w, so every
-    // cross_off_checked210<PR> call in one inner loop shares entry phase w.
-    // (A mod-30 version with 64 lists was the default until 2026-09-30; see
-    // docs/RESEARCH.md.)
+    // med64 tier: the smallest multiplier coprime with 210 (multiples of 7
+    // are presieved), filed under state[pr * 48 + w] with qw = (qp << 6) | w,
+    // so every cross_off_checked210<PR> call of one inner loop enters at the
+    // same phase w.
     __attribute__((noinline)) static void activate_med64(const std::vector<uint64_t>& primes, size_t& next,
                                    std::vector<erat::DenseState>* state384,
                                    uint64_t high_n, uint64_t low_n, uint64_t k_low) {
@@ -475,17 +423,11 @@ private:
         }
     }
 
-    // Medium tier: smallest m coprime with 210 (not just 30) with
-    // p*m >= start_val -- every medium prime is > 163, so multiples of 7
-    // are always redundant here (see erat_small.hpp::cross_off_medium).
-    // Byte position, (qp<<6)|w packing, one list per residue class
-    // (medium_[pr]) so cross_off_medium<PR> gets PR as a compile-time
-    // template parameter -- same shape as activate_dense's small-tier
-    // branch above, just mod-210 stepping instead of mod-30. Same t/w
-    // decomposition as the sparse tier's own EratBig-style activation.
-    //
-    // qp goes in as a 1-byte delta from the class's previous prime (see
-    // cross_off_medium); the first prime of a class sets qp_base.
+    // Medium tier: the same mod-210 start as med64, one list per residue
+    // class as struct of arrays -- dyn = (pos << 6) | w, rewritten every
+    // segment, and qp as a 1-byte delta from the class's previous prime
+    // (read-only; the first prime of a class sets qp_base). See
+    // erat_small.hpp::cross_off_medium.
     __attribute__((noinline)) static void activate_medium(const std::vector<uint64_t>& primes, size_t& next,
                                  std::vector<uint32_t>* dyn, std::vector<uint8_t>* qds,
                                  uint32_t* qp_base, uint32_t* qp_last,
@@ -518,23 +460,15 @@ private:
         }
     }
 
-    // med64 tier (see docs/RESEARCH.md): PR a compile-time template parameter
-    // like cross_off_class<PR>/cross_off_medium<PR> above, looping over that
-    // class's own 48 entry-phase lists (m64_cur_[PR*48+w]) so every
-    // cross_off_checked210<PR> call within one inner loop enters its switch
-    // at the same phase w -- a well-predicted jump instead of a per-prime
-    // dispatch. Runs over the WHOLE segment (bytes_needed), not sub-blocked
-    // like the small tier: this tier's population is bounded by
-    // small_limit/med64_limit (see tuning.hpp), not chasing L1 residency.
-    // Each entry is read from m64_cur_, stepped, and re-filed into m64_nxt_
-    // keyed by its NEW exit phase and rebased by bytes_needed --
-    // sieve_and_emit clears m64_cur_ and swaps the two buffers once every
-    // PR has run, so next segment reads what this one just wrote.
-    //
-    // prefetchnta m64_cur_ MED64_NTA_DIST entries ahead, once per entry,
-    // like cross_off_medium's NTA path: the double-buffered state (~2 x 233
-    // KB per thread from 5e12 up) is streamed through once per segment. Dev
-    // PC: 1e13 -1.1%, 1e14 5% tail -2.6%; 1e10-1e12 unchanged (RESEARCH.md).
+    // med64 tier, class PR: the class's 48 lists in phase order, so every
+    // cross_off_checked210<PR> call of one inner loop enters its switch at
+    // the same phase (a predicted jump). Over the whole segment, not
+    // sub-blocked: these primes have too few hits per sub-block to pay a call
+    // each. Each entry is re-filed into m64_nxt_ by its exit phase, rebased
+    // to the next segment. The state stream is read with prefetchnta, once
+    // per entry, to keep it out of L2. See
+    // docs/RESEARCH.md#med64-mod-210-stepping-on-the-checked-loop-cross_off_checked210-kept-2026-09-30
+    // and docs/RESEARCH.md#med64-prefetchnta-on-the-state-stream-kept-2026-09-29.
     template <int PR>
     void process_med64(uint8_t* bytes, uint64_t bytes_needed) {
         for (int w = 0; w < 48; ++w) {
@@ -563,10 +497,8 @@ private:
         process_med64<7>(bytes, bytes_needed);
     }
 
-    // Medium tier over the whole segment, one call per residue class; the
-    // rebase is the segment's own width, like process_med64's.
-    // One call per residue class PR (a compile-time template parameter in
-    // erat_small.hpp's kernels, like cross_off_class<PR> for the small tier).
+    // Medium tier over the whole segment, one call per residue class PR (a
+    // template parameter of the kernel); the rebase is the segment's width.
     template <bool NTA, int PR>
     void run_medium_class(uint8_t* bytes, uint64_t bytes_needed) {
         erat::cross_off_medium<PR, NTA>(bytes, bytes_needed, medium_dyn_[PR].data(),
@@ -582,60 +514,36 @@ private:
         run_medium_all<NTA>(bytes, bytes_needed, std::make_integer_sequence<int, 8>{});
     }
 
-    // Processes exactly the sparse-tier entries due this segment: mark,
-    // advance, reschedule into whichever future bucket the next hit lands
-    // in. Pulled into its own noinline function to keep this tier's live
-    // ranges from competing for registers with the other two tiers -- see
-    // docs/RESEARCH.md#sparse-tier-process_bigprocess_sparse_bucket-split-into-its-own-noinline-function.
-    // Skipped entirely by sieve_and_emit when sparse_primes is empty.
+    // Sparse tier (primesieve's EratBig design): every sparse prime sits in
+    // the ring slot of the segment its next hit falls in, as one 8-byte
+    // entry in a chain of 4 KiB pooled blocks. This drains this segment's
+    // slot: for each entry, mark its hit, step to the next one with the
+    // mod-2310 table (big::TABLE2310; 11 is presieved too, ~9% fewer hits
+    // than mod 210) and copy the entry into the tail block of the slot that
+    // hit falls in. The entry is idx (class and phase) | pos << 12 | qp << 36,
+    // pos relative to the segment it is due in. noinline: its own register
+    // allocation, away from the dense tiers'. See
+    // docs/RESEARCH.md#sparse-tier-design-current-fixed-size-pooled-blocks-attempt-6
+    // and docs/RESEARCH.md#sparse-tier-mod-2310-multiplier-wheel-kept-2026-09-30.
     //
-    // Fixed-size blocks of erat::DenseState pulled from a pool, one queue
-    // (linked list of blocks) per ring slot -- primesieve's own EratBig
-    // design. The entry carries everything needed to process it (qp/pr/j
-    // packed into `qw`, `pos` relative to whichever segment it's due in,
-    // same layout as the dense tiers' DenseState, 8 bytes total), so
-    // rescheduling COPIES the entry into the target slot's tail block
-    // instead of relinking an index. Blocks of 4 KiB (512 entries): 1 KiB
-    // was chosen over 8 KiB in September; 4 KiB, never tried then, is
-    // -3.6..-3.9% at the 1e15 tail with 2 and with 12 threads (dev PC), a
-    // tie at 1e13. See
-    // docs/RESEARCH.md#sparse-tier-design-current-fixed-size-pooled-blocks-attempt-6,
-    // docs/RESEARCH.md#sparse_block_entries-tuning-1024-vs-128 and
-    // docs/RESEARCH.md#sparse-tier-block-size-4-kib-kept-2026-10-02.
-    //
-    // Drains this segment's ring slot: for each due entry, mark its one
-    // hit (byte marking, a table lookup for mask/step -- see
-    // wheel210_big.hpp), advance to the next hit, and re-file it by byte
-    // position with a shift/mask instead of a division. `pos` in a live
-    // entry is always relative to whichever segment it's due in, so no
-    // k_low/k_high parameters are needed here.
-    //
-    // Multipliers step on the mod-2310 wheel (11 is presieved too): entry
-    // packed as idx | pos << 12 | qp << 36, and big::TABLE2310 (32-bit rows,
-    // next index included) -- ~9.1% fewer hits than mod 210. See
-    // docs/RESEARCH.md#sparse-tier-mod-2310-multiplier-wheel-kept-2026-09-30.
     // Ring slots: this segment's is cur_segment_ (kept below num_buckets_,
     // see wrap_ring), a hit `ahead` segments on files into cur_segment_ +
     // ahead, always below the 2 x num_buckets_ slots allocated (the ring's
     // sizing has ahead < num_buckets_ / 2 for a re-filed hit, and
-    // file_sparse checks ahead < num_buckets_ for an activation). No wrap
-    // mask in the loop: `& bmask` was one of ~47 instructions per hit and
-    // kept bmask live across an issue-bound loop (see docs/RESEARCH.md).
+    // file_sparse checks ahead < num_buckets_ for an activation), so the
+    // loop needs no wrap mask.
     __attribute__((noinline))
     void process_big() {
         const uint32_t slot = static_cast<uint32_t>(cur_segment_);
         uint8_t* const s = reinterpret_cast<uint8_t*>(words_.data());
-        // This segment's tail pointer, as a pointer: a hit `ahead` segments on
-        // files into tails_cur[ahead], one address computation, with neither
-        // the array base nor the cursor live in the loop (the s[pos] byte
-        // store may alias anything, so tail_.data() would be reloaded from
-        // `this` on every hit, and with both live GCC spilled the base to
-        // the stack and reloaded it per hit -- see docs/RESEARCH.md). The
-        // slow path recovers the slot index from tail_.data().
+        // This segment's tail pointer, as a pointer: a hit `ahead` segments
+        // on files into tails_cur[ahead], so neither the array base (which
+        // the s[pos] store would force GCC to reload) nor the cursor is live
+        // in the loop. The slow path recovers the slot index from
+        // tail_.data().
         erat::DenseState** const tails_cur = tail_.data() + cur_segment_;
-        // uint32_t, as measured: declared 64-bit (so shrx and bzhi would share
-        // the count register) GCC instead kept two copies and spilled
-        // tails_cur, +1.1% instructions (docs/RESEARCH.md).
+        // uint32_t on purpose: as uint64_t GCC kept two copies and spilled
+        // tails_cur (docs/RESEARCH.md).
         const uint32_t log2sb = log2_sb_;
         const uint64_t modsb = (uint64_t{1} << log2sb) - 1;
         while (head_[slot]) {
@@ -645,40 +553,26 @@ private:
             tail_[slot] = nullptr;
             while (blk) {
                 Blk* next_blk = blk->next;
-                // Chain blocks are scattered in memory (LIFO free list), so
-                // the hardware streamer restarts at every block boundary;
-                // the next block is prefetched into L2 one block's worth of
-                // work ahead, one line at a time over this block's first half
-                // (a burst of 64 prefetches at the boundary filled the miss
-                // queue and stalled on it). See
-                // docs/RESEARCH.md#sparse-tier-prefetch-the-next-block-of-the-chain-once-per-block-kept-2026-09-27
-                // and docs/RESEARCH.md#sparse-tier-next-block-prefetch-spread-over-the-current-block-kept-2026-10-04.
-                // The last block of a chain has no next: its prefetch target
-                // is itself (already cached, harmless), so the loops below
-                // have no `next_blk != nullptr` test.
+                // The blocks of a chain are scattered in memory (LIFO free
+                // list), so the next one is prefetched into L2 a line at a
+                // time over this block's first half. The last block of a
+                // chain prefetches itself (already cached), so the loops
+                // below test nothing for it. See
+                // docs/RESEARCH.md#sparse-tier-next-block-prefetch-spread-over-the-current-block-kept-2026-10-04.
                 const char* nb = reinterpret_cast<const char*>(next_blk ? next_blk : blk);
                 erat::DenseState* it = blk->entries();
                 erat::DenseState* end = next_blk ? blk->block_end() : last_end;
-                // One 8-byte load per entry and per table row (fields split
-                // with shifts), the entry rebuilt as one 8-byte store, and the
-                // new-block path out of line: the loop is load-port bound, and
-                // field-by-field loads plus spills of the loop constants
-                // around the inline allocation cost ~12 loads per hit.
-                //
                 // Two entries per step: both entries' loads, table rows and
-                // segment RMWs are issued before either push, so one entry's
-                // misses overlap the other's -- EratBig's own loop shape. The
-                // pushes stay in order: a shared slot's second push reads the
-                // tail the first one just wrote. The constexpr inner loops
-                // unroll fully at -O3.
+                // segment RMWs are issued before either push, so their misses
+                // overlap (EratBig's loop shape). The pushes stay in order: a
+                // shared slot's second push reads the tail the first one just
+                // wrote. Each entry and table row is one 8-byte load, the new
+                // entry one 8-byte store, the new-block path out of line.
                 constexpr int U = 2;
-                // The segment byte of the entries ERA_BIG_PF ahead of p,
-                // cnt of them (same block, stale entries past `end`
-                // excluded by the caller): pos is the entry's own bits, no
-                // table needed, and that RMW is the load that misses once
-                // two threads share an L2 (dev PC, 12 threads: -2..-5% at
-                // the 1e15/1e18 tails; a tie with one thread per core). 16
-                // beat 8 and 32; see docs/RESEARCH.md.
+                // The segment byte of the entries ERA_BIG_PF ahead of p, cnt
+                // of them (inside the block; the caller keeps it so): that RMW
+                // is the load that misses once two threads share an L2. See
+                // docs/RESEARCH.md#sparse-tier-two-entries-per-iteration-in-process_big-and-a-segment-byte-prefetch-16-entries-ahead-both-kept-2026-10-02.
                 auto seg_pf = [&](const erat::DenseState* p, size_t cnt) __attribute__((always_inline)) {
                     if constexpr (ERA_BIG_PF > 0) {
                         for (size_t k = 0; k < cnt; ++k) {
@@ -720,12 +614,11 @@ private:
                 };
                 // Groups of G entries, counted once per block: the first
                 // `spread` groups also prefetch line g of the next block (64
-                // lines over the block's first 256 entries, one request
-                // each), the rest only the segment bytes ERA_BIG_PF ahead;
-                // the last entries, whose ERA_BIG_PF-ahead neighbours are
-                // past `end`, go through the plain pairs. No test inside
-                // either loop but its own end (the per-pair edge tests were
-                // ~11% of the loop's instructions, docs/RESEARCH.md).
+                // lines over the block's first 256 entries), the rest only the
+                // segment bytes ERA_BIG_PF ahead; the entries whose
+                // ERA_BIG_PF-ahead neighbours are past `end` go through the
+                // plain pairs. No test inside either loop but its own end. See
+                // docs/RESEARCH.md#sparse-tier-process_big-in-groups-of-4-entries-no-per-iteration-edge-tests-kept-2026-10-06.
                 constexpr size_t G = 4;
                 constexpr size_t PF = ERA_BIG_PF > 0 ? ERA_BIG_PF : 0;
                 const size_t n = static_cast<size_t>(end - it);
@@ -766,13 +659,11 @@ private:
         }
     }
 
-    // Files the sparse prime of wheel index k (EratBig-style activation, see
-    // the header comment): the smallest multiplier m coprime to 2310 with
-    // p*m >= max(p*p, low_n), packed with qp/residue class/phase into one
-    // word, into the bucket ring by byte position (shift/mask, no division). From
-    // the index, not the prime: k >> 3 is p / 30 and k & 7 its residue
-    // class, which `p % 30` and `WHEEL_POS[]` recomputed per prime (18 of
-    // ~83 instructions per activation, callgrind on the 1e17 tail).
+    // Files the sparse prime of wheel index k into the ring: the smallest
+    // multiplier m coprime to 2310 with p*m >= max(p*p, low_n), packed into
+    // one entry, into the slot of the segment that hit falls in. qp and the
+    // residue class come from the index itself (ERA_ACT_IDX; k >> 3 and
+    // k & 7), not from dividing p.
     void file_sparse(uint64_t k, uint64_t low_n, uint64_t k_low) {
         uint64_t qp, ri, p;
         if constexpr (ERA_ACT_IDX) {
@@ -780,8 +671,7 @@ private:
             ri = k & (WHEEL_SIZE - 1);             // WHEEL_POS[p % WHEEL_MOD]
             p = qp * WHEEL_MOD + WHEEL_R[ri];
         } else {
-            // The pre-d7d2203 derivation, from the prime: a constant division
-            // and a constant modulo per prime.
+            // From the prime: a constant division and a constant modulo per prime.
             p = wheel_number(k);
             qp = p / WHEEL_MOD;
             ri = static_cast<uint64_t>(WHEEL_POS[p % WHEEL_MOD]);
@@ -898,13 +788,9 @@ private:
     uint32_t medium_qp_base_[8] = {};
     uint32_t medium_qp_last_[8] = {}; // activation only: qp of the class's last activated prime
 
-    // med64 tier (kept default, see docs/RESEARCH.md): double-buffered, one
-    // pair of (class, entry phase) lists swapped every segment instead of
-    // migrating entries in place -- see process_med64's own comment.
-    // med64_reserved_ survives begin_chunk() on purpose: a vector's
-    // capacity survives clear(), so the one-time reserve (sieve_and_emit)
-    // only needs to happen once per SegmentSieve instance, not per chunk.
-    // 384 lists, one per (class, phase): PR*48+w.
+    // med64 tier: 384 lists, one per (class, entry phase), PR * 48 + w,
+    // double-buffered (see process_med64). med64_reserved_ survives
+    // begin_chunk() on purpose: capacity survives clear().
     std::array<std::vector<erat::DenseState>, 384> m64_cur_{};
     std::array<std::vector<erat::DenseState>, 384> m64_nxt_{};
     bool med64_reserved_ = false;

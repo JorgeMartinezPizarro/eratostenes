@@ -8,7 +8,7 @@
 // records each one's offset and length. Before this file existed the blocks
 // went as BLOBs through the single SQLite writer thread, which capped .db
 // output at ~260 MB/s on an NVMe RAID0 (i5-13500, 1e12: 77 s against a
-// 43 s CPU floor) -- see docs/RESEARCH.md#db-output-where-the-time-goes.
+// 43 s CPU floor) -- see docs/RESEARCH.md#db-output-where-the-time-goes-2026-10-02.
 
 #include <algorithm>
 #include <atomic>

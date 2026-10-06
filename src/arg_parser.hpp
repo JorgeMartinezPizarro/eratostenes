@@ -42,18 +42,10 @@ struct Options {
                                           // with wheel-index gaps. See
                                           // docs/RESEARCH.md#--zstd-level-default-1-kept-2026-09-28
 
-    // Manual overrides for detect_l2_cache_bytes()/detect_l1d_cache_bytes()
-    // (this file, below): 0 means "keep auto-detecting". Auto-detection
-    // reads /sys/devices/system/cpu/cpu0/cache/index*/ and isn't
-    // guaranteed everywhere -- a container runtime, an unusual kernel, or
-    // a hybrid P-core/E-core topology can all make it fail silently and
-    // fall back to a conservative default sized for a small machine (see
-    // where these are used in tuning.hpp/parse_args below), which costs
-    // real speed on a bigger machine without saying so anywhere. These
-    // flags are the escape hatch when that happens: safe to try because
-    // neither touches anything on the per-segment hot path, only how
-    // the auto -s width and the small tier's L1 sub-block get sized once
-    // at startup.
+    // --l2-bytes / --l1-bytes: the cache sizes to use instead of sysfs's
+    // (cpu_cache.hpp), 0 = detect. For a container or VM whose sysfs is
+    // missing or wrong; they only change how the segment and the sub-block
+    // are sized at startup.
     uint64_t l2_bytes_override = 0;
     uint64_t l1_bytes_override = 0;
 
@@ -64,9 +56,8 @@ struct Options {
     uint64_t start = 0;
     bool debug_idle = false;
 
-    // --tune key=value (see print_usage): tier cutoffs as fractions of the
-    // segment width (den == 0: built-in default), and the switches still
-    // under evaluation.
+    // --tune key=value (see print_usage): tier cutoffs as fractions (den ==
+    // 0: the automatic choice) and two switches, for a known machine.
     struct Fraction {
         uint64_t num = 0;
         uint64_t den = 0;
@@ -344,18 +335,10 @@ inline Options parse_args(int argc, char** argv) {
         opt.threads = std::max(1u, std::thread::hardware_concurrency());
     }
     if (!opt.segment_width_set) {
-        // Size the segment to fill half of the machine's actual, detected L2
-        // (not guessed) -- falls back to a conservative 256KiB if L2 can't
-        // be detected, or use --l2-bytes if that fallback is wrong (see the
-        // Options field comment). Past this width some base primes fall
-        // into the costlier sparse/bucket tier instead of staying dense --
-        // an accepted tradeoff (the bucket ring is pool-allocated, cheap
-        // once needed, far cheaper than an L2-blowing segment), not a bug.
-        // No longer additionally capped at isqrt(limit) (the smallest width
-        // keeping every base prime dense) -- see
-        // docs/RESEARCH.md#auto-segment-width-dropping-the-isqrtlimit-cap-kept
-        // for why that stopped being the right default, and why the /2
-        // itself (not the isqrt cap) stays.
+        // The base segment: half the detected L2 of cpu0 (256 KiB when
+        // undetected), the first of tuning.hpp's sizing steps. Not capped at
+        // isqrt(N), see
+        // docs/RESEARCH.md#auto-segment-width-dropping-the-isqrtlimit-cap-kept.
         uint64_t l2_bytes = opt.l2_bytes_override ? opt.l2_bytes_override : detect_l2_cache_bytes();
         if (l2_bytes == 0) l2_bytes = 256 * 1024;
         uint64_t l2_target_bytes = l2_bytes / 2;
@@ -363,11 +346,6 @@ inline Options parse_args(int argc, char** argv) {
         opt.segment_width = l2_target_bytes * 8 * WHEEL_MOD / WHEEL_SIZE;
     }
 
-    // The segment stays L2-sized (it is also the medium/sparse tier
-    // cutoff); L1 residency for the small primes -- the bulk of all marks
-    // -- comes from crossing them off one L1d-sized sub-block of the
-    // segment at a time instead (see tuning.hpp's sub-block sizing and
-    // SegmentSieve::sieve_and_emit), which keeps those two roles decoupled.
     if (opt.segment_width < 64) opt.segment_width = 64;
     if (opt.segment_width % 2 != 0) opt.segment_width += 1; // must be even
 

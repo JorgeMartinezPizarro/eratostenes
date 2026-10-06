@@ -2,40 +2,27 @@
 // (wheel.hpp: one byte = 30 numbers).
 //
 // Strategy:
-//   1. Compute the base primes (<= sqrt(N)) with a simple sieve.
-//   2. The "wheel index" range [1, wheel_count_upto(N)) -- which enumerates
-//      the numbers coprime with WHEEL_MOD above the wheel's own primes, see
-//      wheel.hpp -- is split into many more contiguous chunks than threads;
-//      threads pull chunks from a shared queue instead of owning one each
-//      (see run_parallel_chunks for why: work isn't uniform across chunks).
-//   3. Text output (-o *.txt) needs two passes, because
-//      pwrite() needs an exact byte OFFSET per thread up front:
-//        a. COUNT PASS: each thread sieves its chunk and counts how many
-//           bytes of text its primes will take (writes nothing to disk).
-//           Prefix sums over those totals give the exact offset where each
-//           thread must start writing in the final file.
-//        b. The final file is resized to its exact, already-known size.
-//        c. WRITE PASS: each thread re-sieves its chunk (same work) and
-//           this time writes with pwrite() directly into its (disjoint)
-//           region of the final file, in parallel with every other thread.
-//      This avoids the "write to temp files + merge" pattern, which
-//      doubles disk I/O (every output byte gets written twice). Here every
-//      byte of the final result is written exactly once; the extra cost is
-//      repeating the bit-marking phase (cheap, CPU/cache-bound) instead of
-//      repeating a disk-to-disk copy (expensive, I/O-bound).
-//   4. .db output (-o *.db) needs only ONE pass: blocks go through an
-//      async queue to a single writer thread (SqlitePrimeStore), not to a
-//      precomputed file offset, so there is nothing a second pass would
-//      need to have precomputed -- each chunk's real prime count (needed
-//      only for each block's start_index, itself just a metadata column
-//      used to find a block later, see nth_prime.cpp) falls out of this
-//      same pass for free. See gap_block_sink.hpp and
-//      SqlitePrimeStore::finish/fix_offsets for how start_index gets
-//      corrected from chunk-relative to global after the fact.
-//
-// No -o (the default) skips the write/emit pass (and the file) entirely: a
-// single pass (like .db's) already yields the total, so nothing else needs
-// to run.
+//   1. The base primes (<= sqrt(N)), as a bitmap on the wheel
+//      (base_sieve.hpp), split into tiers (tuning.hpp).
+//   2. The wheel-index range [0, wheel_count_upto(N)) is split into many
+//      more chunks than threads; each thread walks its own contiguous run
+//      of them, carrying its sieve from chunk to chunk, and steals the back
+//      of another run when its own is done (run_parallel_chunks: work isn't
+//      uniform across chunks, nor across cores).
+//   3. No -o (the default): one pass that only counts.
+//   4. Text output (-o *.txt) needs two passes, because pwrite() needs an
+//      exact byte offset per chunk up front: a COUNT PASS sizes each
+//      chunk's text, prefix sums give the offsets, the file is resized
+//      once, and a WRITE PASS re-sieves each chunk and pwrite()s it into
+//      its disjoint region, every thread in parallel. Every output byte is
+//      written once; the price is sieving twice, which is cheap next to a
+//      temp-file-and-merge copy.
+//   5. .db output (-o *.db) needs one pass: each thread appends its
+//      compressed blocks to the .blk sidecar at offsets handed out by an
+//      atomic counter (block_file.hpp), and only the small index rows go
+//      through a queue to SQLite's single writer. Each block's position is
+//      chunk-relative at first; SqlitePrimeStore::finish corrects it once
+//      every chunk's prime count is known.
 //
 // The wheel's own primes (WHEEL_PRIMES) are special-cased in thread 0 --
 // they don't take part in the wheel numbering, so they're just emitted
@@ -129,13 +116,10 @@ static std::vector<ChunkRange> split_ranges(uint64_t limit, unsigned chunks, uin
     // Starts at k=0 (the number 1, cleared by SegmentSieve itself) rather
     // than k=1, and every chunk boundary is a multiple of 64: the
     // byte-addressed dense tiers (erat_small.hpp) need each segment to
-    // start on a word boundary. `start` > 0 (--start, see main)
-    // sieves only the tail [start, limit], rounded down to that boundary.
-    // wheel_count_upto(start - 1) is the index of the first number >= start
-    // (the same index SieveConfig::skip_below_k holds); wheel_count_upto(start)
-    // is one past it when start is on the wheel, which left `start` itself
-    // out whenever its index was 63 mod 64 (239, 2399, 4799: one prime
-    // short of primesieve, found 2026-10-05).
+    // start on a word boundary. `start` > 0 (--start, see main) sieves only
+    // the tail [start, limit], rounded down to that boundary from
+    // wheel_count_upto(start - 1), the index of the first number >= start
+    // (the same index SieveConfig::skip_below_k holds).
     uint64_t k_start = start ? wheel_count_upto(start - 1) / 64 * 64 : 0;
     uint64_t k_end = wheel_count_upto(limit);
     if (k_end <= k_start) return ranges;
@@ -261,14 +245,10 @@ static void emit_worker(int idx, ChunkRange range, const TierSet& t, uint64_t ba
 }
 
 // .db pass: sieves the chunk once and feeds a GapBlockSink, which
-// gap-encodes/compresses in BLOCK_SIZE-prime blocks and pushes each one to
-// 'store' (thread-safe, see SqlitePrimeStore::push) as it completes -- no
-// disjoint-region bookkeeping needed here, unlike DirectWriter/pwrite, and
-// (unlike before) no separate counting pre-pass either: the sink writes a
-// chunk-relative start_index (SqlitePrimeStore::finish fixes it up to the
-// true global offset afterwards, from out_count -- see main()'s
-// is_db_output block), and SQLite doesn't care what order rows are
-// inserted in either way.
+// gap-encodes and compresses blocks of block_size primes, writes each one
+// to the .blk and pushes its index row to 'store' (thread-safe, see
+// SqlitePrimeStore::push). The row's start_index is chunk-relative;
+// run_db corrects it from out_count once every chunk is done.
 static void emit_db_worker(int idx, ChunkRange range, const TierSet& t, uint64_t base_prime_max,
                             const Presieve& presieve, const SieveConfig& cfg,
                             SqlitePrimeStore& store,
@@ -527,15 +507,9 @@ static int run_db(const RunPlan& plan) {
     const Options& opt = plan.opt;
     const Colors& C = plan.C;
     const unsigned num_chunks = static_cast<unsigned>(plan.ranges.size());
-    // Sieve + gap-encode + zstd, streamed to one dedicated writer thread
-    // draining into SQLite (SqlitePrimeStore). No counting pre-pass: each
-    // chunk's real prime count (prime_counts[i]) falls out of this same pass
-    // (emit_db_worker tracks it via sieve_chunk's local_count); text output
-    // still needs its own pre-pass because pwrite() wants exact byte offsets
-    // up front, but .db blocks carry their own (chunk-relative) start_index
-    // and go through an async queue -- see gap_block_sink.hpp and
-    // SqlitePrimeStore::finish/fix_offsets for how start_index gets its true
-    // global value afterwards, from these same counts.
+    // Sieve + gap-encode + zstd; blocks to the .blk, index rows to SQLite
+    // (SqlitePrimeStore). Each chunk's prime count falls out of the same
+    // pass and gives the blocks' global positions afterwards (finish).
     std::vector<uint64_t> prime_counts(num_chunks, 0);
     SqlitePrimeStore store(opt.output);
     {
@@ -731,18 +705,11 @@ int main(int argc, char** argv) {
 
     SievePlan P = plan_sieve(opt, base, base_limit);
 
-    // Split into many more, narrower chunks than threads (see
-    // run_parallel_chunks for why: work per chunk isn't uniform across the
-    // range) and hand them out from a shared queue instead of one static
-    // chunk per thread.
-    // Floored so each chunk spans at least MIN_SEGS_PER_CHUNK segments: at
-    // small N, threads*150 chunks would be narrower than one segment, and
-    // per-chunk setup (SegmentSieve, re-activating every base prime) would
-    // dominate. No effect at large N, where chunks span thousands of
-    // segments. See
-    // docs/RESEARCH.md#chunk-width-floor-at-least-4-segments-per-chunk-kept-2026-09-27
-    // (4 until 2026-10-02, when sieve_chunk started carrying the sieve
-    // across a worker's consecutive chunks).
+    // Many more, narrower chunks than threads, so the steals between
+    // threads' runs are fine-grained (run_parallel_chunks). Floored at
+    // MIN_SEGS_PER_CHUNK segments each: at small N, threads*150 chunks would
+    // be narrower than one segment. See
+    // docs/RESEARCH.md#run_parallel_chunks-contiguous-runs-the-sieve-carried-across-chunks-steals-kept-2026-10-01.
     constexpr unsigned CHUNKS_PER_THREAD = 150;
     constexpr uint64_t MIN_SEGS_PER_CHUNK = 1;
     uint64_t width_cap = wheel_count_upto(opt.limit) / (MIN_SEGS_PER_CHUNK * P.seg_k_width);
@@ -766,15 +733,11 @@ int main(int argc, char** argv) {
                      static_cast<unsigned long long>(range_start), static_cast<unsigned long long>(range_start),
                      static_cast<unsigned long long>(opt.limit));
         // Same chunk width as the full run where that still leaves every
-        // thread TAIL_CHUNKS_PER_THREAD chunks. Short tails get more, narrower
-        // chunks instead (never under MIN_SEGS_PER_CHUNK segments): the full
-        // run's width would leave ~1.5 chunks per thread in a 1% tail and
-        // cores idle in the last round (~20%), which skews wall-clock and, on
-        // HT cores, cycles:u too. Chunks are cheap now that a worker carries
-        // its sieve through its run (sieve_chunk): only the steal granularity
-        // depends on them, so 32/thread (8 measured 3.6% idle on a 1e15 1%
-        // tail, i5-13500, 20 threads, back when each chunk re-activated every
-        // base prime).
+        // thread TAIL_CHUNKS_PER_THREAD chunks; short tails get more,
+        // narrower chunks (never under MIN_SEGS_PER_CHUNK segments), or the
+        // full run's width would leave ~1.5 chunks per thread and cores idle
+        // in the last round. Chunks are cheap (a worker carries its sieve
+        // through its run): only the steal granularity depends on them.
         constexpr uint64_t TAIL_CHUNKS_PER_THREAD = 32;
         uint64_t span_k = wheel_count_upto(opt.limit) - wheel_count_upto(range_start - 1);
         double frac = static_cast<double>(span_k) / static_cast<double>(wheel_count_upto(opt.limit));

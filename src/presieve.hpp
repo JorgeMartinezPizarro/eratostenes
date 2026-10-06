@@ -1,43 +1,15 @@
 #pragma once
-// Pre-sieve: precomputed bit patterns for the smallest base primes, used to
-// fill a new segment's bit array via bitwise combination instead of running
-// their marking loop every segment.
+// Pre-sieve: the multiples of the primes 7..163 come from precomputed bit
+// patterns that fill each segment (in place of zeroing it), instead of being
+// crossed off: these primes hit every segment thousands of times, per-hit
+// work no scheduling removes.
 //
-// The bucket sieve (SegmentSieve) already skips a prime for any segment
-// where it has no multiple -- but the smallest base primes (7, 11, 13...)
-// have a multiple in *every* segment (their period is far smaller than the
-// segment width), so bucket routing never skips them: their marking loop
-// (read delta, advance, set bit) runs in full every single segment. That's
-// real per-bit work, not scheduling overhead, so bucket routing can't
-// remove it.
-//
-// What can: for a fixed small set of primes, the pattern of which
-// wheel-indices they mark composite is periodic (period = WHEEL_SIZE *
-// product(primes), since they're pairwise coprime -- proof: wheel_number(k)
-// mod p only depends on k mod (p*WHEEL_SIZE), because advancing k by
-// p*WHEEL_SIZE advances q = k/WHEEL_SIZE by exactly p, adding a multiple of
-// p*WHEEL_MOD, which vanishes mod p). Precompute that pattern once, and
-// filling a segment becomes a bulk copy from the precomputed buffer instead
-// of per-prime, per-hit marking.
-//
-// One table for *all* pre-sieve primes at once hits the same wall as the
-// wheel itself (wheel.hpp): the period is the *product* of every prime in
-// it, so it blows up fast -- {7,11,13,17,19,23} alone is already a ~7.1MB
-// table (near the edge of L3, shared read-only across every thread), and
-// adding just one more prime (29) would multiply that by 29. primesieve
-// hits the same wall and sidesteps it the same way this does: several
-// small, independent tables, each covering only a handful of primes (so
-// each one's own period -- and thus its own size -- stays tiny), combined
-// with a bitwise OR at fill time instead of being multiplied together into
-// one giant table. Grouping {7,11,13,17,19,23} into two tables instead of
-// one already shrinks their combined size from ~7.1MB to ~8.4KB; from
-// there, more (small) tables buy more prime coverage for cheap.
-//
-// (primesieve's own tables combine with AND instead of OR because their
-// convention is the opposite of this project's: a set bit there means
-// "still a candidate", so surviving *every* table's filter is the AND of
-// all of them. Here a set bit means "composite", so a number that's
-// composite according to *any* table's primes is composite overall -- OR.)
+// For a fixed set of primes, the pattern of wheel indices they mark is
+// periodic with period WHEEL_SIZE * product(primes) (wheel_number(k) mod p
+// depends only on k mod p*WHEEL_SIZE). One table for all 35 primes would be
+// astronomically long, so they are split into 16 small groups (primesieve's
+// grouping), one table each, OR-ed together at fill time (primesieve ANDs:
+// its set bit means "candidate", here it means "composite").
 
 #include <algorithm>
 #include <cstdint>
@@ -47,29 +19,12 @@
 
 #include "wheel.hpp"
 
-// Groups of pre-sieve primes: each group's own period is WHEEL_SIZE *
-// product(that group's primes), so keeping groups small keeps every
-// table's size small regardless of how many groups there are.
-//
-// This is primesieve's own grouping (src/PreSieveTables.hpp), reused as-is
-// rather than re-derived: the first 3 groups triple up the smallest primes
-// (7..37) with products balanced around ~6000; the rest pair a mid-size
-// prime with a large one specifically so each pair's product also lands
-// around 6000-10000 (e.g. 41*163=6683, 97*101=9797) instead of ballooning
-// as primes grow -- naively grouping consecutive primes instead (7,11,13 /
-// 17,19,23 / ...) hits multi-megabyte tables by the time it reaches
-// primes past ~130. All 16 tables combined: ~123KB of periods, plus one
-// PRESIEVE_CHUNK_BYTES tail each (~190KB).
-// Extending coverage past 163 was tried three ways (two group-count-
-// preserving pairings, and one "just use a huge table" attempt) and all
-// three measured a regression, not a win -- see docs/RESEARCH.md.
-// Presieve::fill() does one shift-and-OR pass per *group* over the whole
-// segment every single segment, a cost that's fixed per group regardless
-// of that group's table size or which primes are in it, so a real win
-// here would need fewer new groups than primes added, or restructuring
-// fill() so a group's cost scales with how often its primes actually hit
-// rather than a fixed full-segment pass -- out of scope for what's been
-// tried so far.
+// The groups, primesieve's own (src/PreSieveTables.hpp): three triples of
+// the smallest primes, then pairs of a mid-size prime with a large one, so
+// every product stays around 6000-10000 bytes of period. All 16 tables:
+// ~123 KB of periods plus one PRESIEVE_CHUNK_BYTES tail each (~190 KB).
+// fill() costs a pass per group, whatever its primes, so extending past 163
+// measured slower in every form tried (docs/RESEARCH.md#extending-pre-sieve-coverage-past-prime-163-tried-three-ways-all-reverted).
 inline const std::vector<std::vector<uint64_t>> PRESIEVE_GROUPS = {
     {7, 23, 37},
     {11, 19, 31},
@@ -103,53 +58,27 @@ struct PresieveTable {
 
 struct Presieve {
     std::vector<PresieveTable> tables;
-    // wheel_index(p) for each pre-sieve prime, across every group -- the
-    // one absolute position where the periodic pattern is wrong (see
-    // build_presieve): it reads as composite (p is, trivially, a multiple
-    // of itself) but is actually prime. Every OTHER position sharing that
-    // bit mod that table's period is a real composite (p times a
-    // genuinely larger cofactor) and must stay marked, so the buffer
-    // itself is left uncorrected; fill() patches only the exact absolute
-    // position, not the periodic bit.
+    // wheel_index(p) of each pre-sieve prime: the one absolute position
+    // where the periodic pattern is wrong (p marked as a multiple of
+    // itself). The tables keep the bit (every other position sharing it is
+    // a real composite); fill() clears just that position.
     std::vector<uint64_t> self_k;
-    // max(self_k), or 0 if empty -- self_k entries are wheel-indices of the
-    // pre-sieve primes themselves (all <= wheel_index(163), a few hundred
-    // at most), so past this point no segment can ever contain one: fill()
-    // uses this to skip the self_k correction loop entirely for every
-    // segment except the handful at the very start of the range, instead
-    // of running it (unable to match) on every single segment of the run.
+    // max(self_k): past it no segment can contain one, so fill() skips the
+    // correction everywhere but at the very start of the range.
     uint64_t max_self_k = 0;
 
-    // Fills the first `count` bits of dst (word-granular, dst must have
-    // room for ceil(count/64) words) with the pre-sieve pattern for the
-    // segment starting at wheel-index k_low: the bitwise OR of every
-    // table's own (independently offset) pattern. Replaces
-    // zero-initializing the segment's bit array: bucket-scheduled and flat
-    // primes above the pre-sieve depth then OR their own marks on top,
-    // same as before.
+    // Fills the first `count` bits of dst (room for ceil(count/64) words)
+    // with the pre-sieve pattern of the segment starting at wheel index
+    // k_low: the OR of every table at its own offset. The tiers OR their
+    // marks on top.
     //
-    // k_low is always a multiple of 64 (every chunk and segment start is,
-    // see main.cpp/split_ranges), and every table's period_k is always a
-    // multiple of WHEEL_SIZE=8 (build_presieve_table). So bit_start =
-    // k_low % period_k is always a multiple of 8 -- never just any bit,
-    // always a whole byte -- even though it's essentially never a multiple
-    // of 64 (a whole word). That means each table's window can be read
-    // with one unaligned 8-byte load per output word instead of two
-    // aligned word loads shifted and OR'd together to reassemble it
-    // (`memcpy` here isn't a function call -- with a compile-time-constant
-    // size 8, the compiler folds it into a single unaligned mov, which x86
-    // takes no penalty for outside crossing a cache line). Tables are also
-    // grouped 4 at a time, so `dst` is written once per group of 4 instead
-    // of once per table (16 tables -> 4 writes instead of 16); each
-    // group's 4 loads plus 3 ORs per output word is still simple enough
-    // for the compiler to auto-vectorize across words, same as before.
-    //
-    // dst is covered in PRESIEVE_CHUNK_BYTES chunks, each table's read
-    // offset advancing by one chunk and wrapping by its period in between,
-    // so a table is one period plus one chunk long (primesieve keeps its
-    // pre-sieve buffers period-sized the same way). Sizing them to a whole
-    // segment instead made the 16 tables ~8 MB at a 512KiB segment,
-    // streamed through L2 every segment.
+    // k_low is a multiple of 64 and every period a multiple of 8, so each
+    // table's window starts on a byte: one unaligned 8-byte load per output
+    // word. Tables combine 4 at a time (dst written 4 times, not 16; GCC
+    // vectorizes the loop), and dst is covered in PRESIEVE_CHUNK_BYTES
+    // chunks, each table's offset advancing a chunk and wrapping by its
+    // period in between, so a table is one period plus one chunk long. See
+    // docs/RESEARCH.md#period-sized-tables-fill-in-4-kib-chunks-with-wraparound-kept-2026-09-29.
     __attribute__((noinline)) void fill(uint64_t* dst, uint64_t k_low, uint64_t count) const {
         constexpr uint64_t CHUNK_WORDS = PRESIEVE_CHUNK_BYTES / 8;
         const uint64_t words_needed = (count + 63) / 64;
@@ -191,13 +120,7 @@ struct Presieve {
             }
         }
 
-        // self_k entries only ever actually fall inside a segment near the
-        // very start of the range (k_low==0's, in practice) -- every
-        // self_k value is <= max_self_k, so k_low > max_self_k already
-        // rules out every entry without checking any of them individually.
-        // Skips this loop entirely for the overwhelming majority of
-        // segments in any real run instead of paying ~|self_k| comparisons
-        // (none of which can ever match) on every single one.
+        // The pre-sieve primes themselves, only in the first segments.
         if (k_low <= max_self_k) {
             for (uint64_t sk : self_k) {
                 if (sk >= k_low && sk < k_low + count) {
@@ -234,16 +157,10 @@ inline PresieveTable build_presieve_table(const std::vector<uint64_t>& primes,
     uint64_t total_bits = period_k + PRESIEVE_CHUNK_BYTES * 8 + 128;
     tbl.words.assign((total_bits + 63) / 64, 0);
 
-    // Mark every wheel-representable multiple of p, starting at m=1 (value
-    // p itself), not p*p: SegmentSieve starts at p*p because on a full
-    // sieve, smaller multiples are already covered by *other* base primes
-    // below p -- a guarantee this buffer doesn't have, since a single
-    // group only ever marks its own handful of primes, nothing smaller.
-    // Marking from m=1 also marks p itself (m=1 -> value p) at
-    // k0=wheel_index(p) -- that single bit is wrong only at that one
-    // absolute position (see self_k in Presieve: every later position
-    // sharing the same bit mod period_k is a genuine composite and must
-    // stay marked, so it's *not* cleared here).
+    // Every multiple of p on the wheel from m = 1 on, not from p*p: a table
+    // only holds its own group's primes, so the smaller multiples are not
+    // covered by anything else. m = 1 marks p itself; fill() clears that
+    // one position (self_k).
     for (uint64_t p : primes) {
         auto delta = compute_wheel_deltas(p);
         uint64_t m = 1;

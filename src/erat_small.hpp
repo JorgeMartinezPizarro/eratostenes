@@ -1,6 +1,7 @@
 #pragma once
-// Unrolled, byte-addressed crossing-off for the dense tiers (primesieve's
-// EratSmall/EratMedium idea, re-derived for this project's layout).
+// Byte-addressed crossing-off kernels for the dense tiers (small, med64,
+// medium) -- primesieve's EratSmall/EratMedium ideas, re-derived for this
+// layout.
 //
 // With the mod-30 wheel, wheel index k = q*8 + j means byte q of the
 // segment's bit array holds the 8 candidates of [30q, 30q+30) and bit j is
@@ -15,8 +16,7 @@
 // bit mask M[pr][j] that is a compile-time constant once pr is fixed, and B
 // advances by exactly p bytes per cycle. Templating on pr turns the inner
 // loop into 8 `s[b + o_j] |= M_j` per cycle: no per-hit phase counter, no
-// per-prime delta[] table load, no variable shift -- about 2 instructions
-// per hit instead of the ~9-12 of the generic k += delta[j] loop.
+// table load, no variable shift -- about 2 instructions per hit.
 
 #include <algorithm>
 #include <cstdint>
@@ -33,12 +33,11 @@ using big::pos30;
 constexpr uint64_t C(int pr, int j) { return R[pr] * R[j] / 30; }
 constexpr uint8_t M(int pr, int j) { return static_cast<uint8_t>(1u << pos30(R[pr] * R[j] % 30)); }
 
-// Per-prime state, 8 bytes: qw = (qp << 6) | (pr << 3) | j, with qp = p / 30,
-// pr = WHEEL_POS[p % 30] and j the pending hit's multiplier phase; pos is
-// that hit's byte position relative to the current segment's start (the
-// medium tier keeps its state as two arrays instead, see cross_off_medium).
-// qp < 2^26 (p < ~2e9) is checked by
-// SegmentSieve's constructor.
+// Per-prime state of the small and med64 tiers, and the sparse tier's 8-byte
+// entry slot: qw = (qp << 6) | (pr << 3) | j (small) or (qp << 6) | w (med64),
+// with qp = p / 30, pr the residue class and j / w the pending hit's
+// multiplier phase; pos is that hit's byte position relative to the current
+// segment. qp < 2^26 (p < ~2e9) is checked by SegmentSieve's constructor.
 struct DenseState {
     uint32_t qw;
     uint32_t pos;
@@ -46,17 +45,12 @@ struct DenseState {
 
 constexpr uint64_t QP_LIMIT = uint64_t{1} << 26;
 
-// Crosses off p = 30*qp + R[PR] in s[0, end), starting at the pending hit
-// (i, j); on return (i, j) is the first hit at or past `end`.
-//
-// Every local here (qp, p, the o[j]s, b, end) provably fits a uint32_t, but
-// narrowing them from uint64_t was measured slower, not faster -- see
-// docs/RESEARCH.md.
-//
-// Small tier only (med64 uses cross_off_checked210). Out of line, one call
-// per prime from cross_off_class: the layout every small-tier measurement
-// was taken on, which GCC stops choosing on its own once med64 no longer
-// shares this function.
+// Small tier: crosses off p = 30*qp + R[PR] in s[0, end), starting at the
+// pending hit (i, j); on return (i, j) is the first hit at or past `end`.
+// A switch enters the cycle at phase j, the unchecked loop runs whole
+// cycles, a checked chain leaves at `end`. Out of line, one call per prime
+// from cross_off_class. The locals stay uint64_t: narrowing them to uint32_t
+// measured slower (docs/RESEARCH.md).
 template <int PR>
 __attribute__((noinline)) void cross_off(uint8_t* s, uint64_t end, uint64_t qp, uint64_t& i_io, uint32_t& j_io) {
     const uint64_t p = 30 * qp + R[PR];
@@ -119,26 +113,17 @@ done:
     j_io = j;
 }
 
-// med64 tier: same contract as cross_off, primesieve EratMedium's loop shape
-// -- one running byte index, one bounds check per hit, the switch jumping
-// into the middle of the cycle. For med64 (tens of hits per call) the
-// per-hit compare runs beside the store the loop is bound by, and the call
-// leaves at a single loop exit (~1 mispredict) instead of cross_off's
-// unrolled-loop exit plus data-dependent tail exit (~1.65).
-// On the mod-210 multiplier wheel (w = 0..47, M210[w]): skips the 1/7 of
-// mod-30 hits whose multiplier is a multiple of 7 (7 is always presieved,
-// and every med64 prime is > 163). Switch into a for (;;), one check per
-// hit -- so there's no per-call offset table
-// (what sank the earlier mod-210 med64 attempts): the byte step from phase w
-// to w+1 is qp*dm + corr with dm in {2,4,6,8,10}, so 5 multiples of qp in
-// registers plus compile-time constants (big::TABLE) cover all 48 cases.
-// No software prefetch of the segment byte here: a one-instruction
-// `prefetcht0 (s + K * qp, i)` per hit (K = 9, 13, 20 ~ 2-5 hits ahead) was
-// +9..+20% wall on the laptop in both the dense 1e11 plan and the 1e12
-// tail (2026-10-06), as the medium tier's exact 2-ahead prefetch was in
-// 2026-09-25: the core already overlaps these RMWs on its own, and any
-// instruction added to a ~5-instruction hit costs more than the latency it
-// hides. See docs/RESEARCH.md#med64-segment-byte-prefetch-k--qp-ahead-tried-reverted-2026-10-06.
+// med64 tier: same contract as cross_off, EratMedium's loop shape -- a
+// switch into a for (;;) with one running byte index and one bounds check
+// per hit, so a call leaves at a single loop exit (cross_off's unrolled
+// cycle plus tail exit mispredicts more with tens of hits per call). Steps
+// on the mod-210 multiplier wheel (w = 0..47, M210[w]): the 1/7 of mod-30
+// hits whose multiplier is a multiple of 7 is skipped, 7 being presieved.
+// The byte step from phase w to w+1 is qp*dm + corr with dm in
+// {2,4,6,8,10}: five multiples of qp in registers plus compile-time
+// constants from big::TABLE cover all 48 cases, with no per-call table.
+// No software prefetch: every form tried cost more than it hid. See
+// docs/RESEARCH.md#med64-mod-210-stepping-on-the-checked-loop-cross_off_checked210-kept-2026-09-30.
 template <int PR>
 __attribute__((always_inline)) inline void cross_off_checked210(uint8_t* s, uint64_t end, uint64_t qp, uint64_t& i_io, uint32_t& w_io) {
     const uint64_t q2 = qp * 2, q4 = qp * 4, q8 = qp * 8;
@@ -198,66 +183,31 @@ inline void cross_off_class(uint8_t* s, uint64_t end, DenseState* first, DenseSt
     }
 }
 
-// Medium tier: primes with only a handful of hits per segment, where the
-// unrolled loop above can't amortize its per-prime entry/exit cost -- see
-// docs/RESEARCH.md#small-tiers-unrolled-loop-applied-to-medium-hit-count-primes-measured-not-adopted.
-// Generic one-hit-per-iteration stepping instead, division-free via the
-// shared mod-210 tables (wheel210_big.hpp), on byte positions.
+// Medium tier: primes with a few hits per segment, too few to pay the
+// small tier's entry/exit per call, so one hit per iteration through a
+// table: s[pos] |= mask, then pos += qp * dm + corr from PACK210[PR][w]
+// (wheel210_big.hpp; mod-210 multipliers, multiples of 7 skipped). One list
+// per residue class keeps PR a template parameter (EratMedium's
+// crossOff_7/11/.../31). The table holds two 48-phase cycles, so w only
+// wraps at 96 -- once per call at most -- and is folded back after the loop.
 //
-// Every medium-tier prime is always > 163 (presieve's {7,23,37} group
-// always covers 7 first), so multiplier phases that are multiples of 7 are
-// redundant -- stepping through only the 48/210 phases coprime to 210
-// (PACK210, wheel210_big.hpp) instead of the 8/30
-// coprime to 30 skips ~14% of candidate hits here, same trick as the
-// sparse tier's own big-wheel table. See
-// docs/RESEARCH.md#cross_off_medium-mod-210-multiplier-stepping-2026-09-24
-// for the numbers, and
-// docs/RESEARCH.md#cross_off_medium-mod-2310-stepping-considered-not-implemented-2026-09-25-external-review-opus-55
-// for why a mod-2310 extension was considered and rejected.
+// State is a struct of arrays: dyn[i] = (pos << 6) | w, rewritten every
+// segment, and qp, read-only, as a 1-byte delta from the class's previous
+// prime (qds[i]; the list is sorted by p and never reordered; the largest
+// same-class gap below sqrt(1e15) is 52 * 30, checked at activation). Only
+// the dyn half is ever dirty, 5 bytes stream per prime per segment, and the
+// segment stays in L2. pos fits 26 bits (SegmentSieve's constructor).
 //
-// PR is a compile-time template parameter (matching primesieve's own
-// EratMedium split into crossOff_7/11/13/.../31, one per residue class):
-// one list per class (medium_[8] in segment_sieve.hpp, same shape as the
-// small tier's small_[8]). qw packs (qp << 6) | w (w needs 6 bits, 0..47,
-// same budget as the small tier's (pr<<3)|j). See
-// docs/RESEARCH.md#cross_off_medium-class-specialized-layout-kept-2026-09-24.
-// A chained-table variant, a mod-2310 extension, a 4-way interleaved
-// stepping variant, and a 64-list restructuring were all tried and
-// reverted -- see docs/RESEARCH.md's other `cross_off_medium` entries.
+// NTA: both streams prefetched MEDIUM_NTA_DIST entries ahead with
+// prefetchnta, once per prime, so they reach L1 without being kept in L2;
+// on only once the state outgrows the per-thread L3 share (tuning.hpp's
+// medium_nta_min_primes). See
+// docs/RESEARCH.md#cross_off_medium-struct-of-arrays-state--gated-prefetchnta-kept-2026-09-29.
 //
-// Byte positions and a per-(class, phase) mask, like the sparse tier, not
-// bit positions: marking a bit index costs a shift, a word index and a
-// variable shift per hit, a byte index just `s[pos] |= mask` (-12%
-// instructions:u and -3.4% cycles:u at 1e13 together with the doubled
-// tables below, see docs/RESEARCH.md).
-// The tables hold two 48-phase cycles, so w only needs wrapping when it
-// reaches 96 -- at most once per call, and never when med64 is on (a
-// medium prime then has under 48 hits per segment) -- instead of a
-// compare-and-select on every hit.
-//
-// Out of line (pinned, as measured): GCC inlines some classes into
-// sieve_chunk on its own when surrounding code changes.
-//
-// State is split in two parallel arrays (struct of arrays): `dyn[i]` =
-// (pos << 6) | w, rewritten every segment, and qp, read-only once
-// activated. Rewriting qp along with pos/w every segment made the whole
-// 8-byte state dirty -- ~1 MB per thread at 1e14, written back through L2
-// and L3 every segment, flushing the segment itself: ~75% of this tier's
-// L2 misses and ~80% of its L3 misses were on s[pos], not on the state.
-// pos fits 26 bits (checked by SegmentSieve's constructor).
-//
-// The read-only qp is stored as a 1-byte delta from the previous prime of
-// the same class (`qds[i]`; the list is sorted by p and never reordered,
-// the first entry's delta is 0 from `qp_base`): consecutive primes of one
-// class mod 30 are at most 52 * 30 apart below sqrt(1e15), so a byte holds
-// it (checked at activation). 5 bytes per prime per segment instead of 8.
-//
-// NTA: prefetchnta both streams MEDIUM_NTA_DIST entries ahead, once per
-// prime (not per hit), so they come into L1 without being allocated in L2
-// and the segment stays there. Only pays once the medium state no longer
-// fits the per-thread L3 share (dev PC: +0.8% at 1e12 with ~0.5 MB/thread,
-// -6.1% at 1e13 and -12.1% at 1e14 on top of SoA) -- chosen per TierSet in
-// tuning.hpp, see SieveConfig::medium_nta_min_primes.
+// The tier is bound by its loop exit per prime, not by its hits: every
+// variant that cut hits or interleaved primes was measured slower
+// (RESEARCH.md's `cross_off_medium` entries). Out of line (pinned): GCC
+// inlines some classes into sieve_chunk on its own otherwise.
 constexpr uint64_t MEDIUM_NTA_DIST = 32;
 constexpr uint64_t MEDIUM_POS_LIMIT = uint64_t{1} << 26;
 
@@ -285,11 +235,5 @@ __attribute__((noinline)) void cross_off_medium(uint8_t* s, uint64_t end, uint32
         *dyn = static_cast<uint32_t>(((pos - rebase) << 6) | w);
     }
 }
-
-// A 2-ahead software-prefetch variant of this loop, and an EratMedium-style
-// 64-list restructuring keyed by (class, entry phase), were both tried and
-// reverted -- real wins at some N that failed to hold up (or reversed
-// outright) at this project's actual E13-E14 target range. See
-// docs/RESEARCH.md for the full measurements.
 
 } // namespace erat

@@ -229,9 +229,12 @@ sparse, then extraction.
   `tuning.hpp` floors the segment to a power of 2 bytes. The ring holds twice
   the slots it needs and the cursor is reset by shifting the upper half down
   once it reaches the midpoint (`wrap_ring`), so the hot loop has no wrap mask.
-  The next block of a chain is prefetched once per block, since pooled
-  blocks are scattered in memory. [RESEARCH.md](RESEARCH.md#segment_sievehpp)
-  has the history of the earlier designs.
+  Pooled blocks are scattered in memory, so while a block is processed the
+  next block of its chain is prefetched a line at a time, spread over the
+  current block's groups of 4 entries; the segment byte each entry marks is
+  prefetched 16 entries ahead (`ERA_BIG_PF`), and entries go two per
+  iteration. [RESEARCH.md](RESEARCH.md#segment_sievehpp) has the history of
+  the earlier designs.
 
 Finally, **extraction**: invert each word (bit = 0 means prime) and either
 `popcount` it (count-only) or walk its set bits with `ctz` to emit values.
@@ -363,5 +366,5 @@ implementation -- not hardcoded constants -- across several N and several
 parameter combinations (threads, segment width, cache-size overrides, `.db` block
 size, zstd level), plus checks `.db` output against plain text output position by
 position. Raw sieve performance is checked separately against
-[primesieve](https://github.com/kimwalisch/primesieve) (see the main
-[README](../README.md#benchmarks)).
+[primesieve](https://github.com/kimwalisch/primesieve) (see
+[BENCHMARK.md](BENCHMARK.md)).
