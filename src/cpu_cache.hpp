@@ -149,9 +149,9 @@ inline CpuCacheTopology detect_cpu_cache_topology() {
 }
 
 // Wheel-index segment width (a multiple of 64) that fills half of
-// `l2_bytes` -- the same derivation as parse_args' automatic -s, returning
-// the width in wheel indices. tuning.hpp's hybrid step applies this /2 on
-// top of an already per-thread L2 share, on purpose (measured faster), see
+// `l2_bytes`: plan_sieve's base segment (tuning.hpp). Its hybrid step
+// applies this /2 on top of an already per-thread L2 share, on purpose
+// (measured faster), see
 // docs/RESEARCH.md#seg_k_width_from_l2_bytess-extra-2-margin-applied-on-top-of-an-already-per-thread-l2-share-kept-counterintuitive.
 // 0 falls back to 256 KiB.
 inline uint64_t seg_k_width_from_l2_bytes(uint64_t l2_bytes) {

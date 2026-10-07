@@ -34,7 +34,10 @@ entries per step is fixed), `--tune big2310=0` (the whole mod-210 sparse
 path, which also capped N below ~6.3e16) and `--tune minsegs` (1 since
 2026-10-02); code in git history up to e2874b0. After each step the default
 binary executes the same instructions in every hot kernel (callgrind,
-function by function).
+function by function). The sparse tier (ring, pool, `file_sparse`,
+`process_big`) then moved out of segment_sieve.hpp into sparse_tier.hpp
+(`SparseTier`, same method names), and the base segment rule out of
+`parse_args` into `plan_sieve`; the entries below keep the old file names.
 
 Unless noted otherwise, measurements are from the project's dev PC (i5-11400F, 6C/
 12T, no E-cores) using `perf stat cycles:u` (not wall-clock -- see the project's own

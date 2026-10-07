@@ -97,24 +97,30 @@ struct SievePlan {
     }
 };
 
-inline SievePlan plan_sieve(Options& opt, const BasePrimes& base, uint64_t base_limit) {
+inline SievePlan plan_sieve(const Options& opt, const BasePrimes& base, uint64_t base_limit) {
     SievePlan P;
     SieveConfig& cfg = P.cfg;
     cfg.debug_idle = opt.debug_idle;
     cfg.skip_below_k = opt.start ? std::max<uint64_t>(wheel_count_upto(opt.start - 1), 1) : 1;
 
-    // --segment-width is a numeric width (so the option keeps meaning the
-    // same thing to the user); it's converted to a width in wheel indices
-    // (WHEEL_SIZE useful numbers out of every WHEEL_MOD), rounded down to
-    // whole 64-bit words: the byte-addressed dense tiers (erat_small.hpp)
-    // need every segment to start on a word boundary.
-    uint64_t seg_k_width = std::max<uint64_t>(64, (opt.segment_width * WHEEL_SIZE / WHEEL_MOD) / 64 * 64);
+    // The base segment: half of cpu0's L2 (--l2-bytes stands in for it;
+    // 256 KiB when undetected), not capped at isqrt(N), see
+    // docs/RESEARCH.md#auto-segment-width-dropping-the-isqrtlimit-cap-kept.
+    // An explicit -s is a numeric width (so the option keeps meaning the
+    // same thing to the user), converted to wheel indices (WHEEL_SIZE out of
+    // every WHEEL_MOD numbers). Either way the width is whole 64-bit words:
+    // the byte-addressed dense tiers (erat_small.hpp) need every segment to
+    // start on a word boundary. The steps below adjust the automatic width
+    // only, except the power-of-2 fixup.
+    const uint64_t l2_core = opt.l2_bytes_override ? opt.l2_bytes_override : detect_l2_cache_bytes();
+    uint64_t seg_k_width = opt.segment_width_set
+                         ? std::max<uint64_t>(64, (opt.segment_width * WHEEL_SIZE / WHEEL_MOD) / 64 * 64)
+                         : seg_k_width_from_l2_bytes(l2_core);
 
     // A core with an L2 of 256 KiB or less (i5-3470, Ivy Bridge): the
     // proxy for an old core that the small-cutoff and med64 rules below key
     // on. --l2-bytes counts as the L2 here.
     constexpr uint64_t SMALL_L2_BYTES = 256 * uint64_t{1024};
-    const uint64_t l2_core = opt.l2_bytes_override ? opt.l2_bytes_override : detect_l2_cache_bytes();
     const bool small_l2_core = l2_core && l2_core <= SMALL_L2_BYTES;
 
     // Small/med64 cutoff, as a fraction of the sub-block: 1/4, tuned jointly
@@ -152,10 +158,7 @@ inline SievePlan plan_sieve(Options& opt, const BasePrimes& base, uint64_t base_
     if (!opt.segment_width_set && !opt.l2_bytes_override && !topo.l2_share.empty() && topo.l2_share[0]) {
         uint64_t min_l2_share = topo.l2_share[0];
         for (uint64_t s : topo.l2_share) if (s && s < min_l2_share) min_l2_share = s;
-        if (min_l2_share < topo.l2_share[0]) {
-            seg_k_width = seg_k_width_from_l2_bytes(min_l2_share);
-            opt.segment_width = seg_k_width * WHEEL_MOD / WHEEL_SIZE; // keep the startup log's "segment=" accurate
-        }
+        if (min_l2_share < topo.l2_share[0]) seg_k_width = seg_k_width_from_l2_bytes(min_l2_share);
     }
     if (!topo.l1_raw.empty() && topo.l1_raw[0]) {
         uint64_t max_l1_raw = topo.l1_raw[0];
@@ -202,7 +205,6 @@ inline SievePlan plan_sieve(Options& opt, const BasePrimes& base, uint64_t base_
         if (seg_k_width > cap_k) {
             seg_l1_capped_k = seg_k_width;
             seg_k_width = cap_k;
-            opt.segment_width = seg_k_width * WHEEL_MOD / WHEEL_SIZE; // keep the startup log's "segment=" accurate
         }
     }
 
@@ -227,7 +229,6 @@ inline SievePlan plan_sieve(Options& opt, const BasePrimes& base, uint64_t base_
     constexpr uint64_t HALF_L2_MAX_BASE_PRIMES = 40000;
     if (!opt.segment_width_set && sparse_regime) {
         seg_k_width *= 2;
-        opt.segment_width = seg_k_width * WHEEL_MOD / WHEEL_SIZE; // keep the startup log's "segment=" accurate
     } else if (!opt.segment_width_set && one_per_core) {
         // No sparse tier and a core to itself: the base segment is the
         // thread's whole L2 share, not half of it (the half is an HT
@@ -241,15 +242,10 @@ inline SievePlan plan_sieve(Options& opt, const BasePrimes& base, uint64_t base_
         if (l2_thread) {
             const uint64_t whole_k = std::min(l2_thread, 32 * l1_max) * 8 / 64 * 64;
             if (base.count <= HALF_L2_MAX_BASE_PRIMES) {
-                const uint64_t half_k = std::max<uint64_t>(64, whole_k / 2 / 64 * 64);
-                if (half_k != seg_k_width) {
-                    seg_k_width = half_k;
-                    opt.segment_width = seg_k_width * WHEEL_MOD / WHEEL_SIZE;
-                }
+                seg_k_width = std::max<uint64_t>(64, whole_k / 2 / 64 * 64);
                 half_l2_few_primes = true;
             } else if (whole_k > seg_k_width) {
                 seg_k_width = whole_k;
-                opt.segment_width = seg_k_width * WHEEL_MOD / WHEEL_SIZE;
                 whole_l2_base = true;
             }
         }
@@ -270,7 +266,6 @@ inline SievePlan plan_sieve(Options& opt, const BasePrimes& base, uint64_t base_
         if (seg_k_width > cap_k) {
             seg_uncapped_k = seg_k_width;
             seg_k_width = cap_k;
-            opt.segment_width = seg_k_width * WHEEL_MOD / WHEEL_SIZE; // keep the startup log's "segment=" accurate
         }
     }
 
@@ -326,7 +321,6 @@ inline SievePlan plan_sieve(Options& opt, const BasePrimes& base, uint64_t base_
         if (p2 != sb) {
             if (opt.segment_width_set) seg_unrounded_k = seg_k_width;
             seg_k_width = std::max<uint64_t>(64, p2 * 8);
-            opt.segment_width = seg_k_width * WHEEL_MOD / WHEEL_SIZE; // keep the startup log's "segment=" accurate
         }
     }
 
@@ -462,7 +456,7 @@ inline void print_plan(const SievePlan& P, const Options& opt, unsigned actual_t
                  "%zu small base primes (sub-block %llu KiB), %zu med64, %zu medium, %zu sparse...\n",
                  actual_threads,
                  static_cast<unsigned long long>(opt.limit),
-                 static_cast<unsigned long long>(opt.segment_width),
+                 static_cast<unsigned long long>(P.seg_k_width * WHEEL_MOD / WHEEL_SIZE),
                  static_cast<unsigned long long>(WHEEL_MOD),
                  WHEEL_PRIMES.size(),
                  P.wide.small.size(), static_cast<unsigned long long>(cfg.sub_block_bytes / 1024),

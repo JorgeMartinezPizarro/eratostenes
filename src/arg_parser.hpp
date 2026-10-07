@@ -1,8 +1,8 @@
 #pragma once
 // Command-line argument parsing: sizes with suffixes (k/m/b/t), thread
 // count, output path (empty means count-only -- there's no default file,
-// see Options::output below), segment width, --tune knobs. The cache
-// detection the auto sizes come from lives in cpu_cache.hpp.
+// see Options::output below), segment width, --tune knobs. The automatic
+// sizes are decided later, in tuning.hpp (plan_sieve).
 
 #include <algorithm>
 #include <cctype>
@@ -14,10 +14,6 @@
 
 #include <zstd.h>
 
-#include "cpu_cache.hpp"
-#include "wheel.hpp"
-
-
 struct Options {
     uint64_t limit = 0;                 // N: sieve up to N (inclusive)
     unsigned threads = 0;                // 0 => auto (hardware_concurrency)
@@ -25,10 +21,9 @@ struct Options {
     // get pi(N). Set via -o/--output; ".db" switches to the compact SQLite
     // format, anything else is plain text.
     std::string output;
-    // Numeric width per segment (must be even). 0 means "auto": half the
-    // detected L2 (see parse_args), adjusted in tuning.hpp (smallest per-CPU
-    // L2 share on hybrids, doubled once the sparse tier exists, power of 2
-    // in bytes for the sparse ring). An explicit -s is used as given.
+    // -s: numeric width per segment, used as given (tuning.hpp only rounds
+    // it to whole words, and to a power of 2 in bytes for the sparse ring).
+    // Without -s, plan_sieve sizes the segment from the caches.
     uint64_t segment_width = 0;
     bool segment_width_set = false;      // true once -s/--segment-width is parsed
     bool show_help = false;
@@ -334,20 +329,5 @@ inline Options parse_args(int argc, char** argv) {
     if (opt.threads == 0) {
         opt.threads = std::max(1u, std::thread::hardware_concurrency());
     }
-    if (!opt.segment_width_set) {
-        // The base segment: half the detected L2 of cpu0 (256 KiB when
-        // undetected), the first of tuning.hpp's sizing steps. Not capped at
-        // isqrt(N), see
-        // docs/RESEARCH.md#auto-segment-width-dropping-the-isqrtlimit-cap-kept.
-        uint64_t l2_bytes = opt.l2_bytes_override ? opt.l2_bytes_override : detect_l2_cache_bytes();
-        if (l2_bytes == 0) l2_bytes = 256 * 1024;
-        uint64_t l2_target_bytes = l2_bytes / 2;
-        // Inverse of array_bytes = segment_width * WHEEL_SIZE / WHEEL_MOD / 8.
-        opt.segment_width = l2_target_bytes * 8 * WHEEL_MOD / WHEEL_SIZE;
-    }
-
-    if (opt.segment_width < 64) opt.segment_width = 64;
-    if (opt.segment_width % 2 != 0) opt.segment_width += 1; // must be even
-
     return opt;
 }

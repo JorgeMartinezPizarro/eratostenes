@@ -148,7 +148,7 @@ the top of 1e18 activates all 50M base primes at once, ~1 s per thread, most of
 it the kernel faulting in the bucket pool the entries go to (§6, sparse); that
 fixed cost is what the contiguous runs in §4 avoid paying per chunk.
 
-## 6. Four-tier marking within a segment (`segment_sieve.hpp`, `erat_small.hpp`)
+## 6. Four-tier marking within a segment (`segment_sieve.hpp`, `erat_small.hpp`, `sparse_tier.hpp`)
 
 Once a base prime is active, how expensive it is to mark depends entirely on how
 often it hits within one segment -- a prime much smaller than the segment hits it
