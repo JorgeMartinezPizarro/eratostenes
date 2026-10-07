@@ -44,7 +44,7 @@ Intel Core i5-1235U (Alder Lake, 2022), 8 GB. 12 threads (2 per core); L1d 288 K
 
 ## Intel Core i5-11400F
 
-13th Gen Intel(R) Core(TM) i5-13500, 20 threads (2 per core); L1d 544 KiB (14 instances); L2 11.5 MiB (8 instances); L3 24 MiB (1 instance)
+Intel Core i5-11400F (Rocket Lake, 2021), 32 GB. 12 threads (2 per core); L1d 288 KiB (6 instances); L2 3 MiB (6 instances); L3 12 MiB.
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
@@ -85,7 +85,7 @@ Intel Core i5-3470 (Ivy Bridge, 2012), 8 GB. 4 threads (1 per core); L1d 128 KiB
 
 ## Intel Core i7-620M
 
-Intel Core i7-620M (Arrandale, 2010), 8 GB.
+Intel Core i7-620M (Arrandale, 2010), 8 GB. 4 threads (2 per core); L1d 64 KiB (2 instances); L2 512 KiB (2 instances); L3 4 MiB.
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
