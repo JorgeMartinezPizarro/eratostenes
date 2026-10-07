@@ -23,7 +23,6 @@ sudo apt-get install primecount-bin primesieve  # Debian/Ubuntu/WSL
 ```sh
 make                  # release build: -O3 -march=native -flto, plus nth_prime
 make portable         # no -march=native, for a binary you'll copy to another machine
-make pgo              # profile-guided release build (training runs included)
 make debug            # ASan/UBSan, for debugging
 make test             # checks output against primecount across N and across
                       # several parameter combinations, plus .db vs text output
