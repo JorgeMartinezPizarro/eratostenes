@@ -55,8 +55,8 @@ GIT_DESC := $(shell git describe --always --dirty 2>/dev/null || echo "?")
 COMPOSE_ENV := -e ERATOSTENES_COMMIT=$(GIT_DESC)
 
 .PHONY: all portable debug pgo clean fclean re docker run docker-pgo run-pgo nth-prime variant \
-        test benchmark benchmark-io benchmark-tails benchmark-mini benchmark-ab benchmark-flags docker-dev docker-test docker-benchmark \
-        docker-benchmark-io docker-benchmark-tails docker-benchmark-mini docker-benchmark-ab docker-benchmark-flags
+        test benchmark benchmark-io benchmark-tails benchmark-mini benchmark-ab docker-dev docker-test docker-benchmark \
+        docker-benchmark-io docker-benchmark-tails docker-benchmark-mini docker-benchmark-ab
 
 # --- release (default) ---
 all: $(BIN) $(NTH_BIN)
@@ -254,17 +254,14 @@ benchmark-tails: $(BIN)
 benchmark-mini: $(BIN)
 	bash scripts/benchmark_mini.sh
 
-# A/B intercalado de dos configuraciones de eratostenes sobre una cola (ver
-# scripts/benchmark_ab.sh): B="-s 15728640 --tune sparse=1/2" make benchmark-ab.
-# A (por defecto el automatico), B, N/WIDTH/THREADS/REPS como variables de entorno.
+# A/B intercalado de dos ejecuciones de eratostenes sobre la cola de uno o
+# varios N (ver scripts/benchmark_ab.sh): cada lado es un binario y unas
+# opciones; perf stat cycles:u/instructions:u donde hay perf, si no tiempo.
+#   B="--tune sparse=1/2" make benchmark-ab
+#   BIN_A=/tmp/era_A/eratostenes NS="1e15 1e17" make benchmark-ab
+# BIN_A/BIN_B/A/B/NS/WIDTH/THREADS/REPS/EVENTS/PERF como variables de entorno.
 benchmark-ab: $(BIN)
 	bash scripts/benchmark_ab.sh
-
-# Todos los flags de compilacion ERA_* (ver scripts/benchmark_flags.sh): compila
-# cada variante con make variant y la enfrenta al binario normal con benchmark-ab.
-# FLAGS/N/WIDTH/THREADS/REPS como variables de entorno.
-benchmark-flags: $(BIN)
-	bash scripts/benchmark_flags.sh
 
 # --- run the same targets inside Docker (see docker/Dockerfile's `dev`
 # stage: gcc + libsqlite3-dev + libzstd-dev + primesieve). Each rebuilds
@@ -293,7 +290,4 @@ docker-benchmark-mini: docker-dev
 	$(COMPOSE) run --rm -e THREADS -e N -e WIDTH -e SEGMENTS $(COMPOSE_ENV) dev make benchmark-mini
 
 docker-benchmark-ab: docker-dev
-	$(COMPOSE) run --rm -e THREADS -e N -e WIDTH -e REPS -e A -e B -e BIN_B $(COMPOSE_ENV) dev make benchmark-ab
-
-docker-benchmark-flags: docker-dev
-	$(COMPOSE) run --rm -e THREADS -e N -e WIDTH -e REPS -e FLAGS $(COMPOSE_ENV) dev make benchmark-flags
+	$(COMPOSE) run --rm -e THREADS -e N -e NS -e WIDTH -e REPS -e A -e B -e BIN_A -e BIN_B -e EVENTS -e PERF $(COMPOSE_ENV) dev make benchmark-ab

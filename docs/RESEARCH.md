@@ -38,6 +38,10 @@ function by function). The sparse tier (ring, pool, `file_sparse`,
 `process_big`) then moved out of segment_sieve.hpp into sparse_tier.hpp
 (`SparseTier`, same method names), and the base segment rule out of
 `parse_args` into `plan_sieve`; the entries below keep the old file names.
+Scripts: `perf_ab.sh` merged into `benchmark_ab.sh` (each side a binary plus
+options, several N, perf where available: `BIN_A=... NS="..." make
+benchmark-ab` is the old `perf_ab.sh` run) and `benchmark_flags.sh` removed
+(`make variant` + `BIN_B=./eratostenes_variant make benchmark-ab` per flag).
 
 Unless noted otherwise, measurements are from the project's dev PC (i5-11400F, 6C/
 12T, no E-cores) using `perf stat cycles:u` (not wall-clock -- see the project's own

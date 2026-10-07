@@ -1,95 +1,132 @@
 #!/bin/bash
-# Interleaved A/B of two eratostenes configurations on one window (the last
-# WIDTH numbers below N): A B A B ... REPS times, the sieve's own `total:`
-# time of each run, then the means and B's delta against A. For checking a
-# single knob on a machine where the only instrument is wall time; the
-# interleaving cancels a slow drift of the host, the per-run list shows a
-# fast one. A defaults to the automatic configuration; B is any set of CLI
-# options (see eratostenes --help: -s, --tune key=value, --l1-bytes, ...).
-# Environment variables can go in front of a configuration, e.g.
-# B="ERATOSTENES_MED64_NTA=0 -s 15728640".
+# Interleaved A/B of two eratostenes runs on the tail of one or more N (the
+# last WIDTH numbers below each): A B A B ... REPS times per N, then B against
+# A. A and B are each a binary plus CLI options (see eratostenes --help: -s,
+# --tune key=value, --l1-bytes, ...), so this compares two builds, two
+# configurations, or both. Where perf works it measures perf stat's cycles:u
+# and instructions:u (what docs/RESEARCH.md trusts over wall time on a busy
+# machine) next to the sieve's own `total:` wall time; elsewhere wall time
+# only. The interleaving cancels a slow drift of the host, the per-run rows
+# show a fast one.
 #
-# Usage: B="-s 15728640 --tune sparse=1/2" make benchmark-ab
-#        A="--tune sparse=1/1" B="--tune sparse=1/2" REPS=3 make benchmark-ab
-#        make variant DEFS=-DERA_BIG_PF=8; BIN_B=./eratostenes_variant make benchmark-ab
-# Env: A (default: auto), B (required unless BIN_B differs), BIN_B (the binary
-#      B runs on; default the same as A. `make variant DEFS=...` builds
-#      ./eratostenes_variant with extra compile flags), N (default 1e13), WIDTH
-#      (default 1e10), THREADS (default nproc), REPS (default 2)
-set -euo pipefail
+# Two configurations of the current build:
+#   B="--tune sparse=1/2" make benchmark-ab
+#   A="--tune sparse=1/1" B="--tune sparse=1/2" REPS=5 make benchmark-ab
+# An ERA_* flag build (sparse_tier.hpp) against the default one:
+#   make variant DEFS=-DERA_BIG_PF=8; BIN_B=./eratostenes_variant make benchmark-ab
+# Another commit, built in a worktree so src/ stays untouched:
+#   git worktree add -f /tmp/era_A <commit> && make -C /tmp/era_A -B eratostenes
+#   BIN_A=/tmp/era_A/eratostenes NS="1e15 1e17" make benchmark-ab
+#   git worktree remove --force /tmp/era_A    # when done
+#
+# Env: BIN_A and BIN_B (default ./eratostenes both), A and B (each
+#      side's options, default none: the automatic configuration), NS (one or
+#      more N, default 1e13; N works too), WIDTH (default 1e10), THREADS
+#      (default nproc), REPS (default 3), EVENTS (default
+#      cycles:u,instructions:u, at most two), PERF=0 (wall time even where
+#      perf works)
+set -uo pipefail
 cd "$(dirname "$0")/.."
 
-BIN=./eratostenes
-BIN_B="${BIN_B:-$BIN}"
-THREADS="${THREADS:-$(nproc)}"
-REPS="${REPS:-2}"
-N_IN="${N:-1e13}"
-WIDTH_IN="${WIDTH:-1e10}"
+BIN_A="${BIN_A:-./eratostenes}"
+BIN_B="${BIN_B:-./eratostenes}"
 A_CFG="${A:-}"
 B_CFG="${B:-}"
+NS="${NS:-${N:-1e13}}"
+WIDTH_IN="${WIDTH:-1e10}"
+THREADS="${THREADS:-$(nproc)}"
+REPS="${REPS:-3}"
+EVENTS="${EVENTS:-cycles:u,instructions:u}"
 
-if [ -z "$B_CFG" ] && [ "$BIN_B" = "$BIN" ]; then
-    echo "Falta B: la configuracion a comparar, p.ej. B=\"-s 15728640 --tune sparse=1/2\" make benchmark-ab (o BIN_B=otro binario)" >&2
+if [ "$BIN_A" = "$BIN_B" ] && [ "$A_CFG" = "$B_CFG" ]; then
+    echo "A y B son la misma ejecucion: da B (opciones, p.ej. B=\"--tune sparse=1/2\") o BIN_A/BIN_B (otro binario)" >&2
     exit 1
 fi
-if [ ! -x "$BIN" ]; then
-    echo "No existe $BIN -- compila antes (make)." >&2
-    exit 1
-fi
-if [ ! -x "$BIN_B" ]; then
-    make -s "$BIN_B" || { echo "No existe $BIN_B y make no sabe construirlo." >&2; exit 1; }
-fi
+for b in "$BIN_A" "$BIN_B"; do
+    if [ ! -x "$b" ]; then
+        make -s "$b" || { echo "No existe $b y make no sabe construirlo (compila antes: make)." >&2; exit 1; }
+    fi
+done
 
-source scripts/lib.sh # to_dec, num_lt
-N=$(to_dec "$N_IN")
+source scripts/lib.sh # to_dec
 WIDTH=$(to_dec "$WIDTH_IN")
-if (( N <= WIDTH )); then echo "WIDTH=$WIDTH_IN no cabe por debajo de N=$N_IN" >&2; exit 1; fi
-START=$(( (N - WIDTH) / 240 * 240 ))
 
-# split "VAR=x VAR2=y -s 123 --tune k=v" into leading env assignments and args
-split_cfg() { # CFG -> sets envs, args (arrays)
-    envs=(); args=()
-    local w
-    for w in $1; do
-        if [ ${#args[@]} -eq 0 ] && [[ "$w" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then envs+=("$w"); else args+=("$w"); fi
-    done
-}
-run_cfg() { # BIN CFG -> t (total seconds), c (count)
-    local bin=$1; shift
-    split_cfg "$1"
-    local out
-    out=$(env "${envs[@]}" "$bin" "$N" --start "$START" -t "$THREADS" "${args[@]}" 2>&1) || { echo "$out" >&2; exit 1; }
-    t=$(echo "$out" | sed -nE 's/.*total: *([0-9.]+)s.*/\1/p')
-    c=$(echo "$out" | sed -nE 's/.*Done\. ([0-9,]+) primes.*/\1/p' | tr -d ',')
-    startup=$(echo "$out" | grep -E '^Starting|^  (segment|sub-block|sparse cutoff|sparse ring|med64:|medium-tier prefetchnta)' \
+# perf usable with these events on this machine: every event counted.
+HAVE_PERF=0
+if [ "${PERF:-1}" != 0 ] && command -v perf >/dev/null 2>&1 &&
+   perf stat -x, -e "$EVENTS" true 2>&1 | awk -F, 'NF > 2 { n++; if ($1 !~ /^[0-9][0-9.]*$/) bad = 1 } END { exit !(n > 0 && !bad) }'; then
+    HAVE_PERF=1
+fi
+E1=${EVENTS%%,*}
+E2=""; [ "$E1" != "$EVENTS" ] && E2=${EVENTS#*,}
+
+bash scripts/machine_info.sh "$THREADS" "last ${WIDTH_IN} below each N, A/B x$REPS, $( [ $HAVE_PERF = 1 ] && echo "perf stat $EVENTS + wall" || echo "wall time only" )"
+echo "A: $BIN_A ($(md5sum < "$BIN_A" | cut -c1-8)) ${A_CFG:-auto}"
+echo "B: $BIN_B ($(md5sum < "$BIN_B" | cut -c1-8)) ${B_CFG:-auto}"
+[ $HAVE_PERF = 1 ] && echo "perf_event_paranoid: $(cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null || echo ?)"
+
+# run_one BIN OPTIONS N START: sets m1 m2 (the events, "-" without perf),
+# wall, cnt and startup (the configuration lines of the startup log).
+run_one() {
+    local bin=$1 cfg=$2 n=$3 start=$4 out vals
+    if [ $HAVE_PERF = 1 ]; then
+        out=$(perf stat -x, -e "$EVENTS" "$bin" "$n" --start "$start" -t "$THREADS" $cfg 2>&1) || { echo "$out" >&2; return 1; }
+        vals=$(echo "$out" | awk -F, 'NF > 2 && $1 ~ /^[0-9][0-9.]*$/ { printf "%s ", $1 }')
+        read -r m1 m2 _ <<< "$vals"
+    else
+        out=$("$bin" "$n" --start "$start" -t "$THREADS" $cfg 2>&1) || { echo "$out" >&2; return 1; }
+        m1=-; m2=-
+    fi
+    m2=${m2:--}
+    wall=$(echo "$out" | sed -nE 's/.*total: *([0-9.]+)s.*/\1/p')
+    cnt=$(echo "$out" | sed -nE 's/.*Done\. ([0-9,]+) primes.*/\1/p' | tr -d ',')
+    [ -n "$cnt" ] || { echo "$out" >&2; return 1; }
+    startup=$(echo "$out" | grep -E '^Starting|^  (segment|sub-block|sparse cutoff|sparse ring|small cutoff|med64 cutoff|medium-tier prefetchnta)' \
         | sed -E 's/^Starting [0-9]+ threads, limit=[0-9]+, (segment=[0-9]+), wheel mod [0-9]+ \([0-9]+ primes\), ([0-9]+ small[^,]*\(sub-block [^)]*\))?.*/\1 \2/' \
         | sed 's/^ *//' | paste -sd ';' - | sed 's/;/; /g')
 }
 
-bash scripts/machine_info.sh "$THREADS" "last ${WIDTH_IN} below ${N_IN}, A/B x$REPS"
-echo "A: ${A_CFG:-auto} ($BIN)"
-echo "B: ${B_CFG:-auto} ($BIN_B)"
+# compare LABEL "A values" "B values": B's median and mean against A's, how
+# many sorted pairs B wins, A's spread, and whether the runs overlap at all.
+compare() {
+    awk -v label="$1" -v A="$2" -v B="$3" '
+        function sort(arr, n,   i, t, j) { for (i = 2; i <= n; i++) { t = arr[i]; j = i - 1; while (j >= 1 && arr[j] > t) { arr[j+1] = arr[j]; j-- } arr[j+1] = t } }
+        function median(arr, n) { return n % 2 ? arr[(n+1)/2] : (arr[n/2] + arr[n/2+1]) / 2 }
+        BEGIN {
+            na = split(A, a, " "); nb = split(B, b, " ")
+            for (i = 1; i <= na; i++) sa += a[i]; for (i = 1; i <= nb; i++) sb += b[i]
+            sort(a, na); sort(b, nb)
+            ma = median(a, na); mb = median(b, nb)
+            wins = 0; for (i = 1; i <= na && i <= nb; i++) if (b[i] < a[i]) wins++
+            verdict = b[nb] < a[1] ? "every B run below every A run" : b[1] > a[na] ? "every B run above every A run" : "runs overlap"
+            printf "  %-13s B vs A %+.2f%% median, %+.2f%% mean (B lower in %d/%d sorted pairs; A spread %.1f%%; %s)\n",
+                   label ":", (mb - ma) / ma * 100, (sb / nb - sa / na) / (sa / na) * 100, wins, na, (a[na] - a[1]) / a[1] * 100, verdict
+        }'
+}
 
-ta=(); tb=(); ca=""; cb=""
-for ((r = 1; r <= REPS; r++)); do
-    run_cfg "$BIN" "$A_CFG"; ta+=("$t"); ca=$c
-    [ $r -eq 1 ] && echo "  A config: $startup"
-    echo "  A rep $r: ${t}s"
-    run_cfg "$BIN_B" "$B_CFG"; tb+=("$t"); cb=$c
-    [ $r -eq 1 ] && echo "  B config: $startup"
-    echo "  B rep $r: ${t}s"
+for N_IN in $NS; do
+    N=$(to_dec "$N_IN")
+    if (( N <= WIDTH )); then echo "WIDTH=$WIDTH_IN no cabe por debajo de N=$N_IN" >&2; continue; fi
+    START=$(( (N - WIDTH) / 240 * 240 ))
+    echo
+    if [ $HAVE_PERF = 1 ]; then printf "%-6s %-3s %-3s %16s %16s %8s  %s\n" N bin rep "$E1" "${E2:--}" wall count
+    else printf "%-6s %-3s %-3s %8s  %s\n" N bin rep wall count; fi
+    a1=(); a2=(); aw=(); b1=(); b2=(); bw=(); ca=""; cb=""
+    for ((r = 1; r <= REPS; r++)); do
+        for side in A B; do
+            if [ $side = A ]; then run_one "$BIN_A" "$A_CFG" "$N" "$START" || exit 1
+            else run_one "$BIN_B" "$B_CFG" "$N" "$START" || exit 1; fi
+            [ $r -eq 1 ] && echo "  $side config: $startup"
+            if [ $HAVE_PERF = 1 ]; then printf "%-6s %-3s %-3s %16s %16s %8s  %s\n" "$N_IN" "$side" "$r" "$m1" "$m2" "$wall" "$cnt"
+            else printf "%-6s %-3s %-3s %8s  %s\n" "$N_IN" "$side" "$r" "$wall" "$cnt"; fi
+            if [ $side = A ]; then a1+=("$m1"); a2+=("$m2"); aw+=("$wall"); ca=$cnt
+            else b1+=("$m1"); b2+=("$m2"); bw+=("$wall"); cb=$cnt; fi
+        done
+    done
+    if [ "$ca" != "$cb" ]; then echo "  COUNT MISMATCH at $N_IN: A $ca vs B $cb" >&2; exit 1; fi
+    if [ $HAVE_PERF = 1 ]; then
+        compare "$E1" "${a1[*]}" "${b1[*]}"
+        [ -n "$E2" ] && compare "$E2" "${a2[*]}" "${b2[*]}"
+    fi
+    compare "wall" "${aw[*]}" "${bw[*]}"
 done
-if [ "$ca" != "$cb" ]; then echo "  COUNT MISMATCH: A $ca vs B $cb" >&2; exit 1; fi
-
-mean() { printf '%s\n' "$@" | awk '{s += $1} END {printf "%.3f", s / NR}'; }
-ma=$(mean "${ta[@]}"); mb=$(mean "${tb[@]}")
-echo
-echo "A ${A_CFG:-auto}: ${ta[*]} -> mean ${ma}s"
-echo "B ${B_CFG:-auto}: ${tb[*]} -> mean ${mb}s"
-awk -v a="$ma" -v b="$mb" 'BEGIN { printf "B vs A: %+.1f%%\n", (b - a) / a * 100 }'
-# every B run below every A run (or above): the sign is solid even at REPS=2
-awk -v A="${ta[*]}" -v B="${tb[*]}" 'BEGIN {
-    na = split(A, a, " "); nb = split(B, b, " "); below = 1; above = 1
-    for (i = 1; i <= nb; i++) for (j = 1; j <= na; j++) { if (b[i] >= a[j]) below = 0; if (b[i] <= a[j]) above = 0 }
-    if (below) print "every B run below every A run"; else if (above) print "every B run above every A run"; else print "runs overlap: the sign is not settled"
-}'

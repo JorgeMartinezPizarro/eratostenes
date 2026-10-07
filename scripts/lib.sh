@@ -1,5 +1,5 @@
 #!/bin/bash
-# Shared helpers for the benchmark scripts (benchmark_tails.sh,
+# Shared helpers for the benchmark scripts (benchmark.sh, benchmark_tails.sh,
 # benchmark_mini.sh, benchmark_ab.sh): `source scripts/lib.sh` after the
 # cd to the repo root. Nothing here runs anything.
 
