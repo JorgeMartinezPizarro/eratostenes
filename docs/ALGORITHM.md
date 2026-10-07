@@ -59,7 +59,7 @@ presieve covers 11 as well, so multipliers divisible by 11 are redundant too
 (`mask | dm << 8 | corr << 16 | next << 20`, 15 KiB).
 The small tier stays on mod-30 multipliers: its unrolled loop depends on the
 8-hits-per-p-bytes cycle, and the mod-210 version tried lost (see
-[RESEARCH.md](RESEARCH.md#erat_smallhpp)).
+[RESEARCH.md](RESEARCH.md#small-tier-mod-210-stepping-as-7-unrolled-mod-30-copies-tried-reverted-2026-09-27)).
 
 ## 3. Presieve (`presieve.hpp`)
 
@@ -190,7 +190,7 @@ sparse, then extraction.
   the *whole* medium tier was tried twice and reverted both times -- the medium
   population keeps growing with N and the footprint of 64 lists eventually costs
   more than it saves; a band next to `small_limit` saturates early and doesn't.
-  See [RESEARCH.md](RESEARCH.md#segment_sievehpp).
+  See [RESEARCH.md](RESEARCH.md#medium-tier-64-list-restructuring-scoped-to-a-bounded-sub-band-med64_primes-kept-2026-09-26).
 - **Medium** (`med64_limit <= p < seg_k_width`, a few hits per segment): a plain
   one-hit-per-iteration loop (`cross_off_medium<PR>`) on byte positions, stepping
   with the mod-210 table (§2), one table load per hit. The table holds two
@@ -205,7 +205,7 @@ sparse, then extraction.
   L3 share, it is also read with `prefetchnta` (once per prime), keeping it out
   of L2 so the segment stays there. The unrolled loop, a 4-way interleave,
   per-hit prefetching and the 64-list layout were all measured slower here --
-  see [RESEARCH.md](RESEARCH.md#erat_smallhpp).
+  see [RESEARCH.md](RESEARCH.md#medium-tier).
 - **Sparse** (`p >= seg_k_width`, at most ~1 hit per segment; once the tier
   exists anyway the cutoff drops to `seg_k_width / 2` from 512 KiB of L2 per
   thread and to `seg_k_width / 4` from 1 MiB, or from 4 MiB of L3 per
@@ -233,7 +233,7 @@ sparse, then extraction.
   next block of its chain is prefetched a line at a time, spread over the
   current block's groups of 4 entries; the segment byte each entry marks is
   prefetched 16 entries ahead (`ERA_BIG_PF`), and entries go two per
-  iteration. [RESEARCH.md](RESEARCH.md#segment_sievehpp) has the history of
+  iteration. [RESEARCH.md](RESEARCH.md#sparse-tier) has the history of
   the earlier designs.
 
 Finally, **extraction**: invert each word (bit = 0 means prime) and either

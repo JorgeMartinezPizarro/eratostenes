@@ -6,8 +6,9 @@
 // wheel_index() convert. The layout is fixed: the dense tiers' masks and
 // offsets (erat_small.hpp) and the multiplier tables (wheel210_big.hpp) are
 // derived for it. Bigger wheels (mod 210, 2310) were measured before the
-// tiered design and lost; see docs/RESEARCH.md, wheel.hpp section. The
-// multiples of 7 and 11 are skipped by the multiplier wheels instead.
+// tiered design and lost; see
+// docs/RESEARCH.md#wheel-size-mod-6-vs-mod-30-vs-mod-210-historical-pre-tiered-marking-architecture.
+// The multiples of 7 and 11 are skipped by the multiplier wheels instead.
 
 #include <cstdint>
 #include <array>

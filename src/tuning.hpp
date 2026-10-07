@@ -384,7 +384,7 @@ inline SievePlan plan_sieve(const Options& opt, const BasePrimes& base, uint64_t
     // non-sparse configuration: the narrow segment, the 1/1 cutoff,
     // med64_limit on the narrow width (its sparse list never activates).
     // narrow is half the fixed-up wide width, a power of 2 in bytes. See
-    // docs/RESEARCH.md#narrow-segment-for-the-chunks-below-narrow-kept-2026-09-28.
+    // docs/RESEARCH.md#narrow-segment-for-the-chunks-below-narrow-squared-kept-2026-09-28.
     TierSet narrow{seg_k_width / 2, {}, {}, {}, {}};
     uint64_t narrow_k_end = 0; // chunks with high <= this use `narrow`
     bool narrow_early = !opt.segment_width_set && sparse_regime && narrow.width >= 64 && narrow.width % 64 == 0;
