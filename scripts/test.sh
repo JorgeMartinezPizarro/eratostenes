@@ -403,6 +403,10 @@ fi
 # primos base, el corte automatico de esta maquina) contra primecount, y los
 # errores que nth_prime debe detectar ---
 check_start 1000000000000000 999999900000000 -t 2
+# Ventana estrecha: casi ningun primo base tiene multiplo en ella, y los que
+# no lo tienen ya no se archivan en el anillo (set_range_end).
+check_start 1000000000000000 999999999990000 -t 3
+check_start 1000000000000000 999999999990000 -t 1
 
 DB7="$WORKDIR/n1e5.db"
 "$BIN" 100000 -o "$DB7" >/dev/null 2>&1

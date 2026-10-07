@@ -48,6 +48,9 @@ struct SieveConfig {
     // First wheel index the count includes: 1 (the number 1 is not prime),
     // or with --start the index of the first number >= start.
     uint64_t skip_below_k = 1;
+    // N: sparse primes whose first multiple lies past it aren't filed
+    // (SegmentSieve::set_range_end).
+    uint64_t range_end = UINT64_MAX;
 };
 
 struct ChunkRange {
@@ -102,6 +105,7 @@ inline SievePlan plan_sieve(const Options& opt, const BasePrimes& base, uint64_t
     SieveConfig& cfg = P.cfg;
     cfg.debug_idle = opt.debug_idle;
     cfg.skip_below_k = opt.start ? std::max<uint64_t>(wheel_count_upto(opt.start - 1), 1) : 1;
+    cfg.range_end = opt.limit;
 
     // The base segment: half of cpu0's L2 (--l2-bytes stands in for it;
     // 256 KiB when undetected), not capped at isqrt(N), see

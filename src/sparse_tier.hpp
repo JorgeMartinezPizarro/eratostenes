@@ -283,6 +283,16 @@ public:
         }
     }
 
+    // The last number of the whole run (N). A prime whose first multiple at
+    // activation is past it never hits any segment this tier will see --
+    // not this chunk's, nor the contiguous chunks a worker carries the ring
+    // into -- so file_sparse doesn't file it (primesieve's EratBig drops
+    // those the same way). For a narrow window most base primes are such:
+    // the last 1e4 below 1e18 is hit by ~8K of the 50.8M primes up to 1e9,
+    // and filing every one cost a random tail-line write into the ring for
+    // nothing. Default: no bound.
+    void set_range_end(uint64_t n) { range_end_n_ = n; }
+
     // Moves the cursor to the next segment's slot, after every segment.
     void next_segment() {
         if (++cur_segment_ == num_buckets_) wrap_ring();
@@ -314,6 +324,7 @@ private:
         uint64_t w = big::NEXT_W2310[sres];
         if (w == big::W2310) { ++t; w = 0; }
         m = t * 2310 + big::M2310[w];
+        if (p * m > range_end_n_) return; // never hits the range: not filed, see set_range_end
         uint64_t pos = p * m / WHEEL_MOD - k_low / 8;
         uint64_t ahead = pos >> log2_sb_;
         if (ahead >= num_buckets_) {
@@ -404,4 +415,5 @@ private:
     uint64_t num_buckets_ = 1;
     uint64_t cur_segment_ = 0; // this segment's ring slot, in [0, num_buckets_) -- see wrap_ring
     uint64_t next_k_ = 0;      // wheel index of the next prime to activate
+    uint64_t range_end_n_ = UINT64_MAX; // last number of the run (set_range_end)
 };

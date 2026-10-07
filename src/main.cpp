@@ -186,6 +186,7 @@ static void sieve_chunk(ChunkRange range, const TierSet& t, uint64_t base_prime_
                                                      !t.sparse.empty(),
                                                      t.medium.size() >= cfg.medium_nta_min_primes, cfg.huge_arenas);
         slot->sieve->set_skip_below_k(cfg.skip_below_k);
+        slot->sieve->set_range_end(cfg.range_end);
         slot->tiers = &t;
         slot->next_k = UINT64_MAX;
     }
@@ -704,7 +705,9 @@ int main(int argc, char** argv) {
     uint64_t base_limit = isqrt(opt.limit);
     std::fprintf(stderr, "Computing base primes up to %llu...\n",
                  static_cast<unsigned long long>(base_limit));
-    const BasePrimes base = sieve_base_primes(base_limit, opt.threads);
+    // Built first: the base-prime sieve fills its windows with it too.
+    const Presieve presieve = build_presieve(PRESIEVE_GROUPS);
+    const BasePrimes base = sieve_base_primes(base_limit, presieve, opt.threads);
     std::fprintf(stderr, "  %llu base primes found.\n", static_cast<unsigned long long>(base.count));
 
     SievePlan P = plan_sieve(opt, base, base_limit);
@@ -775,8 +778,6 @@ int main(int argc, char** argv) {
     P.finish_threads(actual_threads);
 
     uint64_t total_span = ranges.back().high - ranges.front().low;
-
-    Presieve presieve = build_presieve(PRESIEVE_GROUPS);
 
     print_plan(P, opt, actual_threads, ranges);
 

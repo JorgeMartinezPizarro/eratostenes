@@ -85,7 +85,10 @@ What is in the code today, by the day it went in:
   [half the whole-L2 width with few base primes](#half-the-whole-l2-width-with-few-base-primes-on-every-one-per-core-machine-kept-2026-10-06).
 - **2026-10-07**: the cleanup above; the [JCC-erratum flag](#cascade-lake-branches-kept-off-32-byte-boundaries-jcc-erratum--wa-mbranches-within-32b-boundaries-measured-not-adopted-2026-10-07)
   measured on Cascade Lake and not adopted (no CPU-model rules);
-  [ranges with -o and nth_prime queries](#db-format-4-ranges-and-nth_prime-as-a-query-tool-kept-2026-10-07) (.db format 4).
+  [ranges with -o and nth_prime queries](#db-format-4-ranges-and-nth_prime-as-a-query-tool-kept-2026-10-07) (.db format 4);
+  narrow windows: [no filing past N](#activation-sparse-primes-with-no-multiple-up-to-n-arent-filed-kept-2026-10-07)
+  and the [base primes on the wheel bitmap](#base-primes-sieved-into-the-wheel-bitmap-with-the-main-sieves-kernels-kept-2026-10-07);
+  [tails to the 64-bit ceiling checked against primecount](#tails-up-to-the-64-bit-ceiling-at-6-threads-checked-against-primecount-2026-10-07).
 
 ## Contents
 
@@ -848,6 +851,34 @@ every fresh worker start and every steal at the top of N. What remains per prime
   the slow divider, still gains (-3.12% / -4.05% at 1e17 / 1e18, 3/3), and Emerald Rapids -2.78% /
   -1.17% at 1e18 (3/3): the gate stays, and a slow divider alone does not explain Ivy Bridge.
 
+### Activation: sparse primes with no multiple up to N aren't filed (kept, 2026-10-07)
+
+A narrow window high up cost ~1.28 s on one thread for the last 1e4 below 1e18 (247 primes) against
+0.22 s for primesieve: ~0.8 s for the base primes up to 1e9 (next entry) and ~0.47 s filing all 50.8M
+of them into the ring, though only ~8K have a multiple in the window. `file_sparse` already computes
+the first multiple p*m in the range; past N (`SparseTier::set_range_end`: N of the whole run, not the
+chunk's end, since a worker carries its ring into the contiguous chunks after it) the prime can never
+hit a segment and isn't filed -- primesieve's EratBig drops them the same way. Measured on the
+pre-cleanup code (dev PC, two runs each, counts equal): 1e4 window below 1e18 1.27 -> 1.00 s on one
+thread, ~0.6 -> 0.34 s on 12; 1e8 window 0.73-0.94 -> 0.47-0.58 s on 12; wide windows cycles:u ABBA
+at 12 threads: last 1e11 below 1e18 -2.3% (instructions -5.2%: the chunks near N and the stolen pieces
+stop filing primes whose next multiple is past it), last 1e10 +0.7% (overlapping).
+
+### Base primes sieved into the wheel bitmap with the main sieve's kernels (kept, 2026-10-07)
+
+`sieve_base_primes` was a byte-per-odd-number sieve (no wheel) emitting every prime through a
+`wheel_index` division and an atomic OR into the BasePrimes bitmap: ~0.8 s on one thread up to 1e9,
+~4 s up to 2^32. It now sieves the bitmap itself in 32 KiB windows of wheel indices: the pre-sieve
+fill (multiples of 7..163, the primes left alone by `self_k`), then `erat::cross_off_class<PR>` for
+167..isqrt(limit) from each square up, each word stored inverted; parts of whole words in parallel, no
+atomics; the pre-sieve is built before the base primes. Base-prime counts equal primesieve's for isqrt
+of 7, 49, 50, 121, 168, 169, 961, 27889, 28224 (the pre-sieve's edge), 1e6, 1e11, 1e12, 1e15, 1e18 and
+the 64-bit ceiling (203,280,220). Both entries together on top of the cleanup (0f87f98), last 1e4
+below N, dev PC, two runs each: 1e18 1.23-1.39 -> 0.29 s on one thread (primesieve 0.219 s),
+0.59-0.62 -> 0.215 s on 12 (0.219 s); the ceiling 5.76-5.99 -> 1.51-1.55 s on one (0.963 s), where
+the rest is the activation's walk over 203M base primes. Last 1e11 below 1e18, cycles:u ABBA at 12
+threads: -0.4% (overlapping). `make test` 115/115.
+
 ## Segment and sub-block sizing
 
 `plan_sieve` (src/tuning.hpp) derives every width from sysfs. The base segment is half of
@@ -1040,6 +1071,26 @@ i5-13500, and a shared counter made every chunk pay a full activation. Now:
 Dev PC, ABBA: 1e18 tail idle 12.6% -> 2.0-4.1%, wall -4.4%; 1e15 tail -6.5%; full 1e11
 -3.8% (no re-activating ~27k primes in ~1800 chunks), 1e12 tie. Also the largest N became
 2^64 - 2^32 * 16 (`p * m` reaches start + 14p in activation).
+
+### Tails up to the 64-bit ceiling at 6 threads, checked against primecount (2026-10-07)
+
+Last 1e11 below N, dev PC `-t 6` (WSL capped at 11 GB), 2 interleaved pairs, peak RSS from
+`VmHWM`, on the doubled-ring build of the same day before the cleanup:
+
+| N | eratostenes | primesieve | ratio | peak RSS era / ps | primes |
+|---|---:|---:|---:|---:|---:|
+| 1e18 | 10.46 s | 12.28 s | 0.85x | 2.36 / 2.36 GiB | 2,412,705,071 |
+| 2e18 | 11.21 s | 13.46 s | 0.83x | 3.27 / 3.23 GiB | 2,373,074,469 |
+| 4e18 | 12.29 s | 14.99 s | 0.82x | 4.53 / 4.51 GiB | 2,334,614,943 |
+| 8e18 | 13.46 s | 16.88 s | 0.80x | 6.30 / 6.21 GiB | 2,297,425,776 |
+| 1e19 | 13.87 s | 17.60 s | 0.79x | 7.01 / 6.85 GiB | 2,285,738,870 |
+| 1.6e19 | 15.19 s | 19.53 s | 0.78x | 8.75 / 8.29 GiB | 2,261,486,119 |
+| 18446744004990074879 | 16.29 s | 20.32 s | 0.80x | 9.37 / 8.76 GiB | 2,254,186,542 |
+
+Every count equals primesieve's and pi(N) - pi(N - 1e11) from primecount 7.16 (its own 128-bit
+analytic method, no sieve): all seven, the ceiling window included. Memory is ~threads x 8 B x
+pi(sqrt N) in both programs (every thread files every sparse prime into its own ring): pi(2^32) =
+203,280,221, ~1.6 GB per thread at the ceiling, ~32 GB with 20 threads.
 
 ### `-t 2` gap vs primesieve at the 1e15 tail: profile and sparse cutoff by thread count (measured, not adopted, 2026-10-01)
 

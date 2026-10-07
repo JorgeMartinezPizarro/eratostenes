@@ -1,15 +1,17 @@
 #pragma once
-// The base primes up to sqrt(N), with a small segmented sieve of their own,
-// kept as a bitmap on the wheel (BasePrimes).
+// The base primes up to sqrt(N), kept as a bitmap on the wheel (BasePrimes),
+// sieved straight into that bitmap with the main sieve's own pieces: the
+// pre-sieve pattern and the small tier's byte-marking kernels.
 
 #include <algorithm>
-#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <thread>
 #include <vector>
 
+#include "erat_small.hpp"
+#include "presieve.hpp"
 #include "wheel.hpp"
 
 // Exact integer square root (avoids double-rounding errors from sqrt() for
@@ -21,50 +23,6 @@ inline uint64_t isqrt(uint64_t n) {
     while (s > 0 && s > n / s) --s;
     while (s + 1 <= n / (s + 1)) ++s;
     return s;
-}
-
-constexpr uint64_t BASE_SIEVE_WINDOW = 32 * 1024;
-
-// The odd numbers with index [lo, hi) (index i = number 2i+3; lo a multiple
-// of BASE_SIEVE_WINDOW) sieved one window at a time, one byte per number, by
-// the odd primes sp (all of them up to sqrt of the largest), each carrying its
-// next multiple from window to window; emit(p) gets every prime found, in
-// increasing order.
-template <typename Emit>
-inline void sieve_odd_range(uint64_t lo, uint64_t hi, const std::vector<uint64_t>& sp, Emit&& emit) {
-    std::vector<uint64_t> next(sp.size()); // index of each prime's next odd multiple to cross off
-    for (size_t j = 0; j < sp.size(); ++j) {
-        const uint64_t p = sp[j];
-        uint64_t k = (p * p - 3) / 2;
-        if (k < lo) k += (lo - k + p - 1) / p * p;
-        next[j] = k;
-    }
-    std::vector<uint8_t> comp(BASE_SIEVE_WINDOW);
-    for (; lo < hi; lo += BASE_SIEVE_WINDOW) {
-        const uint64_t len = std::min(BASE_SIEVE_WINDOW, hi - lo);
-        std::fill_n(comp.data(), len, uint8_t{0});
-        for (size_t j = 0; j < sp.size(); ++j) {
-            uint64_t k = next[j];
-            if (k >= lo + len) continue; // p*p (or its next multiple) lies past this window
-            const uint64_t p = sp[j];
-            for (k -= lo; k < len; k += p) comp[k] = 1;
-            next[j] = lo + k;
-        }
-        // Zero bytes are primes, eight at a time: ~w keeps bit 0 of each zero
-        // byte, walked with ctz.
-        uint64_t k = 0;
-        for (; k + 8 <= len; k += 8) {
-            uint64_t w;
-            std::memcpy(&w, comp.data() + k, 8);
-            uint64_t z = ~w & 0x0101010101010101ULL;
-            while (z) {
-                emit(2 * (lo + k + static_cast<uint64_t>(__builtin_ctzll(z)) / 8) + 3);
-                z &= z - 1;
-            }
-        }
-        for (; k < len; ++k)
-            if (!comp[k]) emit(2 * (lo + k) + 3);
-    }
 }
 
 // The sparse tier's primes (tuning.hpp's classify): the run [k_begin, k_end) of
@@ -143,45 +101,89 @@ struct BasePrimes {
     }
 };
 
-// The base primes up to limit: sieve_odd_range over 3..limit, split into up
-// to `threads` contiguous parts sieved in parallel (one part for small
-// limits: fewer than 16 windows per part), each setting its primes' bits
-// (an atomic OR: neighbouring parts can share a word). limit is isqrt(N): 1e9
-// at N = 1e18, where the one-shot vector<bool> sieve of 2026-09 took 7.8 s on
-// one thread before any worker started (docs/RESEARCH.md).
-inline BasePrimes sieve_base_primes(uint64_t limit, unsigned threads = 1) {
+// Wheel indices per window of sieve_base_primes: 32 KiB of bitmap (~1M
+// numbers), an L1d-sized slice like the small tier's sub-block.
+constexpr uint64_t BASE_SIEVE_WINDOW_K = 32 * 1024 * 8;
+
+// The base primes up to limit, sieved into the wheel bitmap itself, one
+// 32 KiB window at a time: the pre-sieve fill marks the multiples of 7..163
+// (and leaves those primes themselves alone, see Presieve::self_k), then the
+// small tier's kernel (erat_small.hpp::cross_off_class) crosses off every
+// prime from 167 to isqrt(limit) (at most 65,536 for any 64-bit N) from its
+// square up, and each word goes into the bitmap inverted (set bit = prime).
+// The windows are split into up to `threads` contiguous parts of whole words,
+// sieved in parallel. Until 2026-10-07 this was a byte-per-odd-number sieve
+// emitting every prime with a wheel_index division and an atomic OR into the
+// bitmap: 0.8 s on one thread up to 1e9, most of what a narrow window high up
+// cost (docs/RESEARCH.md).
+inline BasePrimes sieve_base_primes(uint64_t limit, const Presieve& presieve, unsigned threads = 1) {
     BasePrimes b;
     b.limit = limit;
     b.k_end = wheel_count_upto(limit);
     b.bits.assign((b.k_end + 63) / 64, 0);
     for (uint64_t p : WHEEL_PRIMES) b.count += p <= limit;
 
-    if (limit >= 3) {
-        // Odd sieving primes up to sqrt(limit) (at most 65535 for any 64-bit
-        // N); small_comp[i] is the odd number 2i+1.
+    if (limit >= FIRST_WHEEL_PRIME) {
+        // The crossing-off primes: past the pre-sieve's largest, up to
+        // isqrt(limit), from a plain odd sieve of [3, isqrt(limit)].
+        const uint64_t presieve_max = presieve.self_k.empty() ? 0 : wheel_number(presieve.max_self_k);
         const uint64_t root = isqrt(limit);
-        std::vector<uint8_t> small_comp(root / 2 + 1, 0);
         std::vector<uint64_t> sp;
-        for (uint64_t p = 3; p <= root; p += 2) {
-            if (small_comp[p / 2]) continue;
-            sp.push_back(p);
-            for (uint64_t m = p * p; m <= root; m += 2 * p) small_comp[m / 2] = 1;
+        {
+            std::vector<uint8_t> comp(root / 2 + 1, 0); // comp[i]: the odd number 2i+1
+            for (uint64_t p = 3; p <= root; p += 2) {
+                if (comp[p / 2]) continue;
+                if (p > presieve_max && p >= FIRST_WHEEL_PRIME) sp.push_back(p);
+                for (uint64_t m = p * p; m <= root; m += 2 * p) comp[m / 2] = 1;
+            }
         }
 
-        const uint64_t odd = (limit - 1) / 2; // odd numbers 3..limit
-        const uint64_t windows = (odd + BASE_SIEVE_WINDOW - 1) / BASE_SIEVE_WINDOW;
-        const uint64_t parts = std::clamp<uint64_t>(windows / 16, 1, std::max(1u, threads));
+        const uint64_t total_k = b.bits.size() * 64;
+        const uint64_t windows = (total_k + BASE_SIEVE_WINDOW_K - 1) / BASE_SIEVE_WINDOW_K;
+        const uint64_t parts = std::clamp<uint64_t>(windows / 4, 1, std::max(1u, threads));
         std::vector<uint64_t> found(parts, 0);
         auto run = [&](uint64_t t) {
-            const uint64_t lo = windows * t / parts * BASE_SIEVE_WINDOW;
-            const uint64_t hi = std::min(odd, windows * (t + 1) / parts * BASE_SIEVE_WINDOW);
+            const uint64_t k_lo = windows * t / parts * BASE_SIEVE_WINDOW_K;
+            const uint64_t k_hi = std::min(total_k, windows * (t + 1) / parts * BASE_SIEVE_WINDOW_K);
+            // Each crossing-off prime's first hit at or past the part's start,
+            // SegmentSieve::activate_dense's derivation, by residue class.
+            std::vector<erat::DenseState> st[8];
+            const uint64_t low_n = wheel_number(k_lo);
+            for (uint64_t p : sp) {
+                const uint64_t start_val = std::max(p * p, low_n);
+                const uint64_t pr = static_cast<uint64_t>(WHEEL_POS[p % WHEEL_MOD]);
+                uint64_t m = (start_val + p - 1) / p;
+                uint64_t r = m % WHEEL_MOD;
+                const uint64_t step = STEP_TO_COPRIME[r];
+                m += step;
+                r += step;
+                if (r >= WHEEL_MOD) r -= WHEEL_MOD;
+                const uint64_t pos = (p * m) / WHEEL_MOD - k_lo / 8;
+                st[pr].push_back({static_cast<uint32_t>(((p / WHEEL_MOD) << 6) | (pr << 3) | WHEEL_POS[r]),
+                                  static_cast<uint32_t>(pos)});
+            }
+            std::vector<uint64_t> win(BASE_SIEVE_WINDOW_K / 64);
+            uint8_t* const s = reinterpret_cast<uint8_t*>(win.data());
             uint64_t n = 0;
-            sieve_odd_range(lo, hi, sp, [&](uint64_t p) {
-                if (p < FIRST_WHEEL_PRIME) return; // the wheel's own, counted above
-                const uint64_t k = wheel_index(p);
-                std::atomic_ref<uint64_t>(b.bits[k >> 6]).fetch_or(uint64_t{1} << (k & 63), std::memory_order_relaxed);
-                ++n;
-            });
+            for (uint64_t k = k_lo; k < k_hi; k += BASE_SIEVE_WINDOW_K) {
+                const uint64_t count = std::min(BASE_SIEVE_WINDOW_K, k_hi - k); // a multiple of 64
+                const uint64_t bytes = count / 8;
+                presieve.fill(win.data(), k, count);
+                erat::cross_off_class<0>(s, bytes, st[0].data(), st[0].data() + st[0].size(), bytes);
+                erat::cross_off_class<1>(s, bytes, st[1].data(), st[1].data() + st[1].size(), bytes);
+                erat::cross_off_class<2>(s, bytes, st[2].data(), st[2].data() + st[2].size(), bytes);
+                erat::cross_off_class<3>(s, bytes, st[3].data(), st[3].data() + st[3].size(), bytes);
+                erat::cross_off_class<4>(s, bytes, st[4].data(), st[4].data() + st[4].size(), bytes);
+                erat::cross_off_class<5>(s, bytes, st[5].data(), st[5].data() + st[5].size(), bytes);
+                erat::cross_off_class<6>(s, bytes, st[6].data(), st[6].data() + st[6].size(), bytes);
+                erat::cross_off_class<7>(s, bytes, st[7].data(), st[7].data() + st[7].size(), bytes);
+                if (k == 0) win[0] |= 1; // the number 1
+                uint64_t* const out = b.bits.data() + k / 64;
+                for (uint64_t w = 0; w < count / 64; ++w) out[w] = ~win[w];
+                if (k + count == total_k && (b.k_end & 63)) // past limit in the last word
+                    out[count / 64 - 1] &= (uint64_t{1} << (b.k_end & 63)) - 1;
+                for (uint64_t w = 0; w < count / 64; ++w) n += static_cast<uint64_t>(__builtin_popcountll(out[w]));
+            }
             found[t] = n;
         };
         if (parts == 1) {
