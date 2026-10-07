@@ -298,14 +298,21 @@ int main(int argc, char** argv) {
         print_nth_usage(argv[0]);
         return 0;
     }
-    if (argc < 3) {
+    if (argc == 1) {
         print_nth_usage(argv[0]);
+        return 1;
+    }
+    if (argc < 3) {
+        std::fprintf(stderr, "Error: missing N or a query after %s\nRun '%s --help' for usage.\n", argv[1], argv[0]);
         return 1;
     }
     const std::string mode = argv[2];
     const int extra = argc - 3;
+    // Usage errors end with the pointer to --help; data errors (a value
+    // outside the stored range, a corrupt file) don't need it.
+    const std::string see_help = " (run '" + std::string(argv[0]) + " --help' for usage)";
     const auto need = [&](int n) {
-        if (extra != n) throw std::runtime_error(mode + " takes " + std::to_string(n) + " value(s)");
+        if (extra != n) throw std::runtime_error(mode + " takes " + std::to_string(n) + " value(s)" + see_help);
     };
 
     try {
@@ -364,7 +371,7 @@ int main(int argc, char** argv) {
             std::printf("block file:   %s (%s bytes, %.2f bits/prime)\n", db.meta("blk_file").c_str(),
                         format_thousands(blk).c_str(), db.total ? 8.0 * static_cast<double>(blk) / static_cast<double>(db.total) : 0.0);
         } else if (!mode.empty() && mode[0] == '-') {
-            throw std::runtime_error("unknown option " + mode);
+            throw std::runtime_error("unknown option " + mode + see_help);
         } else {
             need(0);
             const uint64_t n = parse_number("N", argv[2]);

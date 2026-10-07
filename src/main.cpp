@@ -652,8 +652,14 @@ int main(int argc, char** argv) {
     try {
         opt = parse_args(argc, argv);
     } catch (const std::exception& e) {
-        std::fprintf(stderr, "Error: %s\n\n", e.what());
-        print_usage(argv[0]);
+        // No arguments at all: the help is what was asked for. Otherwise
+        // the error alone, with a pointer to it -- the full usage text
+        // pushed the one line that mattered off the screen.
+        if (argc == 1) {
+            print_usage(argv[0]);
+        } else {
+            std::fprintf(stderr, "Error: %s\nRun '%s --help' for usage.\n", e.what(), argv[0]);
+        }
         return 1;
     }
     if (opt.show_help) {

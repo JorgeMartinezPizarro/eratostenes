@@ -354,6 +354,13 @@ expect_log() {
         fail=1
     fi
 }
+# Un N o un --start que no cabe en 64 bits nombra el N maximo, no el limite de
+# 64 bits (antes: "size out of range: 1e20", sin el maximo; 2026-10-08).
+MAXN="at most 18446744004990074879"
+expect_log "N = 1e20: dice el N maximo"            "N too large: 1e20 \($MAXN"        1e20
+expect_log "N = 2^64: dice el N maximo"            "N too large: 18446744073709551616 \($MAXN" 18446744073709551616
+expect_log "N = maximo + 1: dice el N maximo"      "N too large: 18446744004990074880 \($MAXN" 18446744004990074880
+expect_log "--start 1e20: dice el N maximo"        "start too large: 1e20 .*$MAXN"  1e15 --start 1e20
 T13="10000000000000 --start 9999999000000 -t 2"
 T15="1000000000000000 --start 999999999000000 -t 2"
 # base 4 MiB from an 8 MiB L2, capped to 32 x 4 KiB = 128 KiB (3932160 numbers)

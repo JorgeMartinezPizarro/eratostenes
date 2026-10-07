@@ -71,9 +71,18 @@ struct Options {
 // rounded every odd integer above 2^53 (~9.007e15, below the 1e16 target)
 // to a neighbour, and llround overflowed past 2^63. The result must be a
 // whole number (1.5k is fine, 2.5 is an error) that fits in 64 bits.
+//
+// A value past 2^64 - 1 throws SizeOutOfRange, its own type, so parse_args
+// can name the largest N (MAX_LIMIT below) instead of the 64-bit bound:
+// `eratostenes 1e20` used to say only "size out of range: 1e20".
+struct SizeOutOfRange : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
 inline uint64_t parse_size(const std::string& raw) {
     const auto invalid = [&] { return std::runtime_error("invalid size value: " + raw); };
-    const auto out_of_range = [&] { return std::runtime_error("size out of range: " + raw); };
+    const auto out_of_range = [&] {
+        return SizeOutOfRange("size out of range: " + raw + " (at most " + std::to_string(UINT64_MAX) + " = 2^64 - 1)");
+    };
     if (raw.empty()) throw std::runtime_error("empty size value");
     std::string s = raw;
     int exp10 = 0;
@@ -132,6 +141,16 @@ inline uint64_t parse_size(const std::string& raw) {
     if (mant > UINT64_MAX) throw out_of_range();
     return static_cast<uint64_t>(mant);
 }
+
+// The largest N. Activation computes p * m up to start + 14p (the sparse
+// tier's mod-2310 multiplier moves up to 13 past ceil(start / p): the largest
+// gap between residues coprime to 2310 is 14), with p up to sqrt(N) < 2^32 and
+// start up to N + 30, so N needs 2^32 * 14 + 30 of headroom below 2^64.
+// primesieve's own ceiling, 2^64 - 2^32 * 10, isn't enough: a window just
+// below it threw "bucket sieve: a sparse prime's step exceeds the bucket
+// ring's margin" from a wrapped p * m.
+inline constexpr uint64_t MAX_LIMIT = UINT64_MAX - 16 * (uint64_t{1} << 32);
+inline std::string max_limit_text() { return std::to_string(MAX_LIMIT) + " = 2^64 - 2^32 * 16"; }
 
 // Strict signed integer for --zstd-level, within zstd's own range
 // (ZSTD_minCLevel()..ZSTD_maxCLevel(), negative levels being zstd's fast
@@ -293,7 +312,13 @@ inline Options parse_args(int argc, char** argv) {
         } else if (a == "--l1-bytes") {
             opt.l1_bytes_override = parse_size(need_value(i, a.c_str()));
         } else if (a == "--start") {
-            opt.start = parse_size(need_value(i, a.c_str()));
+            const std::string v = need_value(i, a.c_str());
+            try {
+                opt.start = parse_size(v);
+            } catch (const SizeOutOfRange&) {
+                throw std::runtime_error("--start too large: " + v + " (it must be below N, and N is at most " +
+                                         max_limit_text() + ")");
+            }
         } else if (a == "--debug-idle") {
             opt.debug_idle = true;
         } else if (a == "--tune") {
@@ -305,7 +330,11 @@ inline Options parse_args(int argc, char** argv) {
             // consumes the *first* such argument; a second one falls
             // through to "unknown argument" below instead of silently
             // overwriting the limit.
-            opt.limit = parse_size(a);
+            try {
+                opt.limit = parse_size(a);
+            } catch (const SizeOutOfRange&) {
+                throw std::runtime_error("N too large: " + a + " (at most " + max_limit_text() + ")");
+            }
             has_limit = true;
         } else {
             throw std::runtime_error("unknown argument: " + a);
@@ -315,16 +344,8 @@ inline Options parse_args(int argc, char** argv) {
     if (opt.show_help) return opt;
 
     if (!has_limit) throw std::runtime_error("missing N (upper limit)");
-    // Activation computes p * m up to start + 14p (the sparse tier's mod-2310
-    // multiplier moves up to 13 past ceil(start / p): the largest gap between
-    // residues coprime to 2310 is 14), with p up to sqrt(N) < 2^32 and start
-    // up to N + 30, so N needs 2^32 * 14 + 30 of headroom below 2^64.
-    // primesieve's own ceiling, 2^64 - 2^32 * 10, isn't enough: a window just
-    // below it threw "bucket sieve: a sparse prime's step exceeds the bucket
-    // ring's margin" from a wrapped p * m.
-    constexpr uint64_t MAX_LIMIT = UINT64_MAX - 16 * (uint64_t{1} << 32);
     if (opt.limit > MAX_LIMIT)
-        throw std::runtime_error("N too large: at most " + std::to_string(MAX_LIMIT) + " (2^64 - 2^32 * 16)");
+        throw std::runtime_error("N too large: " + std::to_string(opt.limit) + " (at most " + max_limit_text() + ")");
     // A --start at or past N used to be dropped silently and the whole
     // [0, N] sieved instead.
     if (opt.start >= opt.limit && opt.start != 0)
