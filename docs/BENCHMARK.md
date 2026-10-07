@@ -2,29 +2,9 @@
 
 `eratostenes` against [primesieve](https://github.com/kimwalisch/primesieve), one section per machine, newest CPU first: the count table (`make benchmark`, pi(N)) and the tails table (`make benchmark-tails`, the last 1e11 numbers below each N), same thread count for both programs. Ratio = eratostenes / primesieve: below 1 means eratostenes is faster. Each time is the mean of REPS interleaved pairs (eratostenes, primesieve, eratostenes, ...).
 
-## Intel Xeon Emerald Rapids (claude.ai sandbox, host 1)
+## Intel Xeon Emerald Rapids
 
 Intel Xeon @ 2.10GHz (Emerald Rapids, 2023, family 6 model 207), 2 vCPU KVM (1 per core), 7.8 GiB. L1d 48 KiB and L2 2 MiB per core; L3 260 MiB.
-
-| N | eratostenes | primesieve | ratio |
-|---|---:|---:|---:|
-| 1e10 | 0.64s | 0.657s | 0.97x |
-| 1e11 | 8.15s | 7.706s | 1.06x |
-| 1e12 | 104.63s | 99.545s | 1.05x |
-| 1e13 | 1237.95s | 1250.752s | 0.99x |
-
-| N | eratostenes | primesieve | ratio |
-|---|---:|---:|---:|
-| 1e13 | 13.92s | 13.944s | 1.00x |
-| 1e14 | 14.82s | 16.725s | 0.89x |
-| 1e15 | 17.42s | 19.058s | 0.91x |
-| 1e16 | 19.37s | 20.665s | 0.94x |
-| 1e17 | 21.98s | 26.557s | 0.83x |
-| 1e18 | 25.79s | 31.834s | 0.81x |
-
-## Intel Xeon Emerald Rapids (claude.ai sandbox, host 2)
-
-Same CPU model and VM shape as host 1.
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
