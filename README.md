@@ -58,6 +58,8 @@ outside the container.
                           (default: auto, sized from N)
       --db-block-size N   Primes per compressed block in .db mode (default: 65536)
       --zstd-level N      zstd compression level in .db mode (default: 1)
+      --start N0          Only the range [N0, N]: count it, or with -o
+                          write just its primes
   -h, --help              Help
 ```
 
@@ -65,6 +67,7 @@ outside the container.
 ./eratostenes 10000 -o primes_1M.txt      # Write to text        
 ./eratostenes 10b -t 12                   # Count using 12 threads
 ./eratostenes 1t -o ~/primes_100b.db      # Write to db
+./eratostenes 1e18 --start 999999e12 -o tail.db   # Write only a range (a tail)
 ```
 
 ## Database
@@ -72,14 +75,21 @@ outside the container.
 `-o out.db` writes two files that travel together: `out.db`, a small SQLite index (one row per block of 65536 primes: position, count, first prime, and where the block sits in the sidecar), and `out.blk`, the gap-encoded, zstd-compressed blocks themselves, written in parallel by every sieve thread. The index stays in the MBs; the `.blk` is ~0.55 bytes per prime (~17 TB at 1e15; on ext4 a single file tops out at 16 TiB, XFS has no such limit). To query for primes you can use the `nth_prime` companion:
 
 ```sh
-./nth_prime out.db 1000000     # the 1,000,000th prime
-./nth_prime out.db --count     # pi(limit)
+./nth_prime out.db 1000000           # the 1,000,000th stored prime
+./nth_prime out.db --count           # how many primes are stored (pi(limit) for a full run)
+./nth_prime out.db --count X Y       # how many lie in [X, Y]
+./nth_prime out.db --next X          # the smallest stored prime >= X, and its position
+./nth_prime out.db --range X Y       # print the primes in [X, Y]
+./nth_prime out.db --slice I J       # print the primes at positions I..J
+./nth_prime out.db --info            # range, count, first/last prime, sizes
 
 # with Docker only (the .db must be in ./output)
 make nth-prime ARGS="/output/out.db 1000000"
 ```
 
-`nth_prime` looks up the one block containing the requested position in the index (by `start_index`, not a table scan), reads just those bytes from the `.blk` with one `pread` and decodes that block — lookups stay at a few milliseconds regardless of file size. It checks that the `.blk` next to the `.db` is the one it was written with (name and size).
+A `.db` written with `--start N0` holds only the primes of [N0, N], and its positions are relative to that range: position 1 is the first prime >= N0 (its absolute index, pi(N0 - 1), can't be known without sieving [0, N0)). X and Y must lie inside the stored range.
+
+`nth_prime` looks up the one block containing a position in the index (by `start_index`, not a table scan), reads just those bytes from the `.blk` with one `pread` and decodes that block; a value is found by a binary search over positions (~20 such lookups). Queries take a few milliseconds whatever the file's size, and printing streams the blocks in order. On the last 1e10 numbers below 1e18 (241M primes, a 148 MB `.blk`, i5-11400F): `--count` over the whole range 0.002 s against 2.0 s to sieve it again on 12 threads, `--next` 0.003 s, and printing all of it 4.0 s on one thread against 15.8 s for `primesieve -p`. It checks that the `.blk` next to the `.db` is the one it was written with (name and size).
 
 Below the results for `./eratostenes limit -o base.db`:
 

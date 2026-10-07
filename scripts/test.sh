@@ -1,5 +1,5 @@
 #!/bin/bash
-# Prueba de regresion, cinco partes:
+# Prueba de regresion, ocho partes:
 #   1. Compara pi(N) contra primecount (--nth-prime/plain, independiente de
 #      este proyecto -- ver https://github.com/kimwalisch/primecount) para
 #      N = 1e8..1e11, sin -o (modo conteo, sin E/S a disco).
@@ -26,7 +26,11 @@
 #   7. Un tramo del regimen sparse real (ultima 1e8 bajo 1e15) contra
 #      primecount, y los errores que nth_prime debe detectar (.blk truncado
 #      o ausente, posiciones fuera de rango).
-# Los valores esperados en 1, 2, 3 y 5 salen de primecount, no de constantes
+#   8. Tramos con -o (--start): .txt y .db de varias colas de [0, 2e6] contra
+#      la cola del .txt completo, las consultas de nth_prime (posicion,
+#      --next, --count X Y, --range, --slice, --info) en bordes de bloque y
+#      de tramo, sus rechazos, y una cola de 1e15 contra primecount.
+# Los valores esperados en 1, 2, 3, 5 y 8 salen de primecount, no de constantes
 # hardcodeadas -- necesita estar instalado (Debian/Ubuntu: paquete
 # primecount-bin; ver docker/Dockerfile, etapa "dev").
 # Pensado para `make test`, pero tambien se puede correr suelto
@@ -273,12 +277,9 @@ check_start 1000000 239 -t 2
 check_start 1000000 2399 -t 1
 check_start 240 239
 check_start 241 239
-if "$BIN" 1000000 --start 1000 -o "$WORKDIR/start.txt" >/dev/null 2>&1; then
-    printf "FAIL %-40s deberia rechazarse\n" "--start con -o"
-    fail=1
-else
-    printf "OK   %-40s rechazado\n" "--start con -o"
-fi
+# El mismo caso con N0 = 240j - 1 grande (primo) y con N = N0 + 1.
+check_start 1000000099599 999999999599 -t "$THREADS"
+check_start 240000000 239999999 -t 2
 
 
 # --- 6: limites pequenos, rechazos y reglas de ajuste (todo instantaneo) ---
@@ -428,6 +429,86 @@ if [ "$("$NTH_BIN" "$DB7" "$count7")" == "99991" ]; then
 else
     printf "FAIL nth_prime %-30s\n" "ultimo primo < 1e5"; fail=1
 fi
+
+# --- 8: tramos con -o (--start) y las consultas de nth_prime ---
+# Referencia: el .txt completo hasta 2e6 (sus primos ya se comparan con
+# primecount en las partes 1-4); cada tramo en .txt y en .db (bloques de 1000
+# primos, para cruzar fronteras de bloque) debe ser exactamente su cola.
+ok8() { printf "OK   tramo %-46s %s\n" "$1" "$2"; }
+fail8() { printf "FAIL tramo %-46s %s\n" "$1" "$2"; fail=1; }
+FULL8="$WORKDIR/full8.txt"
+"$BIN" 2000000 -o "$FULL8" >/dev/null 2>&1
+for s8 in 2 7 239 1000000 1999993; do
+    exp8="$WORKDIR/exp8.txt"
+    awk -v s="$s8" '$1 >= s' "$FULL8" > "$exp8"
+    n8=$(wc -l < "$exp8")
+    "$BIN" 2000000 --start "$s8" -t 3 -o "$WORKDIR/t8.txt" >/dev/null 2>&1
+    "$BIN" 2000000 --start "$s8" -t 3 -o "$WORKDIR/t8.db" --db-block-size 1000 >/dev/null 2>&1
+    if cmp -s "$exp8" "$WORKDIR/t8.txt"; then ok8 "[$s8, 2e6] .txt" "$n8 primos"; else fail8 "[$s8, 2e6] .txt" "difiere de la cola del .txt completo"; fi
+    c8=$("$NTH_BIN" "$WORKDIR/t8.db" --count 2>&1)
+    if [ "$c8" == "$n8" ] && "$NTH_BIN" "$WORKDIR/t8.db" --slice 1 "$n8" 2>&1 | cmp -s "$exp8" -; then
+        ok8 "[$s8, 2e6] .db --count y --slice 1..$n8" "$n8 primos"
+    else
+        fail8 "[$s8, 2e6] .db --count y --slice 1..$n8" "count=$c8 esperado=$n8"
+    fi
+    # Consultas en los bordes de bloque (posiciones 1000/1001) y del tramo.
+    bad=""
+    for pos in 1 2 999 1000 1001 2000 2001 "$n8"; do
+        [ "$pos" -le "$n8" ] || continue
+        want=$(sed -n "${pos}p" "$exp8")
+        got=$("$NTH_BIN" "$WORKDIR/t8.db" "$pos" 2>&1)
+        [ "$got" == "$want" ] || bad="$bad pos$pos($got!=$want)"
+        got=$("$NTH_BIN" "$WORKDIR/t8.db" --next "$want" 2>&1)
+        [ "$got" == "$want $pos" ] || bad="$bad next$want($got)"
+        prev=$([ "$pos" -gt 1 ] && sed -n "$((pos - 1))p" "$exp8" || echo 0)
+        if [ "$want" -gt "$s8" ] && [ "$prev" -lt $((want - 1)) ]; then # --next de un no primo justo por debajo
+            got=$("$NTH_BIN" "$WORKDIR/t8.db" --next $((want - 1)) 2>&1)
+            [ "$got" == "$want $pos" ] || bad="$bad next$((want - 1))($got)"
+        fi
+    done
+    for xy in "$s8 2000000" "$s8 $s8" "$((s8 + 1)) $((s8 + 50000))" "1999000 2000000" "1999994 1999996"; do
+        set -- $xy
+        [ "$1" -le "$2" ] && [ "$1" -ge "$s8" ] && [ "$2" -le 2000000 ] || continue
+        want=$(awk -v a="$1" -v b="$2" '$1 >= a && $1 <= b' "$exp8" | wc -l)
+        got=$("$NTH_BIN" "$WORKDIR/t8.db" --count "$1" "$2" 2>&1)
+        [ "$got" == "$want" ] || bad="$bad count[$1,$2]($got!=$want)"
+        if ! "$NTH_BIN" "$WORKDIR/t8.db" --range "$1" "$2" 2>&1 | cmp -s - <(awk -v a="$1" -v b="$2" '$1 >= a && $1 <= b' "$exp8"); then
+            bad="$bad range[$1,$2]"
+        fi
+    done
+    if [ -z "$bad" ]; then ok8 "[$s8, 2e6] .db posicion/--next/--count/--range" "bordes de bloque y tramo"; else fail8 "[$s8, 2e6] .db consultas" "$bad"; fi
+done
+# Rechazos: fuera del tramo [1000000, 2e6] guardado, posiciones invalidas.
+"$BIN" 2000000 --start 1000000 -o "$WORKDIR/t8.db" >/dev/null 2>&1
+n8=$("$NTH_BIN" "$WORKDIR/t8.db" --count)
+expect_nth_reject "--next por debajo del tramo"  "$WORKDIR/t8.db" --next 999999
+expect_nth_reject "--next sin primo despues"     "$WORKDIR/t8.db" --next 1999999
+expect_nth_reject "--count pasado el limite"     "$WORKDIR/t8.db" --count 1000000 2000001
+expect_nth_reject "--range por debajo"           "$WORKDIR/t8.db" --range 5 1000000
+expect_nth_reject "--slice desde 0"              "$WORKDIR/t8.db" --slice 0 3
+expect_nth_reject "--slice pasado el total"      "$WORKDIR/t8.db" --slice 1 $((n8 + 1))
+expect_nth_reject "opcion desconocida"           "$WORKDIR/t8.db" --bogus
+if "$NTH_BIN" "$WORKDIR/t8.db" --info | grep -q "range: *\[1,000,000, 2,000,000\]"; then
+    ok8 "--info" "rango [1,000,000, 2,000,000]"
+else
+    fail8 "--info" "$("$NTH_BIN" "$WORKDIR/t8.db" --info 2>&1 | head -3 | tr '\n' ' ')"
+fi
+# Una cola del regimen sparse: la ultima 1e7 bajo 1e15, contra primecount.
+N8=1000000000000000; S8=999999990000000
+"$BIN" "$N8" --start "$S8" -t "$THREADS" -o "$WORKDIR/t15.db" >/dev/null 2>&1
+"$BIN" "$N8" --start "$S8" -t "$THREADS" -o "$WORKDIR/t15.txt" >/dev/null 2>&1
+want=$(( $("$PRIMECOUNT" "$N8") - $("$PRIMECOUNT" $((S8 - 1))) ))
+c8=$("$NTH_BIN" "$WORKDIR/t15.db" --count 2>&1); l8=$(wc -l < "$WORKDIR/t15.txt")
+X8=999999995000000; Y8=999999997500000
+wantxy=$(( $("$PRIMECOUNT" "$Y8") - $("$PRIMECOUNT" $((X8 - 1))) ))
+gotxy=$("$NTH_BIN" "$WORKDIR/t15.db" --count "$X8" "$Y8" 2>&1)
+if [ "$c8" == "$want" ] && [ "$l8" == "$want" ] && [ "$gotxy" == "$wantxy" ] &&
+   "$NTH_BIN" "$WORKDIR/t15.db" --slice 1 "$c8" | cmp -s - "$WORKDIR/t15.txt"; then
+    ok8 "[1e15 - 1e7, 1e15] .db/.txt vs primecount" "$want primos, [X, Y] $wantxy"
+else
+    fail8 "[1e15 - 1e7, 1e15]" "db=$c8 txt=$l8 primecount=$want; [X,Y] $gotxy vs $wantxy"
+fi
+
 if [ "$fail" -eq 0 ]; then
     echo "Todas las pruebas OK."
 else

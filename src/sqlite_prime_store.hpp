@@ -117,7 +117,10 @@ public:
     // chunk_offset[0] is always 0 by construction. Empty is fine (e.g.
     // write_tiny_db's single implicit chunk 0, already at the right
     // offset) -- fix_offsets then has nothing to correct.
-    void finish(uint64_t total_primes, uint64_t limit, uint64_t wheel_mod,
+    // range_start: the S of --start S (0 for a full run). Positions
+    // (start_index) count from the first prime >= S, so a tail's are
+    // relative to it -- see format_version below.
+    void finish(uint64_t total_primes, uint64_t range_start, uint64_t limit, uint64_t wheel_mod,
                 uint64_t block_size, int zstd_level,
                 const std::vector<uint64_t>& chunk_offset) {
         {
@@ -138,11 +141,14 @@ public:
 
         exec("CREATE INDEX idx_blocks_start ON blocks(start_index);");
 
-        // 3: blocks in the .blk sidecar (2 held them as BLOBs; the gap
-        // encoding is version 2's, see gap_encoding.hpp). blk_file is the
-        // sidecar's name next to the .db, blk_bytes its size: nth_prime
-        // checks both.
-        write_meta("format_version", "3");
+        // 4: range_start, the first number of the range the primes were
+        // sieved from (0 for [0, limit]); positions count from the first
+        // prime >= range_start. 3: blocks in the .blk sidecar (2 held them as
+        // BLOBs; the gap encoding is version 2's, see gap_encoding.hpp) -- a
+        // 3 is a 4 with range_start 0. blk_file is the sidecar's name next to
+        // the .db, blk_bytes its size: nth_prime checks both.
+        write_meta("format_version", "4");
+        write_meta("range_start", std::to_string(range_start));
         {
             const std::string& bp = blocks_.path();
             const size_t slash = bp.find_last_of('/');

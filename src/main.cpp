@@ -70,7 +70,7 @@ static bool is_db_output(const std::string& path) { return has_db_suffix(path); 
 // with no threading -- used by the tiny-N early-return paths below, where
 // N is too small for the parallel wheel machinery to apply at all.
 static void write_tiny_db(const std::string& path, const std::vector<uint64_t>& primes,
-                           uint64_t limit, uint64_t block_size, int zstd_level) {
+                           uint64_t range_start, uint64_t limit, uint64_t block_size, int zstd_level) {
     SqlitePrimeStore store(path);
     {
         GapBlockSink sink(0, block_size, zstd_level, store.block_file(),
@@ -78,22 +78,32 @@ static void write_tiny_db(const std::string& path, const std::vector<uint64_t>& 
         for (uint64_t p : primes) sink.write_uint64(p);
         sink.flush();
     }
-    store.finish(primes.size(), limit, WHEEL_MOD, block_size, zstd_level, {});
+    store.finish(primes.size(), range_start, limit, WHEEL_MOD, block_size, zstd_level, {});
 }
 
-// Text for the wheel's own primes (e.g. "2\n3\n5\n" for a mod-30 wheel),
-// built once from WHEEL_PRIMES so it never needs to be kept in sync by hand.
-inline std::string build_small_primes_text() {
+// The wheel's own primes (WHEEL_PRIMES, e.g. 2, 3, 5) at or above `start`:
+// they don't take part in the wheel numbering, so the first chunk's writer
+// emits them directly. All of them without --start, none for any --start
+// past the wheel's last prime.
+static std::vector<uint64_t> wheel_primes_from(uint64_t start) {
+    std::vector<uint64_t> v;
+    for (uint64_t p : WHEEL_PRIMES) if (p >= start) v.push_back(p);
+    return v;
+}
+static std::string wheel_primes_text(uint64_t start) {
     std::string s;
-    for (uint64_t p : WHEEL_PRIMES) {
+    for (uint64_t p : wheel_primes_from(start)) {
         s += std::to_string(p);
         s += '\n';
     }
     return s;
 }
-const std::string SMALL_PRIMES_TEXT = build_small_primes_text();
-const uint64_t SMALL_PRIMES_BYTES = SMALL_PRIMES_TEXT.size();
-const uint64_t SMALL_PRIMES_COUNT = WHEEL_PRIMES.size();
+
+// "up to N", or "in [start, N]" for a --start tail.
+static std::string range_desc(uint64_t start, uint64_t limit) {
+    return start ? "in [" + format_thousands(start) + ", " + format_thousands(limit) + "]"
+                 : "up to " + format_thousands(limit);
+}
 
 // What sieve_chunk measured on its last chunk, for run_parallel_chunks'
 // steal decisions (read back on the same thread right after the chunk).
@@ -231,13 +241,13 @@ static void count_worker(ChunkRange range, const TierSet& t, uint64_t base_prime
 // into its (disjoint) region of the final file.
 static void emit_worker(int idx, ChunkRange range, const TierSet& t, uint64_t base_prime_max,
                          const Presieve& presieve, const SieveConfig& cfg,
-                         int fd, uint64_t base_offset,
+                         int fd, uint64_t base_offset, const std::string& head_text,
                          std::atomic<uint64_t>& progress) {
     DirectWriter out(fd, base_offset);
     uint64_t local_count = 0;
 
     if (idx == 0) {
-        out.write_raw(SMALL_PRIMES_TEXT.data(), SMALL_PRIMES_BYTES);
+        out.write_raw(head_text.data(), head_text.size()); // the wheel's own primes, see wheel_primes_from
     }
 
     sieve_chunk(range, t, base_prime_max, presieve, cfg, out, local_count, progress);
@@ -252,7 +262,7 @@ static void emit_worker(int idx, ChunkRange range, const TierSet& t, uint64_t ba
 static void emit_db_worker(int idx, ChunkRange range, const TierSet& t, uint64_t base_prime_max,
                             const Presieve& presieve, const SieveConfig& cfg,
                             SqlitePrimeStore& store,
-                            uint64_t block_size, int zstd_level,
+                            uint64_t block_size, int zstd_level, uint64_t range_start,
                             uint64_t& out_count,
                             std::atomic<uint64_t>& progress) {
     GapBlockSink sink(static_cast<uint64_t>(idx), block_size, zstd_level, store.block_file(),
@@ -260,7 +270,7 @@ static void emit_db_worker(int idx, ChunkRange range, const TierSet& t, uint64_t
     uint64_t local_count = 0;
 
     if (idx == 0) {
-        for (uint64_t p : WHEEL_PRIMES) sink.write_uint64(p);
+        for (uint64_t p : wheel_primes_from(range_start)) sink.write_uint64(p);
     }
 
     sieve_chunk(range, t, base_prime_max, presieve, cfg, sink, local_count, progress);
@@ -480,23 +490,19 @@ static int run_count(const RunPlan& plan) {
     // With --start, only the wheel primes inside [range_start, N] count
     // (none, for any realistic start), so the tail total matches e.g.
     // `primesieve START N -c` exactly.
-    uint64_t total_primes = 0;
-    for (uint64_t p : WHEEL_PRIMES) if (p >= plan.range_start) ++total_primes;
+    uint64_t total_primes = wheel_primes_from(plan.range_start).size();
     for (auto c : prime_counts) total_primes += c;
 
     auto t_end = std::chrono::steady_clock::now();
     double total_s = std::chrono::duration<double>(t_end - plan.t_start).count();
     double total_mprimes = total_s > 0 ? (total_primes / 1e6 / total_s) : 0.0;
 
-    std::string range_desc = plan.range_start
-        ? "in [" + format_thousands(plan.range_start) + ", " + format_thousands(plan.opt.limit) + "]"
-        : "up to " + format_thousands(plan.opt.limit);
     std::fprintf(stderr,
         "%sDone.%s %s%s%s primes found %s.\n"
         "  %stotal:%s      %s%.3fs%s (%s%.1f M primes/s%s)\n",
         C.headline, C.reset,
         C.bold, format_thousands(total_primes).c_str(), C.reset,
-        range_desc.c_str(),
+        range_desc(plan.range_start, plan.opt.limit).c_str(),
         C.headline, C.reset, C.time, total_s, C.reset, C.headline, total_mprimes, C.reset);
 
     return 0;
@@ -521,17 +527,17 @@ static int run_db(const RunPlan& plan) {
         run_parallel_chunks(plan.actual_threads, plan.ranges, plan.fresh_primes, plan.cfg, [&](unsigned i) {
             const ChunkRange& r = plan.ranges[i];
             emit_db_worker(static_cast<int>(i), r, plan.tiers_for(r), plan.base_limit, plan.presieve, plan.cfg,
-                           store, opt.db_block_size, opt.zstd_level, prime_counts[i], progress);
+                           store, opt.db_block_size, opt.zstd_level, plan.range_start, prime_counts[i], progress);
         });
     }
 
-    prime_counts[0] += SMALL_PRIMES_COUNT;
+    prime_counts[0] += wheel_primes_from(plan.range_start).size();
 
     std::vector<uint64_t> chunk_offset(num_chunks, 0);
     for (unsigned i = 1; i < num_chunks; ++i) chunk_offset[i] = chunk_offset[i - 1] + prime_counts[i - 1];
     uint64_t total_primes = num_chunks ? chunk_offset.back() + prime_counts.back() : 0;
 
-    store.finish(total_primes, opt.limit, WHEEL_MOD, opt.db_block_size, opt.zstd_level, chunk_offset);
+    store.finish(total_primes, plan.range_start, opt.limit, WHEEL_MOD, opt.db_block_size, opt.zstd_level, chunk_offset);
 
     auto t_end = std::chrono::steady_clock::now();
     double total_s = std::chrono::duration<double>(t_end - plan.t_start).count();
@@ -541,11 +547,11 @@ static int run_db(const RunPlan& plan) {
     double bytes_per_prime = total_primes ? static_cast<double>(db_bytes) / total_primes : 0.0;
 
     std::fprintf(stderr,
-        "%sDone.%s %s%s%s primes found up to %s %s(%.2f GB, %.3f B/prime)%s.\n"
+        "%sDone.%s %s%s%s primes found %s %s(%.2f GB, %.3f B/prime)%s.\n"
         "  %stotal:%s      %s%7.3fs%s  (%s%.1f M primes/s%s)\n",
         C.headline, C.reset,
         C.bold, format_thousands(total_primes).c_str(), C.reset,
-        format_thousands(opt.limit).c_str(),
+        range_desc(plan.range_start, opt.limit).c_str(),
         C.dim, db_bytes / 1e9, bytes_per_prime, C.reset,
         C.headline, C.reset, C.time, total_s, C.reset, C.headline, total_mprimes, C.reset);
 
@@ -572,8 +578,9 @@ static int run_text(const RunPlan& plan) {
         });
     }
 
-    byte_counts[0] += SMALL_PRIMES_BYTES;
-    prime_counts[0] += SMALL_PRIMES_COUNT;
+    const std::string head_text = wheel_primes_text(plan.range_start); // written by chunk 0, see emit_worker
+    byte_counts[0] += head_text.size();
+    prime_counts[0] += wheel_primes_from(plan.range_start).size();
 
     std::vector<uint64_t> offsets(num_chunks, 0);
     for (unsigned i = 1; i < num_chunks; ++i) offsets[i] = offsets[i - 1] + byte_counts[i - 1];
@@ -606,7 +613,7 @@ static int run_text(const RunPlan& plan) {
             run_parallel_chunks(plan.actual_threads, plan.ranges, plan.fresh_primes, plan.cfg, [&](unsigned i) {
                 const ChunkRange& r = plan.ranges[i];
                 emit_worker(static_cast<int>(i), r, plan.tiers_for(r), plan.base_limit, plan.presieve, plan.cfg,
-                            fd, offsets[i], progress);
+                            fd, offsets[i], head_text, progress);
             });
         } catch (...) {
             ::close(fd);
@@ -624,13 +631,13 @@ static int run_text(const RunPlan& plan) {
     double total_mprimes = total_s > 0 ? (total_primes / 1e6 / total_s) : 0.0;
 
     std::fprintf(stderr,
-        "%sDone.%s %s%s%s primes found up to %s %s(%.2f GB)%s.\n"
+        "%sDone.%s %s%s%s primes found %s %s(%.2f GB)%s.\n"
         "  %scount:%s      %s%7.3fs%s  (%s%.1f M primes/s%s)\n"
         "  %swrite:%s      %s%7.3fs%s  (%s%.2f GB/s%s)\n"
         "  %stotal:%s      %s%7.3fs%s  (%s%.1f M primes/s%s)\n",
         C.headline, C.reset,
         C.bold, format_thousands(total_primes).c_str(), C.reset,
-        format_thousands(opt.limit).c_str(),
+        range_desc(plan.range_start, opt.limit).c_str(),
         C.dim, total_bytes / 1e9, C.reset,
         C.label, C.reset, C.time, count_s, C.reset, C.rate, count_mprimes, C.reset,
         C.label, C.reset, C.time, write_s, C.reset, C.io, write_gbps, C.reset,
@@ -652,13 +659,10 @@ int main(int argc, char** argv) {
         print_usage(argv[0]);
         return 0;
     }
-    // --start (see below) is a count-only benchmarking aid: a partial
-    // .txt/.db would still get the wheel primes and, for .db,
-    // chunk-relative positions that aren't global prime indices.
-    if (opt.start && !opt.output.empty()) {
-        std::fprintf(stderr, "Error: --start only works in count mode (without -o).\n");
-        return 1;
-    }
+    // --start S (see below) with -o writes the primes of [S, N] only: text
+    // as usual, .db with positions relative to the tail (the first prime >=
+    // S is position 1; pi(S - 1) is not known without sieving [0, S)) and
+    // meta.range_start = S, which nth_prime reports.
 
     const Colors C(stderr_supports_color());
 
@@ -669,7 +673,7 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "Done. 0 primes found up to %llu.\n",
                          static_cast<unsigned long long>(opt.limit));
         } else if (is_db_output(opt.output)) {
-            write_tiny_db(opt.output, {}, opt.limit, opt.db_block_size, opt.zstd_level);
+            write_tiny_db(opt.output, {}, opt.start, opt.limit, opt.db_block_size, opt.zstd_level);
             std::fprintf(stderr, "N < 2: no primes. Empty .db file created at %s\n", opt.output.c_str());
         } else {
             std::ofstream(opt.output, std::ios::binary | std::ios::trunc);
@@ -682,12 +686,12 @@ int main(int argc, char** argv) {
         // this small there is no wheel range to sieve at all, so this is
         // resolved directly, without the parallel machinery.
         std::vector<uint64_t> small;
-        for (uint64_t p : WHEEL_PRIMES) if (opt.limit >= p) small.push_back(p);
+        for (uint64_t p : wheel_primes_from(opt.start)) if (opt.limit >= p) small.push_back(p);
         if (opt.output.empty()) {
-            std::fprintf(stderr, "Done. %zu prime(s) found up to %llu.\n",
-                         small.size(), static_cast<unsigned long long>(opt.limit));
+            std::fprintf(stderr, "Done. %zu prime(s) found %s.\n",
+                         small.size(), range_desc(opt.start, opt.limit).c_str());
         } else if (is_db_output(opt.output)) {
-            write_tiny_db(opt.output, small, opt.limit, opt.db_block_size, opt.zstd_level);
+            write_tiny_db(opt.output, small, opt.start, opt.limit, opt.db_block_size, opt.zstd_level);
             std::fprintf(stderr, "Done. %zu prime(s) written to %s\n", small.size(), opt.output.c_str());
         } else {
             std::ofstream ofs(opt.output, std::ios::binary | std::ios::trunc);

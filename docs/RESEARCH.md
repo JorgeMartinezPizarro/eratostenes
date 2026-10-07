@@ -84,7 +84,8 @@ What is in the code today, by the day it went in:
   the [small cutoff at 1/2 on a 256 KiB L2](#small-cutoff-12-of-the-sub-block-on-a-256-kib-l2-core-kept-2026-10-06);
   [half the whole-L2 width with few base primes](#half-the-whole-l2-width-with-few-base-primes-on-every-one-per-core-machine-kept-2026-10-06).
 - **2026-10-07**: the cleanup above; the [JCC-erratum flag](#cascade-lake-branches-kept-off-32-byte-boundaries-jcc-erratum--wa-mbranches-within-32b-boundaries-measured-not-adopted-2026-10-07)
-  measured on Cascade Lake and not adopted (no CPU-model rules).
+  measured on Cascade Lake and not adopted (no CPU-model rules);
+  [ranges with -o and nth_prime queries](#db-format-4-ranges-and-nth_prime-as-a-query-tool-kept-2026-10-07) (.db format 4).
 
 ## Contents
 
@@ -1260,6 +1261,19 @@ plus the sidecar's name and size, checked by `nth_prime`, which reads a block wi
 PC, 1e11, 12 threads: tmpfs 6.1-7.2s -> 4.4-4.8s (-30%), WSL disk 18.9-26.3s -> 6.1-10.6s
 (-60..-70%), ~10 of 12 cores busy. Open: ext4 caps a file at 16 TiB (1e15 is ~15.5 TiB), so the
 sidecar needs sharding if that disk is ext4.
+
+### `.db` format 4: ranges, and `nth_prime` as a query tool (kept, 2026-10-07)
+
+`-o` works with `--start S`: a `.txt` of [S, N], or a `.db` whose positions count from the first
+prime >= S (`meta.range_start`, format 4; format 3 reads as range_start 0) -- pi(S - 1) is unknown
+to a partial sieve, so it isn't stored. `nth_prime` gained `--count X Y`, `--next X`, `--range X
+Y`, `--slice I J` and `--info`. Lookup by value is a binary search over positions with the
+`start_index` query (~20 probes), not an SQL index on `start_prime`, which SQLite orders as a
+signed 64-bit integer (wrong above 2^63, where tails now go); counting a range decodes only its two
+end blocks; blocks decode carrying the wheel index (`decode_block`, next to the encoder). Last 1e10
+below 1e18 (241M primes, 148 MB `.blk`, dev PC): count the range 0.002 s vs 2.0 s to sieve it
+again on 12 threads, `--next` 0.003 s, print it all 4.0 s on one thread vs 15.8 s for
+`primesieve -p`. Not done: parallel block decode for `--range` / `--slice`.
 
 ## Compiler, build and PGO
 

@@ -44,10 +44,11 @@ struct Options {
     uint64_t l2_bytes_override = 0;
     uint64_t l1_bytes_override = 0;
 
-    // Benchmarking aids, count-only. --start N0 sieves just [N0, N]: every
-    // base prime is still activated, so a tail of a large N costs what the
-    // same segments cost in a full run (main.cpp sizes its chunks so no core
-    // idles). --debug-idle prints how far apart the threads finished.
+    // --start N0 sieves just [N0, N]: every base prime is still activated,
+    // so a tail of a large N costs what the same segments cost in a full run
+    // (main.cpp sizes its chunks so no core idles). With -o it writes only
+    // that tail (.db positions relative to it, see main()). --debug-idle
+    // prints how far apart the threads finished.
     uint64_t start = 0;
     bool debug_idle = false;
 
@@ -233,10 +234,12 @@ inline void print_usage(const char* prog) {
         "                         primes' sub-block (same case as --l2-bytes)\n"
         "  -h, --help             Show this help\n"
         "\n"
-        "Benchmarking (count mode only, without -o):\n"
-        "      --start N0         Sieve only [N0, N]; the count is that range's,\n"
+        "Ranges and benchmarking:\n"
+        "      --start N0         Sieve only [N0, N]: the count is that range's,\n"
         "                         not pi(N). E.g. N = 1e15 with\n"
-        "                         --start 990e12 is the last 1%%\n"
+        "                         --start 990e12 is the last 1%%. With -o it\n"
+        "                         writes only those primes (in a .db, their\n"
+        "                         positions start at the first prime >= N0)\n"
         "      --debug-idle       Print how far apart the threads finished\n"
         "\n"
         "Fine tuning (--tune key=value, repeatable; see docs/RESEARCH.md):\n"
@@ -257,8 +260,9 @@ inline void print_usage(const char* prog) {
         "  %s 100b -o primes_100b.txt -t 12\n"
         "  %s 100b -t 12\n"
         "  %s 100b -o primes_100b.db -t 12\n"
-        "  %s 1e15 --start 990e12 --debug-idle\n",
-        prog, prog, prog, prog, prog, prog);
+        "  %s 1e15 --start 990e12 --debug-idle\n"
+        "  %s 1e18 --start 999999e12 -o tail.db\n",
+        prog, prog, prog, prog, prog, prog, prog);
 }
 
 inline Options parse_args(int argc, char** argv) {

@@ -45,16 +45,35 @@ inline void encode_gap(uint64_t prev, uint64_t next, std::vector<uint8_t>& out) 
     out.insert(out.end(), buf, buf + sizeof(buf));
 }
 
-// Decodes one gap starting at data[pos], advances pos past it, returns the
-// prime after `prev`. Caller is responsible for bounds-checking pos against
-// the decompressed block size (a well-formed block never reads past its end).
-inline uint64_t decode_gap(const uint8_t* data, size_t& pos, uint64_t prev) {
-    uint8_t b = data[pos++];
-    if (b == 0) {
-        uint32_t d32;
-        std::memcpy(&d32, data + pos, sizeof(d32));
-        pos += sizeof(d32);
-        return prev + d32;
+// Decodes a whole block: `first` (the block's start_prime) and the count - 1
+// gaps after it in data[0, size), into out[0, count). The wheel index is
+// carried from prime to prime, so a 1-byte gap costs one wheel_number (a
+// shift, a multiply, a table load) instead of a wheel_index division per
+// prime. Returns false if the gaps don't fill the block exactly (corrupt).
+inline bool decode_block(const uint8_t* data, size_t size, uint64_t first, uint64_t count, uint64_t* out) {
+    if (count == 0) return size == 0;
+    uint64_t v = first;
+    bool wheel = on_wheel(v);
+    uint64_t k = wheel ? wheel_index(v) : 0;
+    out[0] = v;
+    size_t pos = 0;
+    for (uint64_t i = 1; i < count; ++i) {
+        if (pos >= size) return false;
+        const uint8_t b = data[pos++];
+        if (b != 0) {
+            if (!wheel) return false; // a 1-byte gap is only written after an on-wheel prime
+            k += b;
+            v = wheel_number(k);
+        } else {
+            if (size - pos < 4) return false;
+            uint32_t d32;
+            std::memcpy(&d32, data + pos, sizeof(d32));
+            pos += sizeof(d32);
+            v += d32;
+            wheel = on_wheel(v);
+            if (wheel) k = wheel_index(v);
+        }
+        out[i] = v;
     }
-    return wheel_number(wheel_index(prev) + b);
+    return pos == size;
 }
