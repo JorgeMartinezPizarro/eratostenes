@@ -190,6 +190,8 @@ check_combo "combo disperso"                   -t 3 -s 2000 --db-block-size 1000
 check_combo "combo cortes rebajados"           -t "$THREADS" -s 100000 --tune small=1/2 --tune med64=1/8 --tune sparse=1/2
 check_combo "combo sin med64/disperso"         -t 2 -s 2000 --tune med64=0 --zstd-level 3
 check_combo "combo NTA medio forzado"          -t "$THREADS" -s 100000 --tune medium_nta=1
+check_combo "combo bloque maximo (2^22)"       -t 2 --db-block-size 4194304
+check_combo "combo bloque de 1 primo"          -t 2 -s 100000 --db-block-size 1
 
 # --- 4: round-trip texto vs .db, posicion por posicion ---
 NS2=(100000 1000000 10000000)
@@ -361,6 +363,10 @@ expect_log "N = 1e20: dice el N maximo"            "N too large: 1e20 \($MAXN"  
 expect_log "N = 2^64: dice el N maximo"            "N too large: 18446744073709551616 \($MAXN" 18446744073709551616
 expect_log "N = maximo + 1: dice el N maximo"      "N too large: 18446744004990074880 \($MAXN" 18446744004990074880
 expect_log "--start 1e20: dice el N maximo"        "start too large: 1e20 .*$MAXN"  1e15 --start 1e20
+# --db-block-size fuera de [1, 2^22]: rechazado al leer los argumentos.
+expect_log "--db-block-size 0"                      "db-block-size out of range: 0 \(1 to 4194304"    1000 -o /dev/null.db --db-block-size 0
+expect_log "--db-block-size 1e12"                   "db-block-size out of range: 1e12 \(1 to 4194304" 1000 -o /dev/null.db --db-block-size 1e12
+expect_log "--db-block-size 2^22 + 1"               "db-block-size out of range: 4194305"             1000 -o /dev/null.db --db-block-size 4194305
 # Presupuesto de memoria (--max-mem): a 1e15 cada hilo ~33 MB (1.95M primos base
 # x 8 B + 16 MiB) y ~66 MB compartidos, asi que 150m deja 2 hilos de 4, y 50m ni
 # uno (avisa y corre con 1). El conteo no cambia con menos hilos.

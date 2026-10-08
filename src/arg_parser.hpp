@@ -150,6 +150,10 @@ inline uint64_t parse_size(const std::string& raw) {
 inline constexpr uint64_t MAX_LIMIT = UINT64_MAX - 16 * (uint64_t{1} << 32);
 inline std::string max_limit_text() { return std::to_string(MAX_LIMIT) + " = 2^64 - 2^32 * 16"; }
 
+// --db-block-size bounds: each writer thread buffers ~7 bytes per prime of a
+// block (GapBlockSink), and nth_prime decodes a whole block per query.
+inline constexpr uint64_t MAX_DB_BLOCK_SIZE = uint64_t{1} << 22;
+
 // Strict signed integer for --zstd-level, within zstd's own range
 // (ZSTD_minCLevel()..ZSTD_maxCLevel(), negative levels being zstd's fast
 // modes).
@@ -238,7 +242,7 @@ inline void print_usage(const char* prog) {
         "  -s, --segment-width N  Numeric width of each segment\n"
         "                         (default: auto, derived from N and the L2)\n"
         "      --db-block-size N  Primes per compressed block in .db mode\n"
-        "                         (default: 65536)\n"
+        "                         (default: 65536; at most 4194304)\n"
         "      --zstd-level N     zstd compression level in .db mode\n"
         "                         (default: 1)\n"
         "      --l2-bytes N       Force the L2 size used for the automatic\n"
@@ -304,7 +308,11 @@ inline Options parse_args(int argc, char** argv) {
             opt.segment_width = parse_size(need_value(i, a.c_str()));
             opt.segment_width_set = true;
         } else if (a == "--db-block-size") {
-            opt.db_block_size = parse_size(need_value(i, a.c_str()));
+            const std::string v = need_value(i, a.c_str());
+            opt.db_block_size = parse_size(v);
+            if (opt.db_block_size == 0 || opt.db_block_size > MAX_DB_BLOCK_SIZE)
+                throw std::runtime_error("--db-block-size out of range: " + v + " (1 to " +
+                                         std::to_string(MAX_DB_BLOCK_SIZE) + " primes per block)");
         } else if (a == "--zstd-level") {
             opt.zstd_level = parse_zstd_level(need_value(i, a.c_str()));
         } else if (a == "--max-mem") {
