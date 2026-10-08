@@ -33,7 +33,7 @@ RUN make
 # perf_event_paranoid=3 level only lets CAP_SYS_ADMIN through (checked on
 # the i5-13500 server, 2026-09-28).
 FROM builder AS dev
-ARG PRIMESIEVE_VERSION=12.12
+ARG PRIMESIEVE_VERSION=12.16
 RUN apt-get update && apt-get install -y --no-install-recommends \
         primecount-bin linux-perf cmake git ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
