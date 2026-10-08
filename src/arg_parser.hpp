@@ -154,6 +154,13 @@ inline std::string max_limit_text() { return std::to_string(MAX_LIMIT) + " = 2^6
 // block (GapBlockSink), and nth_prime decodes a whole block per query.
 inline constexpr uint64_t MAX_DB_BLOCK_SIZE = uint64_t{1} << 22;
 
+// -s bound: a 16 MiB segment, the widest the tiers support (segment_sieve.hpp's
+// MAX_SEG_K_WIDTH, 2^27 wheel indices of 30/8 numbers each).
+inline constexpr uint64_t MAX_SEGMENT_WIDTH = (uint64_t{1} << 27) / 8 * 30;
+// --l1-bytes / --l2-bytes bound: far above any cache, low enough that the
+// sizes derived from them (32 x L1d, in bits) can't overflow.
+inline constexpr uint64_t MAX_CACHE_BYTES = uint64_t{1} << 30;
+
 // Strict signed integer for --zstd-level, within zstd's own range
 // (ZSTD_minCLevel()..ZSTD_maxCLevel(), negative levels being zstd's fast
 // modes).
@@ -240,7 +247,8 @@ inline void print_usage(const char* prog) {
         "                         (see above).\n"
         "  -t, --threads N        Number of threads (default: available cores)\n"
         "  -s, --segment-width N  Numeric width of each segment\n"
-        "                         (default: auto, derived from N and the L2)\n"
+        "                         (default: auto, derived from N and the L2;\n"
+        "                         at most 503316480, a 16 MiB segment)\n"
         "      --db-block-size N  Primes per compressed block in .db mode\n"
         "                         (default: 65536; at most 4194304)\n"
         "      --zstd-level N     zstd compression level in .db mode\n"
@@ -305,8 +313,12 @@ inline Options parse_args(int argc, char** argv) {
         } else if (a == "-t" || a == "--threads") {
             opt.threads = parse_threads(need_value(i, a.c_str()));
         } else if (a == "-s" || a == "--segment-width") {
-            opt.segment_width = parse_size(need_value(i, a.c_str()));
+            const std::string v = need_value(i, a.c_str());
+            opt.segment_width = parse_size(v);
             opt.segment_width_set = true;
+            if (opt.segment_width > MAX_SEGMENT_WIDTH)
+                throw std::runtime_error("-s too large: " + v + " (at most " + std::to_string(MAX_SEGMENT_WIDTH) +
+                                         ", a 16 MiB segment)");
         } else if (a == "--db-block-size") {
             const std::string v = need_value(i, a.c_str());
             opt.db_block_size = parse_size(v);
@@ -318,10 +330,12 @@ inline Options parse_args(int argc, char** argv) {
         } else if (a == "--max-mem") {
             opt.max_mem = parse_size(need_value(i, a.c_str()));
             opt.max_mem_set = true;
-        } else if (a == "--l2-bytes") {
-            opt.l2_bytes_override = parse_size(need_value(i, a.c_str()));
-        } else if (a == "--l1-bytes") {
-            opt.l1_bytes_override = parse_size(need_value(i, a.c_str()));
+        } else if (a == "--l2-bytes" || a == "--l1-bytes") {
+            const std::string v = need_value(i, a.c_str());
+            const uint64_t bytes = parse_size(v);
+            if (bytes > MAX_CACHE_BYTES)
+                throw std::runtime_error(a + " too large: " + v + " (at most " + std::to_string(MAX_CACHE_BYTES) + ")");
+            (a == "--l2-bytes" ? opt.l2_bytes_override : opt.l1_bytes_override) = bytes;
         } else if (a == "--start") {
             const std::string v = need_value(i, a.c_str());
             try {

@@ -21,6 +21,17 @@
 #include "wheel.hpp"
 #include "wheel210_big.hpp"
 
+// The widest segment the tiers' packed state supports: 16 MiB, the sparse
+// entry's 24-bit byte position (SparseTier). tuning.hpp keeps every
+// segment within it.
+constexpr uint64_t MAX_SEG_K_WIDTH = uint64_t{1} << 27;
+// Dense primes are p < the segment width, so p / 30 fits DenseState's qp
+// field and a pending hit stays within a few segments (its 32-bit pos); a
+// medium hit's byte position, at most one segment plus one step (qp * 10 +
+// 16), fits cross_off_medium's 26 bits.
+static_assert(MAX_SEG_K_WIDTH / WHEEL_MOD < erat::QP_LIMIT && MAX_SEG_K_WIDTH < (uint64_t{1} << 30));
+static_assert(MAX_SEG_K_WIDTH / 8 + MAX_SEG_K_WIDTH / WHEEL_MOD * 10 + 16 < erat::MEDIUM_POS_LIMIT);
+
 class SegmentSieve {
 public:
     // seg_k_width: wheel-index width of a full segment (the last one of a
@@ -35,30 +46,11 @@ public:
     SegmentSieve(uint64_t seg_k_width, uint64_t base_prime_max, const Presieve& presieve,
                  uint64_t sub_block_bytes, bool has_sparse, bool medium_nta,
                  bool huge_arenas = false)
-        : words_((seg_k_width + 63) / 64, 0),
+        : words_(checked_words(seg_k_width, sub_block_bytes), 0),
           sub_block_bytes_(sub_block_bytes),
           medium_nta_(medium_nta),
           presieve_(presieve),
-          sparse_(seg_k_width / 8, base_prime_max, has_sparse, huge_arenas) {
-        // The byte-addressed dense tiers (erat_small.hpp) need every
-        // segment to start on a byte (k multiple of 8) and to stay a whole
-        // number of words; callers align chunk starts to 64 too.
-        if (seg_k_width % 64 != 0 || sub_block_bytes % 8 != 0 || sub_block_bytes == 0) {
-            throw std::runtime_error("SegmentSieve: segment/sub-block width not aligned");
-        }
-        // Dense primes are p < seg_k_width, so their pending hit stays
-        // within a few segment widths of the segment start (fits
-        // DenseState::pos), and p / 30 has to fit its packed qp field.
-        if (seg_k_width / WHEEL_MOD >= erat::QP_LIMIT || seg_k_width >= (uint64_t{1} << 30)) {
-            throw std::runtime_error("SegmentSieve: segment too large for the packed dense state");
-        }
-        // Medium tier packs a pending hit's byte position into 26 bits
-        // (erat_small.hpp::cross_off_medium): at most one segment plus one
-        // step of a medium prime (p < seg_k_width, step <= qp * 10 + 16).
-        if (seg_k_width / 8 + seg_k_width / WHEEL_MOD * 10 + 16 >= erat::MEDIUM_POS_LIMIT) {
-            throw std::runtime_error("SegmentSieve: segment too large for the medium-tier state");
-        }
-    }
+          sparse_(seg_k_width / 8, base_prime_max, has_sparse, huge_arenas) {}
 
     // Wheel indices below k are marked composite before extraction (the
     // number 1, and the numbers below a --start that split_ranges rounded
@@ -193,6 +185,17 @@ public:
     }
 
 private:
+    // The segment's word count, its widths checked first (before the
+    // allocation): whole words, so every segment starts on a byte for the
+    // byte-addressed dense tiers, and within MAX_SEG_K_WIDTH.
+    static size_t checked_words(uint64_t seg_k_width, uint64_t sub_block_bytes) {
+        if (seg_k_width == 0 || seg_k_width % 64 != 0 || sub_block_bytes % 8 != 0 || sub_block_bytes == 0)
+            throw std::runtime_error("SegmentSieve: segment/sub-block width not aligned");
+        if (seg_k_width > MAX_SEG_K_WIDTH)
+            throw std::runtime_error("SegmentSieve: segment wider than MAX_SEG_K_WIDTH");
+        return (seg_k_width + 63) / 64;
+    }
+
     // Count-only (NullSink): a plain popcount over the full words with four
     // accumulators; the partial last word is masked once after the loop, not
     // tested per word (GCC turns that into a cmove chain).

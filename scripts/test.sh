@@ -348,7 +348,7 @@ expect_log() {
     local label="$1" pattern="$2"; shift 2
     local out
     out=$("$BIN" "$@" 2>&1 >/dev/null)
-    if echo "$out" | grep -qE "$pattern"; then
+    if echo "$out" | grep -qE -- "$pattern"; then
         printf "OK   %-40s %s\n" "$label" "$pattern"
     else
         printf "FAIL %-40s no aparece '%s'\n" "$label" "$pattern"
@@ -367,6 +367,16 @@ expect_log "--start 1e20: dice el N maximo"        "start too large: 1e20 .*$MAX
 expect_log "--db-block-size 0"                      "db-block-size out of range: 0 \(1 to 4194304"    1000 -o /dev/null.db --db-block-size 0
 expect_log "--db-block-size 1e12"                   "db-block-size out of range: 1e12 \(1 to 4194304" 1000 -o /dev/null.db --db-block-size 1e12
 expect_log "--db-block-size 2^22 + 1"               "db-block-size out of range: 4194305"             1000 -o /dev/null.db --db-block-size 4194305
+# El segmento mas ancho que admiten los tiers es de 16 MiB: -s por encima se
+# rechaza, --l1-bytes/--l2-bytes por encima de 1 GiB tambien, y un segmento
+# automatico que pase de 16 MiB se recorta (y cuenta bien). -s en el maximo,
+# con primos sparse (1.4e8^2 < 2e16), cuenta bien.
+expect_log "-s 1e9"                                 "-s too large: 1e9 \(at most 503316480"           1000 -s 1e9
+expect_log "--l1-bytes 1e18"                        "--l1-bytes too large: 1e18 \(at most 1073741824" 1000 --l1-bytes 1e18
+expect_log "--l2-bytes 2g"                          "--l2-bytes too large: 2g"                        1000 --l2-bytes 2g
+expect_log "caches de 1 GiB: segmento de 16 MiB"    "16384 KiB instead of .*the widest the tiers support" 1e10 --start 9999000000 --l1-bytes 1g --l2-bytes 1g
+check_start 10000000000 9999000000 -t 2 --l1-bytes 1g --l2-bytes 1g
+check_start 20000000000000000 19999900000000000 -t 2 -s 503316480
 # Presupuesto de memoria (--max-mem): a 1e15 cada hilo ~33 MB (1.95M primos base
 # x 8 B + 16 MiB) y ~66 MB compartidos, asi que 150m deja 2 hilos de 4, y 50m ni
 # uno (avisa y corre con 1). El conteo no cambia con menos hilos.

@@ -300,7 +300,9 @@ overrides for when detection can't be trusted) rather than a fixed guess:
   32 x L1d) rather than half: the half is the hyperthread sibling's share, and
   with every base prime dense the medium tier's per-segment cost dominates
   (-8..-13% at 1e13 on a 2-vCPU Xeon with 1 MiB L2 per vCPU). The startup log
-  says when either rule applies.
+  says when either rule applies. No segment is ever wider than 16 MiB, the widest
+  the tiers' packed state supports (`-s` above it is an error; forced cache sizes
+  that would ask for more are cut down to it).
 - **Small-tier sub-block**: half the detected L1d -- that tier's whole point (§6)
   is keeping its marks inside L1, and the other half is the hyperthread sibling's
   share. When no more threads run than physical cores with the largest L1d

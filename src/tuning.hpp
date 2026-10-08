@@ -23,7 +23,10 @@
 #include "colors.hpp"
 #include "cpu_cache.hpp"
 #include "presieve.hpp"
+#include "segment_sieve.hpp"
 #include "wheel.hpp"
+
+static_assert(MAX_SEGMENT_WIDTH / 30 * 8 == MAX_SEG_K_WIDTH, "-s's bound is the widest segment");
 
 // What main() decides once for a run and the workers read: sizes the tiers
 // are built with and the scheduler's knobs. Set from the detected caches,
@@ -86,8 +89,8 @@ struct SievePlan {
     bool whole_l2_base = false;
     bool sub_block_whole_l1d = false;
     uint64_t base_count = 0;
-    uint64_t min_l2_share = 0;
     uint64_t seg_l1_capped_k = 0, seg_uncapped_k = 0, seg_unrounded_k = 0; // widths before a cap / fixup
+    uint64_t seg_max_capped_k = 0;
 
     const TierSet& tiers_for(const ChunkRange& r) const { return r.high <= narrow_k_end ? narrow : wide; }
 
@@ -201,7 +204,7 @@ inline SievePlan plan_sieve(const Options& opt, const BasePrimes& base, uint64_t
     const CpuCacheTopology topo = detect_cpu_cache_topology();
     // Smallest L2 share per hardware thread (0: undetected); the whole-L2
     // base, the segment ceiling and the sparse cutoff below use it too.
-    uint64_t& min_l2_share = P.min_l2_share;
+    uint64_t min_l2_share = 0;
     for (uint64_t s : topo.l2_share)
         if (s && (min_l2_share == 0 || s < min_l2_share)) min_l2_share = s;
     if (!opt.segment_width_set && !opt.l2_bytes_override && !topo.l2_share.empty() && topo.l2_share[0] &&
@@ -296,6 +299,12 @@ inline SievePlan plan_sieve(const Options& opt, const BasePrimes& base, uint64_t
             P.seg_uncapped_k = seg_k_width;
             seg_k_width = cap_k;
         }
+    }
+    // The widest segment the tiers support (16 MiB): only forced cache sizes
+    // or a made-up topology reach it.
+    if (seg_k_width > MAX_SEG_K_WIDTH) {
+        P.seg_max_capped_k = seg_k_width;
+        seg_k_width = MAX_SEG_K_WIDTH;
     }
 
     // Medium/sparse cutoff: sparse_limit = seg_k_width * NUM / DEN. Primes
@@ -468,14 +477,18 @@ inline void print_plan(const SievePlan& P, const Options& opt, unsigned actual_t
         std::fprintf(stderr, "  segment: whole L2 per thread (%u threads <= %u cores, no sparse tier)\n",
                      opt.threads, P.l1_big_cores);
     if (P.seg_l1_capped_k)
-        std::fprintf(stderr, "  segment: %llu KiB instead of %llu KiB (cap: 32 x L1d; sysfs reports %llu KiB of L2 per thread)\n",
+        std::fprintf(stderr, "  segment: %llu KiB instead of %llu KiB (cap: 32 x L1d; half of an L2 of %llu KiB)\n",
                      static_cast<unsigned long long>(P.seg_k_width / 8 / 1024),
                      static_cast<unsigned long long>(P.seg_l1_capped_k / 8 / 1024),
-                     static_cast<unsigned long long>(P.min_l2_share / 1024));
+                     static_cast<unsigned long long>(P.seg_l1_capped_k / 8 * 2 / 1024));
     if (P.seg_uncapped_k)
         std::fprintf(stderr, "  segment: %llu KiB instead of %llu KiB (ceiling: the L2 per thread, 16-32 x L1d)\n",
                      static_cast<unsigned long long>(P.seg_k_width / 8 / 1024),
                      static_cast<unsigned long long>(P.seg_uncapped_k / 8 / 1024));
+    if (P.seg_max_capped_k)
+        std::fprintf(stderr, "  segment: %llu KiB instead of %llu KiB (the widest the tiers support)\n",
+                     static_cast<unsigned long long>(P.seg_k_width / 8 / 1024),
+                     static_cast<unsigned long long>(P.seg_max_capped_k / 8 / 1024));
     if (P.seg_unrounded_k)
         std::fprintf(stderr, "  segment: %llu KiB instead of the %llu KiB of -s (a power of 2 for the sparse tier)\n",
                      static_cast<unsigned long long>(P.seg_k_width / 8 / 1024),
