@@ -716,6 +716,12 @@ int main(int argc, char** argv) {
     const BasePrimes base = sieve_base_primes(base_limit, presieve, opt.threads);
     std::fprintf(stderr, "  %llu base primes found.\n", static_cast<unsigned long long>(base.count));
 
+    // Fewer threads when they wouldn't fit the memory budget, before the plan
+    // so its per-thread choices (huge arenas, the L3-per-thread cutoff) see
+    // the threads that will run.
+    const MemCap mem = cap_threads_by_memory(opt, base);
+    opt.threads = mem.threads;
+
     SievePlan P = plan_sieve(opt, base, base_limit);
 
     // Many more, narrower chunks than threads, so the steals between
@@ -786,6 +792,16 @@ int main(int argc, char** argv) {
     uint64_t total_span = ranges.back().high - ranges.front().low;
 
     print_plan(P, opt, actual_threads, ranges);
+    if (mem.capped() || mem.over()) {
+        const auto gib = [](uint64_t b) { return static_cast<double>(b) / (1u << 30); };
+        const char* why = mem.from_flag ? "--max-mem" : "90% of the available RAM";
+        if (mem.capped())
+            std::fprintf(stderr, "  memory: %u threads instead of %u (~%.2f GiB each + %.2f GiB shared; budget %.2f GiB, %s)\n",
+                         mem.threads, mem.requested, gib(mem.per_thread), gib(mem.shared), gib(mem.budget), why);
+        if (mem.over())
+            std::fprintf(stderr, "  memory: WARNING: ~%.2f GiB for %u thread(s) is over the budget of %.2f GiB (%s); the run may not fit\n",
+                         gib(mem.shared + mem.per_thread * mem.threads), mem.threads, gib(mem.budget), why);
+    }
 
     // Every pass runs worker threads that can throw (pwrite() on a full disk,
     // or the bucket-sieve sizing check) -- see run_parallel_chunks for why

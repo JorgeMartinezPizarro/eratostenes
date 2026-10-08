@@ -60,6 +60,10 @@ outside the container.
       --zstd-level N      zstd compression level in .db mode (default: 1)
       --start N0          Only the range [N0, N]: count it, or with -o
                           write just its primes
+      --max-mem N         Memory the run may take, e.g. 8g (default: 90% of
+                          the available RAM; 0 = no limit): fewer threads
+                          run when they wouldn't fit (each keeps ~8 bytes
+                          per prime up to sqrt(N): ~1.5 GiB near 2^64)
   -h, --help              Help
 ```
 

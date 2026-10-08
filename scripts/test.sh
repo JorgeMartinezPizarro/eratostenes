@@ -361,6 +361,12 @@ expect_log "N = 1e20: dice el N maximo"            "N too large: 1e20 \($MAXN"  
 expect_log "N = 2^64: dice el N maximo"            "N too large: 18446744073709551616 \($MAXN" 18446744073709551616
 expect_log "N = maximo + 1: dice el N maximo"      "N too large: 18446744004990074880 \($MAXN" 18446744004990074880
 expect_log "--start 1e20: dice el N maximo"        "start too large: 1e20 .*$MAXN"  1e15 --start 1e20
+# Presupuesto de memoria (--max-mem): a 1e15 cada hilo ~33 MB (1.95M primos base
+# x 8 B + 16 MiB) y ~66 MB compartidos, asi que 150m deja 2 hilos de 4, y 50m ni
+# uno (avisa y corre con 1). El conteo no cambia con menos hilos.
+expect_log "--max-mem: menos hilos"           "memory: 2 threads instead of 4"   1e15 --start 999999999990000 -t 4 --max-mem 150m
+expect_log "--max-mem: ni un hilo cabe"       "WARNING: .*may not fit"           1e15 --start 999999999990000 -t 4 --max-mem 50m
+check_start 1000000000000000 999999999990000 -t 4 --max-mem 150m
 T13="10000000000000 --start 9999999000000 -t 2"
 T15="1000000000000000 --start 999999999000000 -t 2"
 # base 4 MiB from an 8 MiB L2, capped to 32 x 4 KiB = 128 KiB (3932160 numbers)

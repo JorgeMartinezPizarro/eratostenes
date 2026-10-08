@@ -44,6 +44,14 @@ struct Options {
     uint64_t l2_bytes_override = 0;
     uint64_t l1_bytes_override = 0;
 
+    // --max-mem: the memory the run may take, in bytes (0 = no limit). Not
+    // set: 90% of the available RAM. Every thread keeps its own ring of the
+    // ~pi(sqrt N) sparse primes (1.5 GiB each at the 64-bit ceiling), so
+    // main() runs fewer threads when they wouldn't fit (tuning.hpp's
+    // cap_threads_by_memory).
+    uint64_t max_mem = 0;
+    bool max_mem_set = false;
+
     // --start N0 sieves just [N0, N]: every base prime is still activated,
     // so a tail of a large N costs what the same segments cost in a full run
     // (main.cpp sizes its chunks so no core idles). With -o it writes only
@@ -251,6 +259,10 @@ inline void print_usage(const char* prog) {
         "                         inside a container)\n"
         "      --l1-bytes N       Force the L1 (data) size used for the small\n"
         "                         primes' sub-block (same case as --l2-bytes)\n"
+        "      --max-mem N        Memory the run may take, in bytes, e.g. 8g\n"
+        "                         (default: 90%% of the available RAM; 0 = no\n"
+        "                         limit). Fewer threads run when they wouldn't\n"
+        "                         fit: each keeps ~8 bytes per prime up to sqrt(N)\n"
         "  -h, --help             Show this help\n"
         "\n"
         "Ranges and benchmarking:\n"
@@ -307,6 +319,9 @@ inline Options parse_args(int argc, char** argv) {
             opt.db_block_size = parse_size(need_value(i, a.c_str()));
         } else if (a == "--zstd-level") {
             opt.zstd_level = parse_zstd_level(need_value(i, a.c_str()));
+        } else if (a == "--max-mem") {
+            opt.max_mem = parse_size(need_value(i, a.c_str()));
+            opt.max_mem_set = true;
         } else if (a == "--l2-bytes") {
             opt.l2_bytes_override = parse_size(need_value(i, a.c_str()));
         } else if (a == "--l1-bytes") {

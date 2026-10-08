@@ -13,7 +13,9 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <fstream>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include "arg_parser.hpp"
@@ -99,6 +101,59 @@ struct SievePlan {
         if (l1_big_cores && actual_threads <= l1_big_cores) { cfg.sub_block_bytes *= 2; sub_block_whole_l1d = true; }
     }
 };
+
+// MemAvailable from /proc/meminfo, in bytes; 0 when unknown (not Linux).
+inline uint64_t mem_available_bytes() {
+    std::ifstream f("/proc/meminfo");
+    std::string key;
+    uint64_t kib = 0;
+    std::string unit;
+    while (f >> key >> kib >> unit)
+        if (key == "MemAvailable:") return kib * 1024;
+    return 0;
+}
+
+// The threads the run's memory allows. Each worker keeps its own state for
+// every base prime -- the sparse ring holds one 8-byte entry per sparse prime
+// (whatever chunk the worker is on, a fresh start activates them all up to
+// sqrt of its first segment) and the dense tiers about as much per prime --
+// so a worker takes ~8 B x pi(sqrt N) (x 1.02: a 16-byte header per 4 KiB
+// ring block), plus a fixed ~16 MiB (segment buffers for both tier sets, the
+// arena granularity, partly filled blocks, an output buffer). Shared: the
+// base-prime bitmap and its rank index, plus 64 MiB. Measured peaks at the
+// 64-bit ceiling (pi(sqrt N) = 203M): 9.24-9.38 GiB on 6 threads and 17.99
+// on 12, against estimates of 9.6 and 18.9 GiB.
+//
+// Budget: --max-mem, or 90% of MemAvailable (0 / unknown: no cap). A run
+// that doesn't fit is killed by the kernel mid-way (the 1e18 tails were
+// skipped on the 8 GB machines for that); with the cap it runs on fewer
+// threads instead, which at these heights loses little or nothing -- the
+// sparse tier is bound by DRAM bandwidth there, and the i5-11400F and the
+// i5-13500 were both fastest at 6 threads on the ceiling's tail
+// (docs/RESEARCH.md).
+struct MemCap {
+    unsigned threads = 0;     // the threads to run
+    unsigned requested = 0;   // -t (or the core count)
+    uint64_t per_thread = 0;  // estimated bytes per worker
+    uint64_t shared = 0;      // estimated bytes shared by all
+    uint64_t budget = 0;      // bytes the run may take, 0 = no cap
+    bool from_flag = false;   // budget given by --max-mem
+    bool capped() const { return threads < requested; }
+    bool over() const { return budget && shared + per_thread * threads > budget; } // even one thread doesn't fit
+};
+inline MemCap cap_threads_by_memory(const Options& opt, const BasePrimes& base) {
+    MemCap c;
+    c.requested = c.threads = opt.threads;
+    c.per_thread = base.count * 8 * 102 / 100 + (uint64_t{16} << 20);
+    c.shared = (base.bits.size() + base.rank.size()) * 8 + (uint64_t{64} << 20);
+    c.from_flag = opt.max_mem_set;
+    c.budget = opt.max_mem_set ? opt.max_mem : mem_available_bytes() / 10 * 9;
+    if (c.budget == 0) return c;
+    const uint64_t room = c.budget > c.shared ? c.budget - c.shared : 0;
+    const uint64_t fit = room / c.per_thread;
+    if (fit < c.threads) c.threads = static_cast<unsigned>(std::max<uint64_t>(fit, 1));
+    return c;
+}
 
 inline SievePlan plan_sieve(const Options& opt, const BasePrimes& base, uint64_t base_limit) {
     SievePlan P;

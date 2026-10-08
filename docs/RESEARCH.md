@@ -89,6 +89,8 @@ What is in the code today, by the day it went in:
   narrow windows: [no filing past N](#activation-sparse-primes-with-no-multiple-up-to-n-arent-filed-kept-2026-10-07)
   and the [base primes on the wheel bitmap](#base-primes-sieved-into-the-wheel-bitmap-with-the-main-sieves-kernels-kept-2026-10-07);
   [tails to the 64-bit ceiling checked against primecount](#tails-up-to-the-64-bit-ceiling-at-6-threads-checked-against-primecount-2026-10-07).
+- **2026-10-08**: error messages name the largest N; [threads vs tail height](#threads-vs-tail-height-dram-bandwidth-caps-the-sparse-tier-near-264-a-memory-budget-kept-2026-10-08)
+  measured (DRAM bandwidth past ~1e18) and a memory budget, `--max-mem`.
 
 ## Contents
 
@@ -1091,6 +1093,49 @@ Every count equals primesieve's and pi(N) - pi(N - 1e11) from primecount 7.16 (i
 analytic method, no sieve): all seven, the ceiling window included. Memory is ~threads x 8 B x
 pi(sqrt N) in both programs (every thread files every sparse prime into its own ring): pi(2^32) =
 203,280,221, ~1.6 GB per thread at the ceiling, ~32 GB with 20 threads.
+
+### Threads vs tail height: DRAM bandwidth caps the sparse tier near 2^64; a memory budget (kept, 2026-10-08)
+
+The server's ceiling tail (last 1e11 below 2^64 - 2^32 * 16) took 12.85 s on 3 threads and 11.94 s on
+20, primesieve 14.46 and 13.48 s: 6.7x the threads for 7%, at 6.7x the memory. Curves at that tail,
+wall time, peak RSS (`VmHWM`) and `--debug-idle`'s activation cost:
+
+| threads | i5-11400F (6C/12T) | activation | i5-13500 (6P+8E/20T) | peak RSS | activation | primesieve 13500 |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 47.07 s | 9.8 ns | 34.04 s | 1.68 GiB | 5.5 ns | 36.81 s |
+| 4 | 17.18 s | 11.0 ns | 10.73 s | 6.29 GiB | 6.0 ns | 12.96 s |
+| 6 | **14.73 s** | 13.1 ns | **9.17 s** | 9.38 GiB | 7.1 ns | **10.93 s** |
+| 12 | 18.91 s | 32.2 ns | 11.84 s | 18.06 GiB | 12.2 ns | 12.67 s |
+| 20 | -- | -- | 12.29 s | 29.61 GiB | 17.9 ns | 13.48 s |
+
+Both machines, both programs, fastest at 6 threads -- the core count of one and the P-core count of
+the other, and two DDR channels on both. Past it the sparse tier's ring (1.5 GiB per thread) is
+served from DRAM at the bandwidth's floor, and every extra thread only adds its activation (203M
+primes, each a random write into its ring), which itself slows as the threads share the bandwidth
+(5.5 -> 17.9 ns per prime). 14 threads, one per physical core, was 11.72 s: the limit is the
+memory, not the cores. How high that regime starts, i5-13500, last 1e11 below N, mean of 2:
+
+| N | 6 threads | 10 | 14 | 20 | best |
+|---|---:|---:|---:|---:|---:|
+| 1e14 | 4.16 s | 4.12 s | 3.95 s | **3.71 s** | 20 |
+| 1e15 | 4.83 s | 4.67 s | 4.57 s | **4.33 s** | 20 |
+| 1e16 | 5.35 s | 5.15 s | 5.25 s | **4.97 s** | 20 |
+| 1e17 | 6.08 s | 5.92 s | 5.96 s | **5.80 s** | 20 |
+| 1e18 | **6.91 s** | 7.11 s | 7.46 s | 7.27 s | 6 |
+| ceiling | **9.17 s** | 11.02 s | 11.72 s | 13.15 s | 6 |
+
+The crossing is between 1e17 and 1e18; below it every thread helps. No thread rule is taken from
+this: the knee is a property of the memory system, not of anything sysfs reports (`l1_big_cores`
+would say 6 on both machines by accident, and 2 on the i5-1235U). Open: find it at run time, by
+starting workers in steps and adding one only while the measured throughput gain pays its
+activation (the scheduler already measures both for its steals).
+
+What went in is the safety half: `cap_threads_by_memory` (tuning.hpp) estimates a worker at ~8 B x
+pi(sqrt N) x 1.02 + 16 MiB and the shared part at the base-prime bitmap + 64 MiB (ceiling: 9.6 GiB
+estimated vs 9.24-9.38 measured on 6 threads, 18.9 vs 17.99 on 12) and runs fewer threads when
+they wouldn't fit 90% of `MemAvailable`, or `--max-mem` (0 = no limit), before `plan_sieve` so the
+per-thread choices see them; the startup log says so. Dev PC: the ceiling tail with `-t 6 --max-mem
+8g` ran on 4 threads, 17.41 s (6 threads: 15.84 s, 12: 17.72 s), counts equal. `make test` 122/122.
 
 ### `-t 2` gap vs primesieve at the 1e15 tail: profile and sparse cutoff by thread count (measured, not adopted, 2026-10-01)
 
