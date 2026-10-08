@@ -4,19 +4,16 @@
 #   CPU: runs both eratostenes and primesieve at N=1e10..1e13 and prints
 #      a markdown table with the ratio between them.
 #
-#      Requires primesieve on PATH (https://github.com/kimwalisch/primesieve
-#      -- `apt-get install primesieve` on Debian/Ubuntu/WSL) for the
-#      comparison column; the script aborts with a clear message if it's
-#      missing rather than silently only benchmarking eratostenes.
+#      Requires primesieve on PATH (https://github.com/kimwalisch/primesieve,
+#      built from the same tag on every machine: docs/ISSUES.md) for the
+#      comparison column; the script aborts if it's missing.
 #
-#      -s is deliberately *not* passed by default: the CLI's own auto
-#      default (sized from N and the machine's real L2/L3, see
-#      src/arg_parser.hpp) is what this project actually recommends running
-#      with, so that's what gets benchmarked. Set SEGMENT to force a
-#      specific width instead (e.g. to compare against the auto default).
+#      -s is deliberately *not* passed by default: the CLI's own automatic
+#      width (src/tuning.hpp, from N and the machine's caches) is what this
+#      project recommends running with, so that's what gets benchmarked. Set
+#      SEGMENT to force a specific width instead.
 #
-# The .db I/O sweep that used to follow lives in scripts/benchmark_io.sh
-# (make benchmark-io).
+# The .db I/O sweep is scripts/benchmark_io.sh (make benchmark-io).
 #
 # Usage: ./scripts/benchmark.sh
 # Env overrides:
@@ -28,13 +25,10 @@
 #            one's mean (default: 1). Note that at N=1e13 each primesieve
 #            run costs minutes too.
 #
-# Pairs and means, not "primesieve once, then the best of REPS": the first
-# seconds of a run from an idle machine are faster than its sustained
-# speed, and whichever program ran first took them. Interleaving the pairs
-# and alternating the order shares that evenly, and the mean of REPS
-# converges on the sustained speed, which is what a count of hours sees
-# (docs/RESEARCH.md, "Two power regimes on every machine"). Reps run back
-# to back, with no pause between them.
+# Pairs and means, not "primesieve once, then the best of REPS": a
+# machine's speed drifts over a session, and interleaving the pairs and
+# alternating which program goes first shares that drift evenly between
+# both. Reps run back to back, with no pause between them.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -44,7 +38,7 @@ SEGMENT="${SEGMENT:-}"
 REPS="${REPS:-1}"
 
 if ! command -v primesieve >/dev/null 2>&1; then
-    echo "primesieve no esta en el PATH -- instalalo (apt-get install primesieve)" >&2
+    echo "primesieve no esta en el PATH -- instalalo (docs/ISSUES.md: la misma version en todas las maquinas)" >&2
     echo "para poder generar la columna de comparacion." >&2
     exit 1
 fi

@@ -14,10 +14,10 @@
 #      posicion (todas en el N mas chico, una muestra aleatoria en los
 #      demas -- comprobar cada posicion via nth_prime implica un proceso
 #      por consulta, caro a partir de cientos de miles de primos), el mismo
-#      primo en ambos formatos (antes scripts/verify_db.sh, fusionado aqui).
+#      primo en ambos formatos.
 #   5. Modo conteo en N=1e10 contra primecount con los caminos que solo
-#      aparecen con N grande o -s pequeño (tier disperso forzado, en rueda
-#      mod 2310 y mod 210; sin med64; cortes rebajados, combinados), y
+#      aparecen con N grande o -s pequeño (tier disperso forzado; sin
+#      med64; cortes rebajados, combinados), y
 #      --start sobre varios tramos (el recuento es pi(N) - pi(N0 - 1)),
 #      uno de ellos por encima de 2^53 (parseo exacto de N).
 #   6. Limites pequenos (N < 2, N < 7) en los tres modos, argumentos que deben
@@ -268,13 +268,11 @@ check_start 100000000 7 -t 2 -s 20000
 # que leerlo via double lo redondeaba a ...996 y el tramo perdia ese primo.
 check_start 9007199254740997 9007199254739761 -t "$THREADS"
 # Arranque no alineado a 64 indices de la rueda (19999900000000000 = 10 mod 30):
-# split_ranges redondea hacia abajo y los primos de esa cabecera no cuentan
-# (3 de mas hasta 2026-10-04).
+# split_ranges redondea hacia abajo y los primos de esa cabecera no deben contar.
 check_start 20000000000000000 19999900000000000 -t 2
 check_start 20000000000000000 19999900000000000 -t 1
 # Un primo de arranque cuyo indice de rueda es 63 mod 64 (239 -> 63, 2399 ->
-# 639): split_ranges lo dejaba fuera del primer chunk (una menos que
-# primesieve hasta 2026-10-05); 240 con --start 239 cribaba un rango vacio.
+# 639) debe entrar en el primer chunk; 240 con --start 239 no es un rango vacio.
 check_start 1000000 239 -t 2
 check_start 1000000 2399 -t 1
 check_start 240 239
@@ -357,7 +355,7 @@ expect_log() {
     fi
 }
 # Un N o un --start que no cabe en 64 bits nombra el N maximo, no el limite de
-# 64 bits (antes: "size out of range: 1e20", sin el maximo; 2026-10-08).
+# 64 bits.
 MAXN="at most 18446744004990074879"
 expect_log "N = 1e20: dice el N maximo"            "N too large: 1e20 \($MAXN"        1e20
 expect_log "N = 2^64: dice el N maximo"            "N too large: 18446744073709551616 \($MAXN" 18446744073709551616
@@ -433,7 +431,7 @@ fi
 # errores que nth_prime debe detectar ---
 check_start 1000000000000000 999999900000000 -t 2
 # Ventana estrecha: casi ningun primo base tiene multiplo en ella, y los que
-# no lo tienen ya no se archivan en el anillo (set_range_end).
+# no lo tienen no se archivan en el anillo (set_range_end).
 check_start 1000000000000000 999999999990000 -t 3
 check_start 1000000000000000 999999999990000 -t 1
 

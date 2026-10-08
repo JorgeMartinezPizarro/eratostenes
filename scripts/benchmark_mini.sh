@@ -2,7 +2,7 @@
 # Short diagnostic for a machine the auto-tuning has never seen (old or odd
 # hardware, a VM with a strange topology): what sysfs says about the caches,
 # what the CLI chose from it, and a sweep of the knobs that choice drives
-# (segment width, sparse cutoff, med64/medium prefetchnta). Every
+# (segment width, tier cutoffs, medium-tier prefetchnta). Every
 # configuration is paired with its own primesieve run on the same window,
 # so a machine whose state drifts during the sweep (another load, a host
 # change, a thermal step) shows up as a drift in primesieve's times instead
@@ -29,7 +29,7 @@ WIDTH_IN="${WIDTH:-1e10}"
 SEGMENTS="${SEGMENTS:-3932160 7864320 15728640 31457280}"
 
 if ! command -v primesieve >/dev/null 2>&1; then
-    echo "primesieve no esta en el PATH -- instalalo (apt-get install primesieve)." >&2
+    echo "primesieve no esta en el PATH -- instalalo (docs/ISSUES.md: la misma version en todas las maquinas)." >&2
     exit 1
 fi
 if [ ! -x "$BIN" ]; then
@@ -72,7 +72,7 @@ run_e() { # ENVSTRING ARGS... -> t_e, c_e, startup (the config lines of the log)
     out=$(env $envs "$BIN" "$N" --start "$START" -t "$THREADS" "$@" 2>&1) || { echo "$out" >&2; exit 1; }
     t_e=$(echo "$out" | sed -nE 's/.*total: *([0-9.]+)s.*/\1/p')
     c_e=$(echo "$out" | sed -nE 's/.*Done\. ([0-9,]+) primes.*/\1/p' | tr -d ',')
-    startup=$(echo "$out" | grep -E '^Starting|^  (segment|sub-block|sparse cutoff|sparse ring|med64:|medium-tier prefetchnta)' \
+    startup=$(echo "$out" | grep -E '^Starting|^  (segment|sub-block|sparse cutoff|sparse ring|small cutoff|med64 cutoff|medium-tier prefetchnta)' \
         | sed -E 's/^Starting [0-9]+ threads, limit=[0-9]+, (segment=[0-9]+), wheel mod [0-9]+ \([0-9]+ primes\), ([0-9]+ small[^,]*\(sub-block [^)]*\))?.*/\1 \2/')
 }
 ratio() { awk -v a="$1" -v b="$2" 'BEGIN{ if (b > 0) printf "%.2fx", a / b; else printf "?" }'; }
@@ -115,7 +115,6 @@ for cfg in "--tune sparse=1/1" "--tune sparse=1/2" "--tune sparse=1/4" "--tune m
     # shellcheck disable=SC2086
     pair "$best_label $cfg" "" "${seg_args[@]}" $cfg
 done
-pair "$best_label med64 NTA off" "ERATOSTENES_MED64_NTA=0" "${seg_args[@]}"
 
 echo "== control: auto again (drift check against the first pair)"
 pair "auto (again)" ""

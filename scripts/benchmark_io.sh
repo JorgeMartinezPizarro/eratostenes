@@ -1,23 +1,18 @@
 #!/bin/bash
-# Disk I/O sweep: builds a real .db per N in 1e8..1e12 and prints a table
+# Disk I/O sweep: builds a real .db per N in 1e8..1e13 and prints a table
 # (meant for README.md#database) with file size, bits/prime, effective
 # throughput and total time that the binary itself reports. .db output is a
-# single sieve+encode+write pass (no separate count pre-pass, see git
-# history), so "MB/s" here is throughput over that whole pass, not an
-# isolated write phase -- there isn't a separate one to isolate any more.
-# Split out of scripts/benchmark.sh (the count-only comparison against
-# primesieve), so either runs on its own.
+# single sieve+encode+write pass, so "MB/s" is throughput over that whole
+# pass, not an isolated write phase.
 #
 # Usage: ./scripts/benchmark_io.sh   (or: make benchmark-io)
 # Env overrides: THREADS (default: nproc), SEGMENT (default: 4194304),
 # WRITE_PATH (default: $HOME/eratostenes-io-bench; must be on the
 # Linux-native filesystem, not a /mnt/c... mount, much slower), KEEP_DB
-# (default: 0 -- each .db is deleted right after it's measured, since the
-# several GB this sweep accumulates (mostly the N=1e12 row) isn't something
-# to leave lying around by default; KEEP_DB=1 keeps them for inspection). A
-# trap also cleans up the in-progress file if the script is interrupted or
-# errors out partway (not on a hard SIGKILL, which can't be trapped -- see
-# git history for why that matters here).
+# (default: 0 -- each .db is deleted right after it's measured, as the
+# sweep adds up to tens of GB; KEEP_DB=1 keeps them). A trap also removes
+# the file in progress if the script is interrupted or fails (not on a
+# SIGKILL, which can't be trapped).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -52,12 +47,12 @@ esac
 
 mkdir -p "$WRITE_PATH"
 
-# N -> pi(N) conocido, misma escala x10 que el barrido manual (1k..1t).
+# Each N, as given to eratostenes and as digits, and its known pi(N).
 IO_SIZES=(100m 1b 10b 100b 1t 10t)
 IO_LIMITS=(100000000 1000000000 10000000000 100000000000 1000000000000 10000000000000)
 IO_EXPECTED=(5761455 50847534 455052511 4118054813 37607912018 346065536839)
 
-# bytes -> "X.XX UUU" (KiB/MiB/GiB/TiB), sin depender de numfmt.
+# bytes -> "X.XX UUU" (KiB/MiB/GiB/TiB), without numfmt.
 human_size() {
     awk -v b="$1" 'BEGIN {
         split("B KiB MiB GiB TiB", units, " ");
@@ -66,7 +61,6 @@ human_size() {
         printf "%.2f %s", v, units[u]
     }'
 }
-
 
 declare -A IO_SIZE_BYTES IO_TOTAL_S IO_COUNT
 
@@ -121,11 +115,8 @@ if [ "$fail" -ne 0 ]; then
     exit 1
 fi
 
-# Anchos ajustados al contenido real (N=1k..1t, ver arriba) en vez de
-# columnas sobredimensionadas -- con esas el ancho total de fila pasaba de
-# 120 columnas y se envolvia feo en una terminal normal. Cabecera, separador
-# y filas usan exactamente los mismos anchos por columna para que la tabla
-# quede alineada.
+# Header, separator and rows share the same column widths, sized to the
+# content, so the table stays aligned in a terminal.
 echo
 bash scripts/machine_info.sh "$THREADS" "segment ${SEGMENT:-4194304}"
 echo
@@ -133,16 +124,13 @@ printf "| %-6s | %-10s | %9s | %6s | %8s |\n" \
     "limit" "db size" "bit/prime" "MB/s" "total(s)"
 printf "|--------|------------|----------:|-------:|---------:|\n"
 for i in "${!IO_SIZES[@]}"; do
-	n="${IO_SIZES[$i]}"
+    n="${IO_SIZES[$i]}"
     limit="${IO_LIMITS[$i]}"
     bytes="${IO_SIZE_BYTES[$n]}"
     total_s="${IO_TOTAL_S[$n]}"
     count="${IO_COUNT[$n]}"
 
-    # LIMITS son siempre 1 seguido de ceros (potencias de 10 exactas), asi
-    # que el exponente es solo el largo del string menos 1 -- notacion "1Ek"
-    # en vez de las comas de mil, que en 1t (13 digitos) desalineaban la
-    # columna frente al resto de filas.
+    # Every limit is a power of 10: "1E<digits - 1>".
     limit_exp="1E$(( ${#limit} - 1 ))"
 
     bitpp=$(awk -v b="$bytes" -v c="$count" 'BEGIN{printf "%.2f", b*8/c}')

@@ -1,7 +1,7 @@
 #!/bin/bash
 # Top-of-range comparison against primesieve: the last WIDTH numbers below
-# each N (default: the last 1e11 below 1e15, 1e16 and 1e17, i.e. 0.01%,
-# 0.001% and 0.0001%), counted by both programs with the same thread count.
+# each N (default: the last 1e11 below 1e13 .. 1e18), counted by both
+# programs with the same thread count.
 # Every window has the same width, so each run costs about the same while N
 # grows: what changes is the height -- how many base primes are active and
 # which tiers they fall in (the sparse tier dominates from ~1e14 up) -- which
@@ -40,7 +40,7 @@ WIDTH="${WIDTH:-1e11}"
 SEGMENT="${SEGMENT:-}"   # forced -s for eratostenes (default: the CLI's own auto width)
 
 if ! command -v primesieve >/dev/null 2>&1; then
-    echo "primesieve no esta en el PATH -- instalalo (apt-get install primesieve)." >&2
+    echo "primesieve no esta en el PATH -- instalalo (docs/ISSUES.md: la misma version en todas las maquinas)." >&2
     exit 1
 fi
 if [ ! -x "$BIN" ]; then
@@ -92,9 +92,10 @@ run_ps() { # stop start -> sets t_p, c_p
 declare -A MEAN_E MEAN_P COUNT
 for n in $NS; do
     stop=$(to_dec "$n")
-    # Both programs keep every base prime in each thread's bucket ring (8
-    # bytes each), eratostenes its own list too: skip an N that doesn't fit in
-    # memory instead of swapping (or the OOM killer).
+    # Both programs keep an 8-byte entry per base prime in each thread's
+    # bucket ring: skip an N that doesn't fit in memory instead of swapping
+    # (or the OOM killer). eratostenes would run on fewer threads by itself
+    # (--max-mem), primesieve wouldn't.
     need_kb=$(awk -v n="$stop" -v t="$THREADS" 'BEGIN{r = sqrt(n); printf "%d", (t + 1) * 8 * 1.15 * r / log(r) / 1024}')
     avail_kb=$(sed -nE 's/^MemAvailable: *([0-9]+) kB$/\1/p' /proc/meminfo 2>/dev/null || true)
     if [ -n "$avail_kb" ] && [ "$need_kb" -gt "$avail_kb" ]; then

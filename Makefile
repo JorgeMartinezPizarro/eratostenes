@@ -120,7 +120,7 @@ test: $(BIN) $(NTH_BIN)
 benchmark:
 	./scripts/benchmark.sh
 
-# Real I/O (scripts/benchmark_io.sh): a .db per N in 1e8..1e12, size,
+# Real I/O (scripts/benchmark_io.sh): a .db per N in 1e8..1e13, size,
 # bits/prime, throughput, time. THREADS/SEGMENT/WRITE_PATH/KEEP_DB from the
 # environment; WRITE_PATH on a native Linux filesystem (default:
 # $HOME/eratostenes-io-bench).
