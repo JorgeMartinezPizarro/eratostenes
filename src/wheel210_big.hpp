@@ -7,33 +7,34 @@
 // 2310 another ~9%.
 #include <array>
 #include <cstdint>
+
+#include "wheel.hpp"
+
 namespace big {
-constexpr uint32_t R30[8] = {1, 7, 11, 13, 17, 19, 23, 29};
-constexpr int pos30(uint32_t x) { for (int j = 0; j < 8; ++j) if (R30[j] == x) return j; return -1; }
 constexpr std::array<uint32_t, 48> make_m210() {
     std::array<uint32_t, 48> m{}; int n = 0;
     for (uint32_t i = 1; i < 210; ++i) if (i % 2 && i % 3 && i % 5 && i % 7) m[n++] = i;
     return m;
 }
 constexpr std::array<uint32_t, 48> M210 = make_m210();
-// Per (residue class ri, multiplier phase w) entry: mask/byte-step/exit
-// phase for stepping p's hits one 210-wheel phase at a time. mask marks
-// bit pos30((r*m)%30) of the CURRENT hit; dm/corr give the byte distance
+// Per (residue class ri, multiplier phase w) entry: mask and byte step
+// for stepping p's hits one 210-wheel phase at a time. mask marks
+// bit WHEEL_POS[(r*m)%30] of the CURRENT hit; dm/corr give the byte distance
 // to the NEXT hit (m -> next 210-coprime multiplier): byte step =
 // qp*dm + corr, where corr = floor(r*m2/30) - floor(r*m/30) (derived from
 // r*dm = 30*corr + ((r*m2)%30 - (r*m)%30), i.e.
 // corr = (r*dm + (r*m)%30 - (r*m2)%30) / 30).
-struct Entry { uint8_t mask; uint8_t dm; uint8_t corr; uint8_t pad; uint16_t next; uint16_t pad2; };
+struct Entry { uint8_t mask; uint8_t dm; uint8_t corr; };
 constexpr std::array<Entry, 384> make_table() {
     std::array<Entry, 384> t{};
     for (int ri = 0; ri < 8; ++ri) for (int w = 0; w < 48; ++w) {
-        uint32_t r = R30[ri];
+        uint32_t r = static_cast<uint32_t>(WHEEL_R[ri]);
         uint32_t m = M210[w];
         uint32_t m2 = (w == 47) ? M210[0] + 210 : M210[w + 1];
         uint32_t dm = m2 - m;
         uint32_t c = (r * dm + (r * m) % 30 - (r * m2) % 30) / 30;
-        t[ri * 48 + w] = {static_cast<uint8_t>(1u << pos30((r * m) % 30)), static_cast<uint8_t>(dm),
-                          static_cast<uint8_t>(c), 0, static_cast<uint16_t>(ri * 48 + (w + 1) % 48), 0};
+        t[ri * 48 + w] = {static_cast<uint8_t>(1u << WHEEL_POS[(r * m) % 30]), static_cast<uint8_t>(dm),
+                          static_cast<uint8_t>(c)};
     }
     return t;
 }
@@ -45,6 +46,13 @@ constexpr std::array<uint8_t, 211> make_next() {
     return a;
 }
 inline constexpr std::array<uint8_t, 211> NEXT_W = make_next();
+// The smallest multiplier >= m0 coprime with 210; its phase into w.
+inline uint64_t next_m210(uint64_t m0, uint32_t& w) {
+    uint64_t t = m0 / 210;
+    w = NEXT_W[m0 % 210];
+    if (w == 48) { ++t; w = 0; }
+    return t * 210 + M210[w];
+}
 
 // Mod-2310 multiplier wheel for the sparse tier (SparseTier::process_big): 11
 // is presieved too (presieve.hpp), so multipliers that are multiples of 11
@@ -72,14 +80,14 @@ inline constexpr std::array<uint16_t, 2311> NEXT_W2310 = make_next2310();
 constexpr std::array<uint32_t, 8 * W2310> make_table2310() {
     std::array<uint32_t, 8 * W2310> t{};
     for (uint32_t ri = 0; ri < 8; ++ri) for (uint32_t w = 0; w < W2310; ++w) {
-        uint32_t r = R30[ri];
+        uint32_t r = static_cast<uint32_t>(WHEEL_R[ri]);
         uint32_t m = M2310[w];
         uint32_t m2 = (w == W2310 - 1) ? M2310[0] + 2310u : M2310[w + 1];
         uint32_t dm = m2 - m;
         uint32_t c = (r * dm + (r * m) % 30 - (r * m2) % 30) / 30;
         if (dm > 255 || c > 15) throw "TABLE2310: field overflow";
         uint32_t next = ri * W2310 + (w + 1) % W2310;
-        t[ri * W2310 + w] = (1u << pos30((r * m) % 30)) | (dm << 8) | (c << 16) | (next << 20);
+        t[ri * W2310 + w] = (1u << WHEEL_POS[(r * m) % 30]) | (dm << 8) | (c << 16) | (next << 20);
     }
     return t;
 }

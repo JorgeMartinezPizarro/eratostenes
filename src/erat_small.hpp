@@ -26,12 +26,11 @@
 
 namespace erat {
 
-// The mod-30 residues and their bit positions, shared with the mod-210 /
-// mod-2310 tables (wheel210_big.hpp).
-inline constexpr const uint32_t (&R)[8] = big::R30;
-using big::pos30;
+// The mod-30 residues; C and M give the byte offset and bit mask of the
+// hit of class pr at multiplier phase j (see above).
+inline constexpr const auto& R = WHEEL_R;
 constexpr uint64_t C(int pr, int j) { return R[pr] * R[j] / 30; }
-constexpr uint8_t M(int pr, int j) { return static_cast<uint8_t>(1u << pos30(R[pr] * R[j] % 30)); }
+constexpr uint8_t M(int pr, int j) { return static_cast<uint8_t>(1u << WHEEL_POS[R[pr] * R[j] % 30]); }
 
 // Per-prime state of the small and med64 tiers, and the sparse tier's 8-byte
 // entry slot: qw = (qp << 6) | (pr << 3) | j (small) or (qp << 6) | w (med64),
@@ -44,6 +43,21 @@ struct DenseState {
 };
 
 constexpr uint64_t QP_LIMIT = uint64_t{1} << 26;
+
+// Small-tier state for p's first hit at or past start_val (the smallest
+// multiplier coprime with 30 there), its byte position relative to byte
+// k_low / 8. Its residue class is (qw >> 3) & 7.
+inline DenseState small_state(uint64_t p, uint64_t start_val, uint64_t k_low) {
+    const uint64_t pr = static_cast<uint64_t>(WHEEL_POS[p % WHEEL_MOD]);
+    uint64_t m = (start_val + p - 1) / p;
+    uint64_t r = m % WHEEL_MOD;
+    const uint64_t step = STEP_TO_COPRIME[r];
+    m += step;
+    r += step;
+    if (r >= WHEEL_MOD) r -= WHEEL_MOD;
+    return {static_cast<uint32_t>(((p / WHEEL_MOD) << 6) | (pr << 3) | static_cast<uint64_t>(WHEEL_POS[r])),
+            static_cast<uint32_t>((p * m) / WHEEL_MOD - k_low / 8)};
+}
 
 // Small tier: crosses off p = 30*qp + R[PR] in s[0, end), starting at the
 // pending hit (i, j); on return (i, j) is the first hit at or past `end`.

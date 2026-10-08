@@ -137,30 +137,19 @@ inline BasePrimes sieve_base_primes(uint64_t limit, const Presieve& presieve, un
         const uint64_t total_k = b.bits.size() * 64;
         const uint64_t windows = (total_k + BASE_SIEVE_WINDOW_K - 1) / BASE_SIEVE_WINDOW_K;
         const uint64_t parts = std::clamp<uint64_t>(windows / 4, 1, std::max(1u, threads));
-        std::vector<uint64_t> found(parts, 0);
         auto run = [&](uint64_t t) {
             const uint64_t k_lo = windows * t / parts * BASE_SIEVE_WINDOW_K;
             const uint64_t k_hi = std::min(total_k, windows * (t + 1) / parts * BASE_SIEVE_WINDOW_K);
             // Each crossing-off prime's first hit at or past the part's start,
-            // SegmentSieve::activate_dense's derivation, by residue class.
+            // by residue class.
             std::vector<erat::DenseState> st[8];
             const uint64_t low_n = wheel_number(k_lo);
             for (uint64_t p : sp) {
-                const uint64_t start_val = std::max(p * p, low_n);
-                const uint64_t pr = static_cast<uint64_t>(WHEEL_POS[p % WHEEL_MOD]);
-                uint64_t m = (start_val + p - 1) / p;
-                uint64_t r = m % WHEEL_MOD;
-                const uint64_t step = STEP_TO_COPRIME[r];
-                m += step;
-                r += step;
-                if (r >= WHEEL_MOD) r -= WHEEL_MOD;
-                const uint64_t pos = (p * m) / WHEEL_MOD - k_lo / 8;
-                st[pr].push_back({static_cast<uint32_t>(((p / WHEEL_MOD) << 6) | (pr << 3) | WHEEL_POS[r]),
-                                  static_cast<uint32_t>(pos)});
+                const erat::DenseState d = erat::small_state(p, std::max(p * p, low_n), k_lo);
+                st[(d.qw >> 3) & 7].push_back(d);
             }
             std::vector<uint64_t> win(BASE_SIEVE_WINDOW_K / 64);
             uint8_t* const s = reinterpret_cast<uint8_t*>(win.data());
-            uint64_t n = 0;
             for (uint64_t k = k_lo; k < k_hi; k += BASE_SIEVE_WINDOW_K) {
                 const uint64_t count = std::min(BASE_SIEVE_WINDOW_K, k_hi - k); // a multiple of 64
                 const uint64_t bytes = count / 8;
@@ -178,9 +167,7 @@ inline BasePrimes sieve_base_primes(uint64_t limit, const Presieve& presieve, un
                 for (uint64_t w = 0; w < count / 64; ++w) out[w] = ~win[w];
                 if (k + count == total_k && (b.k_end & 63)) // past limit in the last word
                     out[count / 64 - 1] &= (uint64_t{1} << (b.k_end & 63)) - 1;
-                for (uint64_t w = 0; w < count / 64; ++w) n += static_cast<uint64_t>(__builtin_popcountll(out[w]));
             }
-            found[t] = n;
         };
         if (parts == 1) {
             run(0);
@@ -189,7 +176,6 @@ inline BasePrimes sieve_base_primes(uint64_t limit, const Presieve& presieve, un
             for (uint64_t t = 0; t < parts; ++t) pool.emplace_back(run, t);
             for (auto& th : pool) th.join();
         }
-        for (uint64_t n : found) b.count += n;
     }
 
     b.rank.assign(b.bits.size() / BasePrimes::RANK_WORDS + 1, 0);
@@ -199,5 +185,6 @@ inline BasePrimes sieve_base_primes(uint64_t limit, const Presieve& presieve, un
         r += static_cast<uint64_t>(__builtin_popcountll(b.bits[i]));
     }
     if (b.bits.size() % BasePrimes::RANK_WORDS == 0) b.rank[b.bits.size() / BasePrimes::RANK_WORDS] = r;
+    b.count += r; // the bitmap's primes, after the wheel's own
     return b;
 }

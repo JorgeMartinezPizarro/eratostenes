@@ -64,7 +64,7 @@ struct ChunkRange {
 // A run has one, or two when its early chunks use a narrower segment. The
 // sparse tier is a run of the base-prime bitmap, not a copy (see classify).
 struct TierSet {
-    uint64_t width;
+    uint64_t width = 0;
     std::vector<uint64_t> small, med64, medium;
     SparsePrimes sparse;
 };
@@ -73,24 +73,21 @@ struct TierSet {
 struct SievePlan {
     SieveConfig cfg;             // sub-block, prefetch gate, steal threshold, switches
     uint64_t seg_k_width = 0;    // wide segment, in wheel indices
-    uint64_t small_limit = 0, med64_limit = 0, sparse_limit = 0;
-    uint64_t sparse_num = 1, sparse_den = 1, sparse_den_auto = 1;
-    bool sparse_l3_gate = false;   // the 1/4 came from the L3 per active thread
-    bool med64_l2_gate = false;    // med64 = the whole segment, from the small-L2 rule
-    bool small_l2_gate = false;    // small cutoff 1/2 of the sub-block, same rule
-    bool half_l2_few_primes = false; // base at half the whole-L2 width: one per core, few base primes
-    uint64_t base_count = 0;         // startup log
-    uint64_t l3_per_thread = 0;    // bytes, 0 = undetected
-    bool sparse_regime = false;
     TierSet wide, narrow;        // narrow: unused unless narrow_k_end > 0
     uint64_t narrow_k_end = 0;   // chunks with high <= this use `narrow`
-    bool narrow_early = false;
-    // For the log: what the topology said and which rules fired.
-    uint64_t min_l2_share = 0;
     unsigned l1_big_cores = 0;   // physical cores with the largest L1d (0: unknown)
-    bool sub_block_whole_l1d = false;
+
+    // For the startup log: what the topology said and which rules fired.
+    uint64_t sparse_num = 1, sparse_den = 1, sparse_den_auto = 1;
+    bool sparse_l3_gate = false;     // the cutoff came from the L3 per active thread
+    bool med64_l2_gate = false;      // med64 = the whole segment, from the small-L2 rule
+    bool small_l2_gate = false;      // small cutoff 1/2 of the sub-block, same rule
+    bool half_l2_few_primes = false; // base at half the whole-L2 width: one per core, few base primes
     bool whole_l2_base = false;
-    uint64_t seg_l1_capped_k = 0, seg_uncapped_k = 0, seg_unrounded_k = 0;
+    bool sub_block_whole_l1d = false;
+    uint64_t base_count = 0;
+    uint64_t min_l2_share = 0;
+    uint64_t seg_l1_capped_k = 0, seg_uncapped_k = 0, seg_unrounded_k = 0; // widths before a cap / fixup
 
     const TierSet& tiers_for(const ChunkRange& r) const { return r.high <= narrow_k_end ? narrow : wide; }
 
@@ -163,7 +160,7 @@ inline SievePlan plan_sieve(const Options& opt, const BasePrimes& base, uint64_t
     // way the width is whole 64-bit words, so every segment starts on a word
     // boundary. The steps below adjust the automatic width only, except the
     // power-of-2 fixup.
-    const uint64_t l2_core = opt.l2_bytes_override ? opt.l2_bytes_override : detect_l2_cache_bytes();
+    const uint64_t l2_core = opt.l2_bytes_override ? opt.l2_bytes_override : detect_cpu_cache_info(0, 2).total_bytes;
     uint64_t seg_k_width = opt.segment_width_set
                          ? std::max<uint64_t>(64, (opt.segment_width * WHEEL_SIZE / WHEEL_MOD) / 64 * 64)
                          : seg_k_width_from_l2_bytes(l2_core);
@@ -182,18 +179,16 @@ inline SievePlan plan_sieve(const Options& opt, const BasePrimes& base, uint64_t
     // (docs/RESEARCH.md#small-cutoff-12-of-the-sub-block-on-a-256-kib-l2-core-kept-2026-10-06).
     // --tune small=a/b overrides.
     uint64_t small_num = 1, small_den = 4;
-    bool small_l2_gate = false; // startup log
     if (opt.tune_small.den) { small_num = opt.tune_small.num; small_den = opt.tune_small.den; }
-    else if (small_l2_core) { small_den = 2; small_l2_gate = true; }
+    else if (small_l2_core) { small_den = 2; P.small_l2_gate = true; }
 
     // The small tier is crossed off one sub-block at a time (see
     // SegmentSieve::sieve_and_emit); sub-block = half the detected L1d
     // (sub_block_from_l1_bytes), the whole of it with one thread per core
     // (finish_threads).
-    uint64_t l1_bytes = opt.l1_bytes_override ? opt.l1_bytes_override : detect_l1d_cache_bytes();
+    uint64_t l1_bytes = opt.l1_bytes_override ? opt.l1_bytes_override : detect_cpu_cache_info(0, 1).total_bytes;
     cfg.sub_block_bytes = sub_block_from_l1_bytes(l1_bytes);
     uint64_t small_limit = cfg.sub_block_bytes * small_num / small_den;
-    unsigned l1_big_cores = 0;         // physical cores with the largest L1d (0: unknown)
     uint64_t l1_max = l1_bytes ? l1_bytes : 32 * 1024; // largest per-core L1d (segment ceiling below)
 
     // Hybrid P-core/E-core correction: the detection above reads cpu0 only.
@@ -204,11 +199,14 @@ inline SievePlan plan_sieve(const Options& opt, const BasePrimes& base, uint64_t
     // Skipped when the user forced a value (-s, --l2-bytes, --l1-bytes) or
     // detection found nothing.
     const CpuCacheTopology topo = detect_cpu_cache_topology();
-    if (!opt.segment_width_set && !opt.l2_bytes_override && !topo.l2_share.empty() && topo.l2_share[0]) {
-        uint64_t min_l2_share = topo.l2_share[0];
-        for (uint64_t s : topo.l2_share) if (s && s < min_l2_share) min_l2_share = s;
-        if (min_l2_share < topo.l2_share[0]) seg_k_width = seg_k_width_from_l2_bytes(min_l2_share);
-    }
+    // Smallest L2 share per hardware thread (0: undetected); the whole-L2
+    // base, the segment ceiling and the sparse cutoff below use it too.
+    uint64_t& min_l2_share = P.min_l2_share;
+    for (uint64_t s : topo.l2_share)
+        if (s && (min_l2_share == 0 || s < min_l2_share)) min_l2_share = s;
+    if (!opt.segment_width_set && !opt.l2_bytes_override && !topo.l2_share.empty() && topo.l2_share[0] &&
+        min_l2_share < topo.l2_share[0])
+        seg_k_width = seg_k_width_from_l2_bytes(min_l2_share);
     if (!topo.l1_raw.empty() && topo.l1_raw[0]) {
         uint64_t max_l1_raw = topo.l1_raw[0];
         for (uint64_t s : topo.l1_raw) if (s > max_l1_raw) max_l1_raw = s;
@@ -229,26 +227,19 @@ inline SievePlan plan_sieve(const Options& opt, const BasePrimes& base, uint64_t
         double big_cores = 0;
         for (size_t c = 0; c < topo.l1_raw.size(); ++c)
             if (topo.l1_raw[c] == max_l1_raw && topo.l1_sharers[c] > 0) big_cores += 1.0 / topo.l1_sharers[c];
-        l1_big_cores = static_cast<unsigned>(big_cores + 0.5);
+        P.l1_big_cores = static_cast<unsigned>(big_cores + 0.5);
         // Applied in finish_threads, against the threads that actually run.
     }
-
-    // Smallest L2 share per hardware thread (sysfs): the whole-L2 base below,
-    // the segment ceiling and the sparse cutoff further down use it.
-    uint64_t min_l2_share = 0;
-    for (uint64_t s : topo.l2_share)
-        if (s && (min_l2_share == 0 || s < min_l2_share)) min_l2_share = s;
 
     // Cap on the automatic base width: 32 x L1d, whatever sysfs claims for
     // the L2 (a VM can report the host's L3 as its L2). Applied before
     // sparse_regime, so the doubling and the ceiling below see the capped
     // width; only -s bypasses it. See
     // docs/RESEARCH.md#base-segment-capped-at-32-x-l1d-a-vm-whose-sysfs-reports-the-hosts-l3-as-l2-kept-2026-10-03.
-    uint64_t seg_l1_capped_k = 0; // startup log: the width before this cap, 0 if it didn't apply
     if (!opt.segment_width_set) {
         const uint64_t cap_k = 32 * l1_max * 8 / 64 * 64;
         if (seg_k_width > cap_k) {
-            seg_l1_capped_k = seg_k_width;
+            P.seg_l1_capped_k = seg_k_width;
             seg_k_width = cap_k;
         }
     }
@@ -261,10 +252,8 @@ inline SievePlan plan_sieve(const Options& opt, const BasePrimes& base, uint64_t
     // docs/RESEARCH.md#segment-width-doubled-once-the-sparse-tier-exists-kept-2026-09-27.
     // The same condition gates the lowered sparse cutoffs below.
     const bool sparse_regime = base_limit >= seg_k_width;
-    const bool one_per_core = l1_big_cores && opt.threads <= l1_big_cores;
+    const bool one_per_core = P.l1_big_cores && opt.threads <= P.l1_big_cores;
     cfg.huge_arenas = opt.huge >= 0 ? opt.huge != 0 : one_per_core;
-    bool whole_l2_base = false;      // startup log
-    bool half_l2_few_primes = false; // startup log
     // With few base primes (<= 40K, sqrt(N) ~ 500K) the whole-L2 width
     // below doesn't pay: more segments cost little while the primes are
     // few, and the smaller one leaves L2 ways to the state streams. Half of
@@ -285,10 +274,10 @@ inline SievePlan plan_sieve(const Options& opt, const BasePrimes& base, uint64_t
             const uint64_t whole_k = std::min(l2_thread, 32 * l1_max) * 8 / 64 * 64;
             if (base.count <= HALF_L2_MAX_BASE_PRIMES) {
                 seg_k_width = std::max<uint64_t>(64, whole_k / 2 / 64 * 64);
-                half_l2_few_primes = true;
+                P.half_l2_few_primes = true;
             } else if (whole_k > seg_k_width) {
                 seg_k_width = whole_k;
-                whole_l2_base = true;
+                P.whole_l2_base = true;
             }
         }
     }
@@ -299,13 +288,12 @@ inline SievePlan plan_sieve(const Options& opt, const BasePrimes& base, uint64_t
     // filling a large L2 per thread (2 MiB on Emerald Rapids). Auto width
     // only. See
     // docs/RESEARCH.md#segment-ceiling-half-the-l2-per-thread-within-16-32-x-l1d-kept-2026-10-02.
-    uint64_t seg_uncapped_k = 0; // startup log: the width before the ceiling, 0 if it didn't apply
     if (!opt.segment_width_set && sparse_regime) {
         const uint64_t l2_thread = opt.l2_bytes_override ? opt.l2_bytes_override : min_l2_share;
         const uint64_t cap_bytes = std::max(16 * l1_max, std::min(32 * l1_max, l2_thread));
         const uint64_t cap_k = cap_bytes * 8; // bytes -> wheel indices (one bit each)
         if (seg_k_width > cap_k) {
-            seg_uncapped_k = seg_k_width;
+            P.seg_uncapped_k = seg_k_width;
             seg_k_width = cap_k;
         }
     }
@@ -323,8 +311,9 @@ inline SievePlan plan_sieve(const Options& opt, const BasePrimes& base, uint64_t
     // med64_limit are computed after the power-of-2 fixup below.
     constexpr uint64_t SPARSE_HALF_MIN_L2_SHARE = 512 * 1024;
     constexpr uint64_t SPARSE_QUARTER_MIN_L2_SHARE = 1024 * 1024;
-    uint64_t sparse_num = 1;
-    uint64_t sparse_den = !sparse_regime ? 1
+    uint64_t& sparse_num = P.sparse_num;
+    uint64_t& sparse_den = P.sparse_den;
+    sparse_den = !sparse_regime ? 1
                         : min_l2_share >= SPARSE_QUARTER_MIN_L2_SHARE ? 4
                         : min_l2_share >= SPARSE_HALF_MIN_L2_SHARE ? 2 : 1;
     // Second gate, by the L3 each ACTIVE thread has (total / the threads
@@ -341,26 +330,24 @@ inline SievePlan plan_sieve(const Options& opt, const BasePrimes& base, uint64_t
     uint64_t l3_per_thread = 0;
     if (l3.total_bytes && l3.sharers > 0)
         l3_per_thread = l3.total_bytes / std::max<uint64_t>(1, std::min<uint64_t>(opt.threads, static_cast<uint64_t>(l3.sharers)));
-    bool sparse_l3_gate = false; // startup log
     if (l3_per_thread >= SPARSE_QUARTER_MIN_L3_PER_THREAD &&
         (sparse_regime || base_limit >= 2 * (seg_k_width / 4))) {
         sparse_den = 4;
-        sparse_l3_gate = true;
+        P.sparse_l3_gate = true;
     } else if (l3_per_thread >= SPARSE_HALF_MIN_L3_PER_THREAD && sparse_regime && sparse_den < 2) {
         sparse_den = 2;
-        sparse_l3_gate = true;
+        P.sparse_l3_gate = true;
     }
-    const uint64_t sparse_den_auto = sparse_den; // startup log
+    P.sparse_den_auto = sparse_den;
     if (opt.tune_sparse.den) { sparse_num = opt.tune_sparse.num; sparse_den = opt.tune_sparse.den; } // in (0, 1], parse_tune
     // Power-of-2 fixup (in bytes, for the ring's slot shift) whenever some
     // prime may end up sparse: base_limit (isqrt(N)) reaches the cutoff,
     // the default one or a lowered one.
-    uint64_t seg_unrounded_k = 0; // startup log: an explicit -s the fixup rounded down, 0 otherwise
     if (base_limit >= seg_k_width || base_limit >= seg_k_width * sparse_num / sparse_den) {
         uint64_t sb = seg_k_width / 8, p2 = 1;
         while (p2 * 2 <= sb) p2 *= 2;
         if (p2 != sb) {
-            if (opt.segment_width_set) seg_unrounded_k = seg_k_width;
+            if (opt.segment_width_set) P.seg_unrounded_k = seg_k_width;
             seg_k_width = std::max<uint64_t>(64, p2 * 8);
         }
     }
@@ -375,11 +362,8 @@ inline SievePlan plan_sieve(const Options& opt, const BasePrimes& base, uint64_t
     // (docs/RESEARCH.md#i5-3470-profile-at-1e12-the-med64-tier-over-the-whole-l2-segment-is-59-of-the-cycles-open-2026-10-04).
     // --tune med64=a/b overrides; 0 disables the tier.
     uint64_t med64_num = 1, med64_den = 6;
-    bool med64_l2_gate = false;
     if (opt.tune_med64.den) { med64_num = opt.tune_med64.num; med64_den = opt.tune_med64.den; }
-    else if (small_l2_core) { med64_den = 1; med64_l2_gate = true; }
-    uint64_t med64_limit = seg_k_width * med64_num / med64_den;
-    uint64_t sparse_limit = seg_k_width * sparse_num / sparse_den;
+    else if (small_l2_core) { med64_den = 1; P.med64_l2_gate = true; }
 
     // The base primes into tiers by expected hits (segment_sieve.hpp):
     //   - small (p < small_limit): many hits per L1 sub-block, crossed off
@@ -414,8 +398,9 @@ inline SievePlan plan_sieve(const Options& opt, const BasePrimes& base, uint64_t
             else t.medium.push_back(p);
         });
     };
-    TierSet wide{seg_k_width, {}, {}, {}, {}};
-    classify(wide, med64_limit, sparse_limit);
+    P.seg_k_width = seg_k_width;
+    P.wide.width = seg_k_width;
+    classify(P.wide, seg_k_width * med64_num / med64_den, seg_k_width * sparse_num / sparse_den);
 
     // Narrow segment for the chunks below narrow^2. The doubled segment only
     // pays where sparse primes are active, and a chunk below narrow^2 has
@@ -424,16 +409,17 @@ inline SievePlan plan_sieve(const Options& opt, const BasePrimes& base, uint64_t
     // med64_limit on the narrow width (its sparse list never activates).
     // narrow is half the fixed-up wide width, a power of 2 in bytes. See
     // docs/RESEARCH.md#narrow-segment-for-the-chunks-below-narrow-squared-kept-2026-09-28.
-    TierSet narrow{seg_k_width / 2, {}, {}, {}, {}};
-    uint64_t narrow_k_end = 0; // chunks with high <= this use `narrow`
-    bool narrow_early = !opt.segment_width_set && sparse_regime && narrow.width >= 64 && narrow.width % 64 == 0;
-    if (narrow_early) {
-        narrow_k_end = wheel_count_upto(std::min(opt.limit, narrow.width * narrow.width));
+    TierSet& narrow = P.narrow;
+    narrow.width = seg_k_width / 2;
+    if (!opt.segment_width_set && sparse_regime && narrow.width >= 64 && narrow.width % 64 == 0) {
+        const uint64_t k_end = wheel_count_upto(std::min(opt.limit, narrow.width * narrow.width));
         // A --start tail beginning past narrow^2 (split_ranges' first k) has
         // no narrow chunk: skip a second pass over every base prime.
         const uint64_t first_k = opt.start ? wheel_count_upto(opt.start - 1) / 64 * 64 : 0;
-        if (first_k < narrow_k_end) classify(narrow, narrow.width * med64_num / med64_den, narrow.width);
-        else { narrow_k_end = 0; narrow_early = false; }
+        if (first_k < k_end) {
+            classify(narrow, narrow.width * med64_num / med64_den, narrow.width);
+            P.narrow_k_end = k_end;
+        }
     }
 
     // Steal threshold until the run has measured its own activation cost and
@@ -458,31 +444,7 @@ inline SievePlan plan_sieve(const Options& opt, const BasePrimes& base, uint64_t
         if (opt.medium_nta >= 0) cfg.medium_nta_min_primes = opt.medium_nta ? 0 : UINT64_MAX;
     }
 
-    P.seg_k_width = seg_k_width;
-    P.small_limit = small_limit;
-    P.med64_limit = med64_limit;
-    P.sparse_limit = sparse_limit;
-    P.sparse_num = sparse_num;
-    P.sparse_den = sparse_den;
-    P.sparse_den_auto = sparse_den_auto;
-    P.sparse_l3_gate = sparse_l3_gate;
-    P.med64_l2_gate = med64_l2_gate;
-    P.small_l2_gate = small_l2_gate;
-    P.half_l2_few_primes = half_l2_few_primes;
     P.base_count = base.count;
-    P.l3_per_thread = l3_per_thread;
-    P.sparse_regime = sparse_regime;
-    P.wide = std::move(wide);
-    P.narrow = std::move(narrow);
-    P.narrow_k_end = narrow_k_end;
-    P.narrow_early = narrow_early;
-    P.min_l2_share = min_l2_share;
-    P.l1_big_cores = l1_big_cores;
-    P.whole_l2_base = whole_l2_base; // sub_block_whole_l1d: set by finish_threads
-
-    P.seg_l1_capped_k = seg_l1_capped_k;
-    P.seg_uncapped_k = seg_uncapped_k;
-    P.seg_unrounded_k = seg_unrounded_k;
     return P;
 }
 
@@ -545,7 +507,7 @@ inline void print_plan(const SievePlan& P, const Options& opt, unsigned actual_t
         std::fprintf(stderr, "  small cutoff: 1/2 of the sub-block (L2 of 256 KiB or less)\n");
     if (P.med64_l2_gate)
         std::fprintf(stderr, "  med64 cutoff: the whole segment (L2 of 256 KiB or less)\n");
-    if (P.narrow_early) {
+    if (P.narrow_k_end) {
         unsigned narrow_chunks = 0;
         for (const auto& r : ranges) narrow_chunks += r.high <= P.narrow_k_end;
         std::fprintf(stderr, "  narrow segment (%llu) up to %llu: %u of %u chunks\n",

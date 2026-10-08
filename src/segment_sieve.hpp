@@ -36,7 +36,6 @@ public:
                  uint64_t sub_block_bytes, bool has_sparse, bool medium_nta,
                  bool huge_arenas = false)
         : words_((seg_k_width + 63) / 64, 0),
-          seg_k_width_(seg_k_width),
           sub_block_bytes_(sub_block_bytes),
           medium_nta_(medium_nta),
           presieve_(presieve),
@@ -247,10 +246,8 @@ private:
         for (size_t w = 0; w < words_needed; ++w) {
             uint64_t bits = ~words_[w];
             uint64_t base_idx = w * 64ULL;
-            uint64_t remaining = count - base_idx;
-            if (remaining < 64) {
-                bits &= (remaining == 0) ? 0ULL : ((1ULL << remaining) - 1ULL);
-            }
+            uint64_t remaining = count - base_idx; // >= 1 for every w < words_needed
+            if (remaining < 64) bits &= (1ULL << remaining) - 1ULL;
             if (bits == 0) continue;
 
             uint64_t k_word_start = k_low + base_idx;
@@ -277,27 +274,15 @@ private:
 
     // Small tier: appends the state of every prime from `next` on whose
     // square falls below this segment's end, one list per residue class
-    // (state[pr]): the pending hit's byte position and the packing
-    // (qp << 6) | (pr << 3) | j that erat_small.hpp::cross_off_class reads.
+    // (erat::small_state).
     __attribute__((noinline)) static void activate_dense(const std::vector<uint64_t>& primes, size_t& next,
                                std::vector<erat::DenseState>* state,
                                uint64_t high_n, uint64_t low_n, uint64_t k_low) {
         while (next < primes.size()) {
             uint64_t p = primes[next];
             if (p * p >= high_n) break;
-            uint64_t start_val = std::max(p * p, low_n);
-            uint64_t pr = static_cast<uint64_t>(WHEEL_POS[p % WHEEL_MOD]);
-            // Smallest m coprime with 30 with p*m >= start_val.
-            uint64_t m = (start_val + p - 1) / p;
-            uint64_t r = m % WHEEL_MOD;
-            uint64_t step = STEP_TO_COPRIME[r];
-            m += step;
-            r += step;
-            if (r >= WHEEL_MOD) r -= WHEEL_MOD;
-            uint64_t pos = (p * m) / WHEEL_MOD - k_low / 8;
-            uint64_t j = static_cast<uint64_t>(WHEEL_POS[r]);
-            state[pr].push_back({static_cast<uint32_t>(((p / WHEEL_MOD) << 6) | (pr << 3) | j),
-                                 static_cast<uint32_t>(pos)});
+            const erat::DenseState st = erat::small_state(p, std::max(p * p, low_n), k_low);
+            state[(st.qw >> 3) & 7].push_back(st);
             ++next;
         }
     }
@@ -314,11 +299,8 @@ private:
             if (p * p >= high_n) break;
             uint64_t start_val = std::max(p * p, low_n);
             uint64_t pr = static_cast<uint64_t>(WHEEL_POS[p % WHEEL_MOD]);
-            uint64_t m0 = (start_val + p - 1) / p;
-            uint64_t t = m0 / 210, sres = m0 % 210;
-            uint32_t w = big::NEXT_W[sres];
-            if (w == 48) { ++t; w = 0; }
-            uint64_t m = t * 210 + big::M210[w];
+            uint32_t w;
+            uint64_t m = big::next_m210((start_val + p - 1) / p, w);
             uint64_t pos = (p * m) / WHEEL_MOD - k_low / 8;
             state384[pr * 48 + w].push_back({static_cast<uint32_t>(((p / WHEEL_MOD) << 6) | w),
                                              static_cast<uint32_t>(pos)});
@@ -340,11 +322,8 @@ private:
             if (p * p >= high_n) break;
             uint64_t start_val = std::max(p * p, low_n);
             uint64_t pr = static_cast<uint64_t>(WHEEL_POS[p % WHEEL_MOD]);
-            uint64_t m0 = (start_val + p - 1) / p;
-            uint64_t t = m0 / 210, sres = m0 % 210;
-            uint32_t w = big::NEXT_W[sres];
-            if (w == 48) { ++t; w = 0; }
-            uint64_t m = t * 210 + big::M210[w];
+            uint32_t w;
+            uint64_t m = big::next_m210((start_val + p - 1) / p, w);
             uint64_t pos = (p * m) / WHEEL_MOD - k_low / 8; // byte position, like the small tier's
             dyn[pr].push_back(static_cast<uint32_t>((pos << 6) | w));
             uint32_t qp = static_cast<uint32_t>(p / WHEEL_MOD);
@@ -416,7 +395,6 @@ private:
     }
 
     std::vector<uint64_t> words_;
-    uint64_t seg_k_width_;
     uint64_t sub_block_bytes_;
     bool medium_nta_; // prefetchnta the medium state (erat_small.hpp::cross_off_medium)
     static constexpr ptrdiff_t MED64_NTA_DIST = 32; // entries ahead (4 cache lines)

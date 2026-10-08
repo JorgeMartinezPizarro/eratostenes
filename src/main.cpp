@@ -212,108 +212,41 @@ static void sieve_chunk(ChunkRange range, const TierSet& t, uint64_t base_prime_
     if ((range.high - range.low) % t.width == 0) slot->next_k = range.high;
 }
 
-// Count-only pass: no I/O, no byte accounting, just the prime count.
-static void count_only_worker(ChunkRange range, const TierSet& t, uint64_t base_prime_max,
-                               const Presieve& presieve, const SieveConfig& cfg,
-                               uint64_t& out_count, std::atomic<uint64_t>& progress) {
-    NullSink sink;
-    uint64_t local_count = 0;
-    sieve_chunk(range, t, base_prime_max, presieve, cfg, sink, local_count, progress);
-    out_count = local_count;
-}
-
-// Byte-counting pass: no disk I/O, just measures how many text bytes each
-// thread's primes will take.
-static void count_worker(ChunkRange range, const TierSet& t, uint64_t base_prime_max,
-                          const Presieve& presieve, const SieveConfig& cfg,
-                          uint64_t& out_bytes, uint64_t& out_count,
-                          std::atomic<uint64_t>& progress) {
-    ByteCounter counter;
-    uint64_t local_count = 0;
-    sieve_chunk(range, t, base_prime_max, presieve, cfg, counter, local_count, progress);
-    out_bytes = counter.total_bytes;
-    out_count = local_count;
-}
-
-// Write pass: re-sieves the same chunk and writes with pwrite() directly
-// into its (disjoint) region of the final file.
-static void emit_worker(int idx, ChunkRange range, const TierSet& t, uint64_t base_prime_max,
-                         const Presieve& presieve, const SieveConfig& cfg,
-                         int fd, uint64_t base_offset, const std::string& head_text,
-                         std::atomic<uint64_t>& progress) {
-    DirectWriter out(fd, base_offset);
-    uint64_t local_count = 0;
-
-    if (idx == 0) {
-        out.write_raw(head_text.data(), head_text.size()); // the wheel's own primes, see wheel_primes_from
+// The progress line of one pass: a thread that prints the share of wheel
+// indices sieved (k) every 500 ms. The destructor wakes it at once (so the
+// pass's reported time doesn't wait for a tick) and joins it, also when a
+// worker exception unwinds past it.
+class Progress {
+public:
+    Progress(const Colors& C, const char* label, uint64_t total)
+        : th_([this, &C, label, total] { run(C, label, total); }) {}
+    ~Progress() {
+        { std::lock_guard<std::mutex> lk(mu_); done_ = true; }
+        cv_.notify_all();
+        th_.join();
     }
+    Progress(const Progress&) = delete;
+    Progress& operator=(const Progress&) = delete;
 
-    sieve_chunk(range, t, base_prime_max, presieve, cfg, out, local_count, progress);
-    out.flush();
-}
+    std::atomic<uint64_t> k{0};
 
-// .db pass: sieves the chunk once and feeds a GapBlockSink, which
-// gap-encodes and compresses blocks of block_size primes, writes each one
-// to the .blk and pushes its index row to 'store' (thread-safe, see
-// SqlitePrimeStore::push). The row's start_index is chunk-relative;
-// run_db corrects it from out_count once every chunk is done.
-static void emit_db_worker(int idx, ChunkRange range, const TierSet& t, uint64_t base_prime_max,
-                            const Presieve& presieve, const SieveConfig& cfg,
-                            SqlitePrimeStore& store,
-                            uint64_t block_size, int zstd_level, uint64_t range_start,
-                            uint64_t& out_count,
-                            std::atomic<uint64_t>& progress) {
-    GapBlockSink sink(static_cast<uint64_t>(idx), block_size, zstd_level, store.block_file(),
-                       [&store](PendingBlock b) { store.push(std::move(b)); });
-    uint64_t local_count = 0;
-
-    if (idx == 0) {
-        for (uint64_t p : wheel_primes_from(range_start)) sink.write_uint64(p);
-    }
-
-    sieve_chunk(range, t, base_prime_max, presieve, cfg, sink, local_count, progress);
-    sink.flush();
-    out_count = local_count;
-}
-
-// Wakes the progress thread as soon as ProgressGuard sets `done`, so joining
-// it doesn't add up to its 500 ms tick to the reported time. Only one
-// progress thread is alive at a time, so one shared pair is enough.
-static std::mutex g_progress_mu;
-static std::condition_variable g_progress_cv;
-
-static void print_progress(const Colors& C, const char* label, std::atomic<uint64_t>& progress,
-                            uint64_t total, std::atomic<bool>& done) {
-    using namespace std::chrono_literals;
-    while (!done.load()) {
-        {
-            std::unique_lock<std::mutex> lk(g_progress_mu);
-            g_progress_cv.wait_for(lk, 500ms, [&] { return done.load(); });
+private:
+    void run(const Colors& C, const char* label, uint64_t total) {
+        using namespace std::chrono_literals;
+        std::unique_lock<std::mutex> lk(mu_);
+        while (!cv_.wait_for(lk, 500ms, [&] { return done_; })) {
+            const uint64_t d = k.load(std::memory_order_relaxed);
+            const double pct = total ? std::min(100.0, 100.0 * d / total) : 100.0;
+            std::fprintf(stderr, "\r  %s%s:%s %s%5.1f%%%s   ", C.label, label, C.reset, C.time, pct, C.reset);
+            std::fflush(stderr);
         }
-        if (done.load()) break;
-        uint64_t d = progress.load(std::memory_order_relaxed);
-        double pct = total ? std::min(100.0, 100.0 * d / total) : 100.0;
-        std::fprintf(stderr, "\r  %s%s:%s %s%5.1f%%%s   ", C.label, label, C.reset, C.time, pct, C.reset);
-        std::fflush(stderr);
+        std::fprintf(stderr, "\r  %s%s:%s %s100.0%%%s   \n", C.label, label, C.reset, C.time, C.reset);
     }
-    std::fprintf(stderr, "\r  %s%s:%s %s100.0%%%s   \n", C.label, label, C.reset, C.time, C.reset);
-}
 
-// Stops and joins the progress thread on scope exit, also when a worker
-// exception unwinds past it (a still-joinable std::thread terminates).
-struct ProgressGuard {
-    std::atomic<bool>& done;
-    std::thread& th;
-    ~ProgressGuard() {
-        {
-            // Under the mutex, so the store can't land between the
-            // waiter's predicate check and its going to sleep.
-            std::lock_guard<std::mutex> lk(g_progress_mu);
-            done = true;
-        }
-        g_progress_cv.notify_all();
-        th.join();
-    }
+    std::mutex mu_;
+    std::condition_variable cv_;
+    bool done_ = false;
+    std::thread th_; // last: starts once the members above exist
 };
 
 // Spawns 'workers' OS threads over the chunks in `ranges`, calls fn(i) once
@@ -444,40 +377,41 @@ static void run_parallel_chunks(unsigned workers, const std::vector<ChunkRange>&
 struct RunPlan {
     const Options& opt;
     const Colors& C;
+    const SievePlan& sp;
     std::vector<ChunkRange> ranges;
     unsigned actual_threads;
-    const TierSet& wide;
-    const TierSet& narrow;
-    uint64_t narrow_k_end; // chunks with high <= this use `narrow`
     uint64_t base_limit;
     const Presieve& presieve;
-    SieveConfig cfg;
     std::vector<uint64_t> fresh_primes;
     uint64_t total_span;
     uint64_t range_start;
     std::chrono::steady_clock::time_point t_start;
 
-    const TierSet& tiers_for(const ChunkRange& r) const { return r.high <= narrow_k_end ? narrow : wide; }
+    // One pass over every chunk, with its progress line: fn(i, sieve) for
+    // chunk i, where sieve(out) runs the chunk into the sink `out` and
+    // returns its prime count.
+    template <typename Fn>
+    void pass(const char* label, Fn&& fn) const {
+        Progress progress(C, label, total_span);
+        run_parallel_chunks(actual_threads, ranges, fresh_primes, sp.cfg, [&](unsigned i) {
+            const ChunkRange& r = ranges[i];
+            fn(i, [&](auto& out) {
+                uint64_t count = 0;
+                sieve_chunk(r, sp.tiers_for(r), base_limit, presieve, sp.cfg, out, count, progress.k);
+                return count;
+            });
+        });
+    }
 };
 
 // Count-only (no -o): a single pass, no I/O of any kind.
 static int run_count(const RunPlan& plan) {
     const Colors& C = plan.C;
-    const unsigned num_chunks = static_cast<unsigned>(plan.ranges.size());
-    // NullSink skips even the to_chars conversion: sieve_and_emit only
-    // keeps the running count.
-    std::vector<uint64_t> prime_counts(num_chunks, 0);
-    {
-        std::atomic<uint64_t> progress{0};
-        std::atomic<bool> done{false};
-        std::thread prog(print_progress, std::cref(C), "counting", std::ref(progress), plan.total_span, std::ref(done));
-        ProgressGuard guard{done, prog};
-
-        run_parallel_chunks(plan.actual_threads, plan.ranges, plan.fresh_primes, plan.cfg, [&](unsigned i) {
-            const ChunkRange& r = plan.ranges[i];
-            count_only_worker(r, plan.tiers_for(r), plan.base_limit, plan.presieve, plan.cfg, prime_counts[i], progress);
-        });
-    } // guard destructs here: progress thread joined before the summary prints below
+    std::vector<uint64_t> prime_counts(plan.ranges.size(), 0);
+    plan.pass("counting", [&](unsigned i, auto sieve) {
+        NullSink sink;
+        prime_counts[i] = sieve(sink);
+    });
 
     // With --start, only the wheel primes inside [range_start, N] count
     // (none, for any realistic start), so the tail total matches e.g.
@@ -500,28 +434,24 @@ static int run_count(const RunPlan& plan) {
     return 0;
 }
 
-// -o *.db: a single pass, blocks to the .blk and index rows to SQLite.
+// -o *.db: a single pass. Each chunk's GapBlockSink gap-encodes and
+// compresses blocks of db_block_size primes, writes them to the .blk and
+// pushes their index rows to the store, with chunk-relative positions that
+// finish() corrects from every chunk's prime count.
 static int run_db(const RunPlan& plan) {
     const Options& opt = plan.opt;
     const Colors& C = plan.C;
     const unsigned num_chunks = static_cast<unsigned>(plan.ranges.size());
-    // Sieve + gap-encode + zstd; blocks to the .blk, index rows to SQLite
-    // (SqlitePrimeStore). Each chunk's prime count falls out of the same
-    // pass and gives the blocks' global positions afterwards (finish).
     std::vector<uint64_t> prime_counts(num_chunks, 0);
     SqlitePrimeStore store(opt.output);
-    {
-        std::atomic<uint64_t> progress{0};
-        std::atomic<bool> done{false};
-        std::thread prog(print_progress, std::cref(C), "writing", std::ref(progress), plan.total_span, std::ref(done));
-        ProgressGuard guard{done, prog};
-
-        run_parallel_chunks(plan.actual_threads, plan.ranges, plan.fresh_primes, plan.cfg, [&](unsigned i) {
-            const ChunkRange& r = plan.ranges[i];
-            emit_db_worker(static_cast<int>(i), r, plan.tiers_for(r), plan.base_limit, plan.presieve, plan.cfg,
-                           store, opt.db_block_size, opt.zstd_level, plan.range_start, prime_counts[i], progress);
-        });
-    }
+    plan.pass("writing", [&](unsigned i, auto sieve) {
+        GapBlockSink sink(i, opt.db_block_size, opt.zstd_level, store.block_file(),
+                          [&store](PendingBlock b) { store.push(std::move(b)); });
+        if (i == 0)
+            for (uint64_t p : wheel_primes_from(plan.range_start)) sink.write_uint64(p);
+        prime_counts[i] = sieve(sink);
+        sink.flush();
+    });
 
     prime_counts[0] += wheel_primes_from(plan.range_start).size();
 
@@ -558,19 +488,13 @@ static int run_text(const RunPlan& plan) {
     // --- Pass 1: byte counting (no I/O) ---
     std::vector<uint64_t> byte_counts(num_chunks, 0);
     std::vector<uint64_t> prime_counts(num_chunks, 0);
-    {
-        std::atomic<uint64_t> progress{0};
-        std::atomic<bool> done{false};
-        std::thread prog(print_progress, std::cref(C), "counting", std::ref(progress), plan.total_span, std::ref(done));
-        ProgressGuard guard{done, prog};
+    plan.pass("counting", [&](unsigned i, auto sieve) {
+        ByteCounter counter;
+        prime_counts[i] = sieve(counter);
+        byte_counts[i] = counter.total_bytes;
+    });
 
-        run_parallel_chunks(plan.actual_threads, plan.ranges, plan.fresh_primes, plan.cfg, [&](unsigned i) {
-            const ChunkRange& r = plan.ranges[i];
-            count_worker(r, plan.tiers_for(r), plan.base_limit, plan.presieve, plan.cfg, byte_counts[i], prime_counts[i], progress);
-        });
-    }
-
-    const std::string head_text = wheel_primes_text(plan.range_start); // written by chunk 0, see emit_worker
+    const std::string head_text = wheel_primes_text(plan.range_start); // written by chunk 0
     byte_counts[0] += head_text.size();
     prime_counts[0] += wheel_primes_from(plan.range_start).size();
 
@@ -594,23 +518,17 @@ static int run_text(const RunPlan& plan) {
         return 1;
     }
 
-    // --- Pass 2: parallel direct write ---
-    {
-        std::atomic<uint64_t> progress{0};
-        std::atomic<bool> done{false};
-        std::thread prog(print_progress, std::cref(C), "writing", std::ref(progress), plan.total_span, std::ref(done));
-        ProgressGuard guard{done, prog};
-
-        try {
-            run_parallel_chunks(plan.actual_threads, plan.ranges, plan.fresh_primes, plan.cfg, [&](unsigned i) {
-                const ChunkRange& r = plan.ranges[i];
-                emit_worker(static_cast<int>(i), r, plan.tiers_for(r), plan.base_limit, plan.presieve, plan.cfg,
-                            fd, offsets[i], head_text, progress);
-            });
-        } catch (...) {
-            ::close(fd);
-            throw;
-        }
+    // --- Pass 2: every chunk re-sieved and pwrite()n into its own region ---
+    try {
+        plan.pass("writing", [&](unsigned i, auto sieve) {
+            DirectWriter out(fd, offsets[i]);
+            if (i == 0) out.write_raw(head_text.data(), head_text.size());
+            sieve(out);
+            out.flush();
+        });
+    } catch (...) {
+        ::close(fd);
+        throw;
     }
     ::close(fd);
 
@@ -712,11 +630,10 @@ int main(int argc, char** argv) {
 
     // Many more, narrower chunks than threads, so the steals between
     // threads' runs are fine-grained (run_parallel_chunks), but never under
-    // MIN_SEGS_PER_CHUNK segments each. See
+    // one segment each. See
     // docs/RESEARCH.md#run_parallel_chunks-contiguous-runs-the-sieve-carried-across-chunks-steals-kept-2026-10-01.
     constexpr unsigned CHUNKS_PER_THREAD = 150;
-    constexpr uint64_t MIN_SEGS_PER_CHUNK = 1;
-    uint64_t width_cap = wheel_count_upto(opt.limit) / (MIN_SEGS_PER_CHUNK * P.seg_k_width);
+    uint64_t width_cap = wheel_count_upto(opt.limit) / P.seg_k_width;
     // No floor of one chunk per thread: a range under threads segments runs
     // on fewer threads (actual_threads below) instead of every thread
     // paying its own setup for a sliver of a segment, as primesieve does.
@@ -734,7 +651,7 @@ int main(int argc, char** argv) {
                      static_cast<unsigned long long>(opt.limit));
         // Same chunk width as the full run where that still leaves every
         // thread TAIL_CHUNKS_PER_THREAD chunks; short tails get more,
-        // narrower chunks (never under MIN_SEGS_PER_CHUNK segments), or the
+        // narrower chunks (never under one segment), or the
         // full run's width would leave ~1.5 chunks per thread and cores idle
         // in the last round. Chunks are cheap (a worker carries its sieve
         // through its run): only the steal granularity depends on them.
@@ -743,7 +660,7 @@ int main(int argc, char** argv) {
         double frac = static_cast<double>(span_k) / static_cast<double>(wheel_count_upto(opt.limit));
         uint64_t scaled = static_cast<uint64_t>(target_chunks * frac + 0.5);
         uint64_t floor_chunks = std::min<uint64_t>(uint64_t{opt.threads} * TAIL_CHUNKS_PER_THREAD,
-                                                   span_k / (MIN_SEGS_PER_CHUNK * P.seg_k_width));
+                                                   span_k / P.seg_k_width);
         target_chunks = static_cast<unsigned>(std::max<uint64_t>({uint64_t{1}, scaled, floor_chunks}));
     }
     auto ranges = split_ranges(opt.limit, target_chunks, range_start, P.seg_k_width);
@@ -786,8 +703,8 @@ int main(int argc, char** argv) {
 
     // Worker exceptions (pwrite() on a full disk, the bucket ring's sizing
     // check) are rethrown by run_parallel_chunks and end here.
-    const RunPlan plan{opt, C, std::move(ranges), actual_threads, P.wide, P.narrow, P.narrow_k_end, base_limit, presieve,
-                       P.cfg, std::move(fresh_primes), total_span, range_start, t_start};
+    const RunPlan plan{opt, C, P, std::move(ranges), actual_threads, base_limit, presieve,
+                       std::move(fresh_primes), total_span, range_start, t_start};
     try {
         if (opt.output.empty()) return run_count(plan);
         if (is_db_output(opt.output)) return run_db(plan);

@@ -12,16 +12,6 @@
 #include <string>
 #include <vector>
 
-#include "wheel.hpp"
-
-// Best-effort cache size (bytes) of cpu0's cache at a given level (1 = L1
-// data, 2 = L2, 3 = L3), from Linux sysfs (also inside a Docker container
-// on the host kernel; Docker Desktop's VM reports a made-up topology). 0 on
-// any failure. The cpu0 case of detect_cpu_cache_info below.
-inline uint64_t detect_cache_bytes(int target_level);
-inline uint64_t detect_l2_cache_bytes() { return detect_cache_bytes(2); }
-inline uint64_t detect_l1d_cache_bytes() { return detect_cache_bytes(1); }
-
 // How many logical CPUs are named in a Linux sysfs "list" string, e.g.
 // "0-1" (2), "12-15,20-23" (8), "5" (1). Used to turn a shared cache's
 // raw size into a per-thread share (see detect_cpu_cache_topology below).
@@ -53,8 +43,10 @@ inline int count_cpu_list(const std::string& s) {
     return count;
 }
 
-// A logical CPU's own cache-level total size (bytes) and how many
-// logical CPUs share that instance (its "shared_cpu_list" cardinality).
+// A logical CPU's cache at a given level (1 = L1 data, 2 = L2, 3 = L3), from
+// Linux sysfs (also inside a Docker container on the host kernel; Docker
+// Desktop's VM reports a made-up topology): its total size in bytes and how
+// many logical CPUs share that instance (its "shared_cpu_list" cardinality).
 // {0, 0} when the level isn't there or sysfs can't be read; sharers alone
 // is 0 when the size was read but the sharing list wasn't.
 struct CpuCacheInfo {
@@ -100,8 +92,6 @@ inline CpuCacheInfo detect_cpu_cache_info(int cpu_id, int target_level) {
     }
     return {};
 }
-
-inline uint64_t detect_cache_bytes(int target_level) { return detect_cpu_cache_info(0, target_level).total_bytes; }
 
 // A logical CPU's share (bytes) of a given cache level: that cache
 // instance's size divided by the logical CPUs sharing it (2 for a
@@ -149,9 +139,7 @@ inline CpuCacheTopology detect_cpu_cache_topology() {
 // 0 falls back to 256 KiB.
 inline uint64_t seg_k_width_from_l2_bytes(uint64_t l2_bytes) {
     if (l2_bytes == 0) l2_bytes = 256 * 1024;
-    uint64_t l2_target_bytes = l2_bytes / 2;
-    uint64_t numeric_width = l2_target_bytes * 8 * WHEEL_MOD / WHEEL_SIZE;
-    return std::max<uint64_t>(64, (numeric_width * WHEEL_SIZE / WHEEL_MOD) / 64 * 64);
+    return std::max<uint64_t>(64, l2_bytes / 2 * 8 / 64 * 64); // one bit per wheel index
 }
 
 // The small tier's sub-block (bytes, a multiple of 8) from a raw L1d size:

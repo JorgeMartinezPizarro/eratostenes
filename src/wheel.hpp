@@ -12,62 +12,14 @@
 #include <array>
 
 constexpr std::array<uint64_t, 3> WHEEL_PRIMES = {2, 3, 5};
-
-constexpr uint64_t wheel_gcd(uint64_t a, uint64_t b) {
-    while (b != 0) {
-        uint64_t t = b;
-        b = a % b;
-        a = t;
-    }
-    return a;
-}
-
-constexpr uint64_t compute_wheel_mod() {
-    uint64_t m = 1;
-    for (uint64_t p : WHEEL_PRIMES) m *= p;
-    return m;
-}
-constexpr uint64_t WHEEL_MOD = compute_wheel_mod();
-
-constexpr int compute_wheel_size() {
-    // WHEEL_MOD is squarefree (product of distinct primes), so
-    // phi(WHEEL_MOD) = product(p - 1) over its prime factors.
-    uint64_t phi = 1;
-    for (uint64_t p : WHEEL_PRIMES) phi *= (p - 1);
-    return static_cast<int>(phi);
-}
-constexpr int WHEEL_SIZE = compute_wheel_size();
-
-static_assert(WHEEL_MOD == 30 && WHEEL_SIZE == 8, "the byte layout is one byte = 30 numbers (mod 30)");
+constexpr uint64_t WHEEL_MOD = 30;
+constexpr int WHEEL_SIZE = 8;      // residues coprime with WHEEL_MOD: bits per byte
 constexpr int WHEEL_SIZE_LOG2 = 3; // k / 8 and k % 8 as a shift and a mask
-
-constexpr bool is_prime_trial(uint64_t n) {
-    if (n < 2) return false;
-    for (uint64_t d = 2; d * d <= n; ++d) {
-        if (n % d == 0) return false;
-    }
-    return true;
-}
-
-// The smallest prime not covered by the wheel -- the first "base prime"
-// that actually needs marking (below it, primes are emitted directly).
-constexpr uint64_t compute_first_wheel_prime() {
-    uint64_t c = WHEEL_PRIMES.back() + 1;
-    while (!is_prime_trial(c)) ++c;
-    return c;
-}
-constexpr uint64_t FIRST_WHEEL_PRIME = compute_first_wheel_prime();
+// The first prime the wheel doesn't cover: the first one that is sieved.
+constexpr uint64_t FIRST_WHEEL_PRIME = 7;
 
 // The WHEEL_SIZE residues in [1, WHEEL_MOD) coprime with WHEEL_MOD, sorted.
-constexpr std::array<uint64_t, WHEEL_SIZE> make_wheel_r() {
-    std::array<uint64_t, WHEEL_SIZE> r{};
-    int idx = 0;
-    for (uint64_t x = 1; x < WHEEL_MOD; ++x) {
-        if (wheel_gcd(x, WHEEL_MOD) == 1) r[idx++] = x;
-    }
-    return r;
-}
-constexpr std::array<uint64_t, WHEEL_SIZE> WHEEL_R = make_wheel_r();
+constexpr std::array<uint64_t, WHEEL_SIZE> WHEEL_R = {1, 7, 11, 13, 17, 19, 23, 29};
 
 // Gap from WHEEL_R[j] to the next candidate (WHEEL_R[(j+1) % WHEEL_SIZE],
 // adding WHEEL_MOD when wrapping past the end of the period).

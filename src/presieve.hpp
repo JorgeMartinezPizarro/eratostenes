@@ -160,15 +160,8 @@ inline PresieveTable build_presieve_table(const std::vector<uint64_t>& primes,
     // one position (self_k).
     for (uint64_t p : primes) {
         auto delta = compute_wheel_deltas(p);
-        uint64_t m = 1;
-        uint64_t r = m % WHEEL_MOD;
-        uint64_t step = STEP_TO_COPRIME[r];
-        m += step;
-        r += step;
-        if (r >= WHEEL_MOD) r -= WHEEL_MOD;
-        int j = WHEEL_POS[r];
-        uint64_t k = wheel_index(p * m);
-
+        int j = 0;                   // multiplier phase of m = 1
+        uint64_t k = wheel_index(p); // p * 1
         while (k < total_bits) {
             tbl.words[k >> 6] |= (1ULL << (k & 63));
             k += delta[j];

@@ -22,7 +22,6 @@
 struct NullSink {
     // Extraction is a popcount per word, no prime is decoded.
     static constexpr bool WANTS_VALUES = false;
-    void write_uint64(uint64_t) {}
 };
 
 struct ByteCounter {

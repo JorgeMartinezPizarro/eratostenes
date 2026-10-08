@@ -114,7 +114,7 @@ piece wouldn't pay its activation; `--debug-idle` prints those measurements and
 how far apart the threads finished (see
 [RESEARCH.md](RESEARCH.md#run_parallel_chunks-contiguous-runs-the-sieve-carried-across-chunks-steals-kept-2026-10-01)).
 At small N the chunk count is capped so every chunk still spans at least one
-segment (`MIN_SEGS_PER_CHUNK`), and a range of fewer segments than threads runs on
+segment, and a range of fewer segments than threads runs on
 fewer threads. See `run_parallel_chunks`, `sieve_chunk` and `split_ranges` in
 `main.cpp`.
 
