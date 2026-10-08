@@ -1,5 +1,5 @@
 #pragma once
-// Command-line argument parsing: sizes with suffixes (k/m/b/t), thread
+// Command-line argument parsing: sizes with suffixes (k/m/b/g/t), thread
 // count, output path (empty means count-only -- there's no default file,
 // see Options::output below), segment width, --tune knobs. The automatic
 // sizes are decided later, in tuning.hpp (plan_sieve).
@@ -67,7 +67,7 @@ struct Options {
     int huge = -1;       // sparse ring arenas as 2 MiB huge pages: -1 auto (one thread per core), 1 on, 0 off
 };
 
-// Interprets suffixes: k=1e3 m=1e6 b=1e9 (short scale billion) t=1e12
+// Interprets suffixes: k=1e3 m=1e6 b=g=1e9 (short scale billion) t=1e12
 // Also accepts scientific notation (1e11, 2.5e15) and plain numbers
 // (100000000000). Parsed exactly, in integers (a double rounds odd values
 // above 2^53). The result must be a whole number (1.5k is fine, 2.5 is an
@@ -238,8 +238,8 @@ inline void print_usage(const char* prog) {
         "position with the nth_prime binary.\n"
         "\n"
         "Options:\n"
-        "  N                      Upper limit. Accepts k/m/b/t suffixes\n"
-        "                         (b = billion = 1e9) and 1e11-style\n"
+        "  N                      Upper limit. Accepts k/m/b/g/t suffixes\n"
+        "                         (b = g = billion = 1e9) and 1e11-style\n"
         "                         notation. E.g. 100b = 1e11.\n"
         "  -o, --output PATH      Output file. Without it, only counts\n"
         "                         (writes nothing). If PATH ends in .db,\n"

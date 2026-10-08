@@ -49,13 +49,13 @@ outside the container.
 
   N                       Upper bound (inclusive), positional (no flag --
                           primesieve-style). Accepts suffixes:
-                          k=1e3  m=1e6  b=1e9 (short-scale billion)  t=1e12
+                          k=1e3  m=1e6  b=g=1e9 (short-scale billion)  t=1e12
   -o, --output PATH       Output file. Without it, only counts primes --
                           no file is written. .db suffix switches to the
                           compact SQLite format (see below).
   -t, --threads N         Thread count (default: available cores)
   -s, --segment-width N   Numeric width per segment
-                          (default: auto, sized from N)
+                          (default: auto, sized from N and the caches)
       --db-block-size N   Primes per compressed block in .db mode (default: 65536)
       --zstd-level N      zstd compression level in .db mode (default: 1)
       --start N0          Only the range [N0, N]: count it, or with -o
@@ -68,9 +68,9 @@ outside the container.
 ```
 
 ```sh
-./eratostenes 10000 -o primes_1M.txt      # Write to text        
+./eratostenes 1m -o primes_1M.txt        # Write to text
 ./eratostenes 10b -t 12                   # Count using 12 threads
-./eratostenes 1t -o ~/primes_100b.db      # Write to db
+./eratostenes 1t -o ~/primes_1t.db        # Write to db
 ./eratostenes 1e18 --start 999999e12 -o tail.db   # Write only a range (a tail)
 ```
 
