@@ -225,7 +225,7 @@ sparse, then extraction.
   Pooled blocks are scattered in memory, so while a block is processed the
   next block of its chain is prefetched a line at a time, spread over the
   current block's groups of 4 entries; the segment byte each entry marks is
-  prefetched 16 entries ahead (`ERA_BIG_PF`), and entries go two per
+  prefetched 16 entries ahead, and entries go two per
   iteration. [RESEARCH.md](RESEARCH.md#sparse-tier) has the measurements.
 
 Finally, **extraction**: invert each word (bit = 0 means prime) and either

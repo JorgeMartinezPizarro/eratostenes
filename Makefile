@@ -53,7 +53,7 @@ $(NTH_BIN): $(NTH_OBJ)
 
 # A test binary with extra compile flags, for an A/B against the normal one
 # (sparse_tier.hpp's ERA_* knobs or any compiler flag). Always rebuilt:
-#   make variant DEFS=-DERA_BIG_PF=8
+#   make variant DEFS=-DERA_ACT_IDX=0
 #   BIN_B=./eratostenes_variant make benchmark-ab
 BIN_VARIANT := eratostenes_variant
 $(BIN_VARIANT): $(SRC_DIR)/main.cpp $(HEADERS)

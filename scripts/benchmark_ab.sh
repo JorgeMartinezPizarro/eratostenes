@@ -13,7 +13,7 @@
 #   B="--tune sparse=1/2" make benchmark-ab
 #   A="--tune sparse=1/1" B="--tune sparse=1/2" REPS=5 make benchmark-ab
 # An ERA_* flag build (sparse_tier.hpp) against the default one:
-#   make variant DEFS=-DERA_BIG_PF=8; BIN_B=./eratostenes_variant make benchmark-ab
+#   make variant DEFS=-DERA_ACT_IDX=0; BIN_B=./eratostenes_variant make benchmark-ab
 # Another commit, built in a worktree so src/ stays untouched:
 #   git worktree add -f /tmp/era_A <commit> && make -C /tmp/era_A -B eratostenes
 #   BIN_A=/tmp/era_A/eratostenes NS="1e15 1e17" make benchmark-ab

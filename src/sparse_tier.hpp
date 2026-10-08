@@ -27,11 +27,6 @@
 #include "wheel.hpp"
 #include "wheel210_big.hpp"
 
-// process_big prefetches the segment byte of the entries this many
-// positions ahead in the bucket (see its comment); 0 turns it off.
-#ifndef ERA_BIG_PF
-#define ERA_BIG_PF 16
-#endif
 // Activation: ERA_ACT_IDX takes p / 30 and p % 30 from the prime's wheel
 // index instead of dividing. Faster on modern cores, slower on Ivy Bridge,
 // so on only where BMI2 exists. See
@@ -42,10 +37,6 @@
 #else
 #define ERA_ACT_IDX 0
 #endif
-#endif
-// Bucket block size (bytes); -DERA_BLK_BYTES for A/B.
-#ifndef ERA_BLK_BYTES
-#define ERA_BLK_BYTES 4096
 #endif
 
 // v mod 2^nbits, with mask = 2^nbits - 1: one BMI2 instruction (bzhi) that
@@ -178,18 +169,14 @@ public:
                 // shared slot's second push reads the tail the first one just
                 // wrote.
                 constexpr int U = 2;
-                // Prefetches the segment byte of the cnt entries ERA_BIG_PF
+                // Prefetches the segment byte of the cnt entries SEG_PF_DIST
                 // ahead of p (inside the block; the caller keeps it so): the
                 // RMW that misses once two threads share an L2.
                 auto seg_pf = [&](const erat::DenseState* p, size_t cnt) __attribute__((always_inline)) {
-                    if constexpr (ERA_BIG_PF > 0) {
-                        for (size_t k = 0; k < cnt; ++k) {
-                            uint64_t pe;
-                            std::memcpy(&pe, p + ERA_BIG_PF + k, sizeof(uint64_t));
-                            __builtin_prefetch(s + ((pe >> 12) & 0xffffff), 1, 3);
-                        }
-                    } else {
-                        (void)p; (void)cnt;
+                    for (size_t k = 0; k < cnt; ++k) {
+                        uint64_t pe;
+                        std::memcpy(&pe, p + SEG_PF_DIST + k, sizeof(uint64_t));
+                        __builtin_prefetch(s + ((pe >> 12) & 0xffffff), 1, 3);
                     }
                 };
                 // The U entries [p, p + U): loads, table rows and segment
@@ -223,13 +210,12 @@ public:
                 // Groups of G entries, counted once per block: the first
                 // `spread` groups also prefetch line g of the next block (64
                 // lines over the block's first 256 entries), the rest only the
-                // segment bytes ERA_BIG_PF ahead; the entries whose
-                // ERA_BIG_PF-ahead neighbours are past `end` go through the
+                // segment bytes SEG_PF_DIST ahead; the entries whose
+                // SEG_PF_DIST-ahead neighbours are past `end` go through the
                 // plain pairs. No test inside either loop but its own end.
                 constexpr size_t G = 4;
-                constexpr size_t PF = ERA_BIG_PF > 0 ? ERA_BIG_PF : 0;
                 const size_t n = static_cast<size_t>(end - it);
-                const size_t groups = n >= PF + G ? (n - PF) / G : 0;
+                const size_t groups = n >= SEG_PF_DIST + G ? (n - SEG_PF_DIST) / G : 0;
                 const size_t spread = std::min<size_t>(groups, BLK_BYTES / 64);
                 const char* line = nb;
                 for (erat::DenseState* const ge = it + spread * G; it != ge; it += G) {
@@ -360,7 +346,10 @@ private:
     // BLK_BYTES-aligned blocks from a pool of arena_bytes_-sized arenas
     // that never shrinks (chunks_ owns them, so block pointers stay valid as
     // it grows). free_ is a stack of the blocks in no ring slot.
-    static constexpr size_t BLK_BYTES = ERA_BLK_BYTES;
+    static constexpr size_t BLK_BYTES = 4096;
+    // process_big prefetches the segment byte of the entry this many
+    // positions ahead in the block.
+    static constexpr size_t SEG_PF_DIST = 16;
     struct Blk {
         Blk* next;
         uint64_t pad;
