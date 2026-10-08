@@ -440,9 +440,9 @@ inline SievePlan plan_sieve(const Options& opt, const BasePrimes& base, uint64_t
 
     // Medium-tier prefetchnta gate: on once the medium state outgrows the
     // per-thread L3 share, where it comes from DRAM anyway and keeping it
-    // out of L2 only protects the segment. The threshold counts 8 bytes per
-    // prime, as it was measured (the state is 5 now). See
-    // docs/RESEARCH.md#cross_off_medium-struct-of-arrays-state--gated-prefetchnta-kept-2026-09-29.
+    // out of L2 only protects the segment. The threshold is empirical, 8
+    // bytes per prime against the share, and still right with the 5-byte
+    // state (docs/RESEARCH.md#medium-prefetchnta-gate-re-measured-with-the-5-byte-state-kept-2026-10-09).
     // Undetected L3 -> 1 MiB.
     {
         uint64_t l3_share = l3.sharers > 0 ? l3.total_bytes / static_cast<uint64_t>(l3.sharers) : 0;

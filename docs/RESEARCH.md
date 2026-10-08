@@ -91,6 +91,8 @@ What is in the code today, by the day it went in:
   [tails to the 64-bit ceiling checked against primecount](#tails-up-to-the-64-bit-ceiling-at-6-threads-checked-against-primecount-2026-10-07).
 - **2026-10-08**: error messages name the largest N; [threads vs tail height](#threads-vs-tail-height-dram-bandwidth-caps-the-sparse-tier-near-264-a-memory-budget-kept-2026-10-08)
   measured (DRAM bandwidth past ~1e18) and a memory budget, `--max-mem`.
+- **2026-10-09**: the medium [prefetchnta gate re-measured](#medium-prefetchnta-gate-re-measured-with-the-5-byte-state-kept-2026-10-09)
+  with the 5-byte state: unchanged.
 
 ## Contents
 
@@ -448,7 +450,23 @@ are sorted by p and never reordered, and the largest same-class gap below sqrt(1
 `cross_off_medium` does `qp += *qds` per prime (the hit loop is unchanged); activation throws
 if a delta exceeds 255. 5 bytes per prime per segment instead of 8. Dev PC, ABBA vs
 `c5ec94f`: 1e14 tail **-4.5%** cycles:u, 1e15 tail **-8.9%** mean / -4.5% min (L3 misses
--44%), 1e13 tail -1.2%, 1e12 tie. `MEDIUM_NTA_MIN_PRIMES` still assumes 8 bytes per prime.
+-44%), 1e13 tail -1.2%, 1e12 tie. `MEDIUM_NTA_MIN_PRIMES` still assumes 8 bytes per prime
+(re-measured: [next entry](#medium-prefetchnta-gate-re-measured-with-the-5-byte-state-kept-2026-10-09)).
+
+### Medium prefetchnta gate re-measured with the 5-byte state (kept, 2026-10-09)
+
+The gate turns the medium prefetchnta on at medium primes x 8 bytes >= the per-thread L3
+share (131,072 primes on the dev PC), sized when the state was 8 bytes. At 5 bytes a gate
+of share / 5 (209,715) would differ only where the medium tier holds 131K-210K primes: on
+the dev PC, 12 threads at N ~7e12-1.4e13 (171,173 at 1e13, ~856 KB of state, under the
+1 MiB share). Dev PC, `benchmark_ab.sh`, last 1e11 below 1e13, 8 interleaved pairs,
+cycles:u:
+- 12 threads, 171,173 medium primes (gate on): off is **+1.05%** median, +0.76% mean,
+  lower in 0/8 sorted pairs. The prefetch still pays below the share.
+- 6 threads, 99,137 medium primes (gate off): on is +0.74% median, -0.47% mean, 4/8:
+  neutral, so no reason to lower the gate either.
+
+Kept at 8 bytes per prime: share / 5 would switch it off where it wins ~1%.
 
 ### Medium tier in fixed-iteration bands, predicated hits (tried, reverted, 2026-10-02)
 
