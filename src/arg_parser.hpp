@@ -31,11 +31,8 @@ struct Options {
     // Only used when --output ends in ".db" (SQLite + zstd gap encoding,
     // see gap_block_sink.hpp / sqlite_prime_store.hpp). Ignored for plain
     // text output.
-    uint64_t db_block_size = 65536;      // primes per compressed block; see
-                                          // docs/RESEARCH.md#write-pipeline-knobs-batch---db-block-size-wal_autocheckpoint-all-measured-kept-at-their-defaults
-    int zstd_level = 1;                  // 1 beats 3 on both size and time
-                                          // with wheel-index gaps. See
-                                          // docs/RESEARCH.md#--zstd-level-default-1-kept-2026-09-28
+    uint64_t db_block_size = 65536;      // primes per compressed block
+    int zstd_level = 1;                  // docs/RESEARCH.md#--zstd-level-default-1-kept-2026-09-28
 
     // --l2-bytes / --l1-bytes: the cache sizes to use instead of sysfs's
     // (cpu_cache.hpp), 0 = detect. For a container or VM whose sysfs is
@@ -52,11 +49,8 @@ struct Options {
     uint64_t max_mem = 0;
     bool max_mem_set = false;
 
-    // --start N0 sieves just [N0, N]: every base prime is still activated,
-    // so a tail of a large N costs what the same segments cost in a full run
-    // (main.cpp sizes its chunks so no core idles). With -o it writes only
-    // that tail (.db positions relative to it, see main()). --debug-idle
-    // prints how far apart the threads finished.
+    // --start N0 sieves just [N0, N] (see main()). --debug-idle prints how
+    // far apart the threads finished.
     uint64_t start = 0;
     bool debug_idle = false;
 
@@ -75,14 +69,12 @@ struct Options {
 
 // Interprets suffixes: k=1e3 m=1e6 b=1e9 (short scale billion) t=1e12
 // Also accepts scientific notation (1e11, 2.5e15) and plain numbers
-// (100000000000). Parsed exactly, in integers: going through a double
-// rounded every odd integer above 2^53 (~9.007e15, below the 1e16 target)
-// to a neighbour, and llround overflowed past 2^63. The result must be a
-// whole number (1.5k is fine, 2.5 is an error) that fits in 64 bits.
+// (100000000000). Parsed exactly, in integers (a double rounds odd values
+// above 2^53). The result must be a whole number (1.5k is fine, 2.5 is an
+// error) that fits in 64 bits.
 //
 // A value past 2^64 - 1 throws SizeOutOfRange, its own type, so parse_args
-// can name the largest N (MAX_LIMIT below) instead of the 64-bit bound:
-// `eratostenes 1e20` used to say only "size out of range: 1e20".
+// can name the largest N (MAX_LIMIT below) instead of the 64-bit bound.
 struct SizeOutOfRange : std::runtime_error {
     using std::runtime_error::runtime_error;
 };
@@ -153,17 +145,14 @@ inline uint64_t parse_size(const std::string& raw) {
 // The largest N. Activation computes p * m up to start + 14p (the sparse
 // tier's mod-2310 multiplier moves up to 13 past ceil(start / p): the largest
 // gap between residues coprime to 2310 is 14), with p up to sqrt(N) < 2^32 and
-// start up to N + 30, so N needs 2^32 * 14 + 30 of headroom below 2^64.
-// primesieve's own ceiling, 2^64 - 2^32 * 10, isn't enough: a window just
-// below it threw "bucket sieve: a sparse prime's step exceeds the bucket
-// ring's margin" from a wrapped p * m.
+// start up to N + 30, so N needs 2^32 * 14 + 30 of headroom below 2^64
+// (primesieve's 2^64 - 2^32 * 10 is not enough here).
 inline constexpr uint64_t MAX_LIMIT = UINT64_MAX - 16 * (uint64_t{1} << 32);
 inline std::string max_limit_text() { return std::to_string(MAX_LIMIT) + " = 2^64 - 2^32 * 16"; }
 
 // Strict signed integer for --zstd-level, within zstd's own range
 // (ZSTD_minCLevel()..ZSTD_maxCLevel(), negative levels being zstd's fast
-// modes): std::stoi took "abc" as an exception named "stoi" and let any
-// integer through to the compressor.
+// modes).
 inline int parse_zstd_level(const std::string& v) {
     const size_t digits = v.size() - (!v.empty() && v[0] == '-' ? 1 : 0);
     if (digits == 0 || digits > 7 ||
@@ -176,8 +165,7 @@ inline int parse_zstd_level(const std::string& v) {
     return level;
 }
 
-// Strict unsigned count for -t: std::stoul accepts "-1" and wraps it to
-// ULONG_MAX threads.
+// Strict unsigned count for -t (std::stoul alone would wrap "-1").
 inline unsigned parse_threads(const std::string& v) {
     if (v.empty() || v.size() > 6 || !std::all_of(v.begin(), v.end(), [](char c) { return std::isdigit(static_cast<unsigned char>(c)); }))
         throw std::runtime_error("invalid thread count: " + v);
@@ -339,12 +327,8 @@ inline Options parse_args(int argc, char** argv) {
         } else if (a == "--tune") {
             parse_tune(opt, need_value(i, a.c_str()));
         } else if (!a.empty() && a[0] != '-' && !has_limit) {
-            // Bare positional limit (./eratostenes 1t), primesieve-style
-            // -- the only way to give it; there's no -n/--limit flag (one
-            // less thing to type, matches primesieve's own CLI). Only ever
-            // consumes the *first* such argument; a second one falls
-            // through to "unknown argument" below instead of silently
-            // overwriting the limit.
+            // N is positional, as in primesieve; a second positional falls
+            // through to "unknown argument".
             try {
                 opt.limit = parse_size(a);
             } catch (const SizeOutOfRange&) {
@@ -361,8 +345,6 @@ inline Options parse_args(int argc, char** argv) {
     if (!has_limit) throw std::runtime_error("missing N (upper limit)");
     if (opt.limit > MAX_LIMIT)
         throw std::runtime_error("N too large: " + std::to_string(opt.limit) + " (at most " + max_limit_text() + ")");
-    // A --start at or past N used to be dropped silently and the whole
-    // [0, N] sieved instead.
     if (opt.start >= opt.limit && opt.start != 0)
         throw std::runtime_error("--start must be below N (" + std::to_string(opt.start) + " >= " +
                                  std::to_string(opt.limit) + ")");

@@ -6,27 +6,11 @@
 // offset and length -- off via a callback (SqlitePrimeStore::push, see
 // sqlite_prime_store.hpp) for a dedicated writer thread to insert.
 //
-// Same write_uint64(uint64_t) contract as NullSink/ByteCounter/DirectWriter
-// in sinks.hpp, so sieve_chunk<Writer> (main.cpp) works unchanged. One
-// GapBlockSink is owned per work chunk (main.cpp splits the range into many
-// more chunks than threads -- see run_parallel_chunks); blocks from
-// different chunks are NOT stitched together across chunk boundaries --
-// each is self-describing (start_index, count), so only the last block of
-// each chunk may come out shorter than block_size. That costs at most
-// (chunk count) short blocks total out of what's otherwise hundreds of
-// thousands -- negligible, and it avoids any cross-chunk coordination.
-//
-// start_index here is always CHUNK-RELATIVE (starts at 0), unlike before --
-// there is no separate counting pre-pass any more to hand this sink its
-// true global offset up front (see main.cpp's run_db). Each
-// block instead carries chunk_id, and SqlitePrimeStore::finish() corrects
-// every block's start_index up to its real global value with a handful of
-// cheap UPDATEs (one per chunk, not per block) once every chunk's actual
-// prime count is known -- a count that now falls out of this same sieve
-// pass for free (sieve_chunk's local_count), instead of a second full
-// re-sieve whose only job was computing that count ahead of time. .db
-// blocks are looked up by an index on start_index (nth_prime.cpp), not by
-// insertion order, so this deferred fixup is invisible to any reader.
+// One GapBlockSink per chunk: blocks are not stitched across chunk
+// boundaries (each is self-describing), so only a chunk's last block may be
+// shorter than block_size. start_index is chunk-relative; each block carries
+// its chunk_id, and SqlitePrimeStore::finish() adds the chunk's global
+// offset once every chunk's prime count is known.
 
 #include <cstdint>
 #include <functional>
@@ -77,11 +61,8 @@ public:
 
     // Same encoding, fed the prime's wheel index instead of its value
     // (SegmentSieve::sieve_and_emit uses this when the sink has it): the
-    // wheel gap is just k - last_k_. Through write_uint64 every prime went
-    // wheel index -> value in the extraction loop and back to wheel index
-    // (twice: this prime and the previous one) in encode_gap, about half
-    // of all CPU time in .db mode at 1e10. The value is only rebuilt for a
-    // block's first prime and for the rare escape.
+    // wheel gap is just k - last_k_, no value <-> index conversions. The
+    // value is only rebuilt for a block's first prime and the rare escape.
     void write_k(uint64_t k) {
         if (count_in_block_ == 0) {
             block_start_prime_ = wheel_number(k);

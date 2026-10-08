@@ -114,23 +114,17 @@ inline uint64_t mem_available_bytes() {
 }
 
 // The threads the run's memory allows. Each worker keeps its own state for
-// every base prime -- the sparse ring holds one 8-byte entry per sparse prime
-// (whatever chunk the worker is on, a fresh start activates them all up to
-// sqrt of its first segment) and the dense tiers about as much per prime --
-// so a worker takes ~8 B x pi(sqrt N) (x 1.02: a 16-byte header per 4 KiB
-// ring block), plus a fixed ~16 MiB (segment buffers for both tier sets, the
-// arena granularity, partly filled blocks, an output buffer). Shared: the
-// base-prime bitmap and its rank index, plus 64 MiB. Measured peaks at the
-// 64-bit ceiling (pi(sqrt N) = 203M): 9.24-9.38 GiB on 6 threads and 17.99
-// on 12, against estimates of 9.6 and 18.9 GiB.
+// every base prime -- one 8-byte entry per sparse prime in its ring, about
+// as much per dense prime -- so it takes ~8 B x pi(sqrt N) (x 1.02: a
+// 16-byte header per 4 KiB ring block) plus a fixed ~16 MiB (segment
+// buffers, arena granularity, partly filled blocks, an output buffer).
+// Shared: the base-prime bitmap and its rank index, plus 64 MiB. At the
+// 64-bit ceiling this estimates 9.6 GiB on 6 threads (measured 9.24-9.38).
 //
 // Budget: --max-mem, or 90% of MemAvailable (0 / unknown: no cap). A run
-// that doesn't fit is killed by the kernel mid-way (the 1e18 tails were
-// skipped on the 8 GB machines for that); with the cap it runs on fewer
-// threads instead, which at these heights loses little or nothing -- the
-// sparse tier is bound by DRAM bandwidth there, and the i5-11400F and the
-// i5-13500 were both fastest at 6 threads on the ceiling's tail
-// (docs/RESEARCH.md).
+// that wouldn't fit runs on fewer threads instead of being killed by the
+// kernel mid-way; at those heights the sparse tier is bound by DRAM
+// bandwidth and fewer threads lose little (docs/RESEARCH.md).
 struct MemCap {
     unsigned threads = 0;     // the threads to run
     unsigned requested = 0;   // -t (or the core count)
@@ -165,28 +159,26 @@ inline SievePlan plan_sieve(const Options& opt, const BasePrimes& base, uint64_t
     // The base segment: half of cpu0's L2 (--l2-bytes stands in for it;
     // 256 KiB when undetected), not capped at isqrt(N), see
     // docs/RESEARCH.md#auto-segment-width-dropping-the-isqrtlimit-cap-kept.
-    // An explicit -s is a numeric width (so the option keeps meaning the
-    // same thing to the user), converted to wheel indices (WHEEL_SIZE out of
-    // every WHEEL_MOD numbers). Either way the width is whole 64-bit words:
-    // the byte-addressed dense tiers (erat_small.hpp) need every segment to
-    // start on a word boundary. The steps below adjust the automatic width
-    // only, except the power-of-2 fixup.
+    // An explicit -s is a numeric width, converted to wheel indices. Either
+    // way the width is whole 64-bit words, so every segment starts on a word
+    // boundary. The steps below adjust the automatic width only, except the
+    // power-of-2 fixup.
     const uint64_t l2_core = opt.l2_bytes_override ? opt.l2_bytes_override : detect_l2_cache_bytes();
     uint64_t seg_k_width = opt.segment_width_set
                          ? std::max<uint64_t>(64, (opt.segment_width * WHEEL_SIZE / WHEEL_MOD) / 64 * 64)
                          : seg_k_width_from_l2_bytes(l2_core);
 
-    // A core with an L2 of 256 KiB or less (i5-3470, Ivy Bridge): the
-    // proxy for an old core that the small-cutoff and med64 rules below key
-    // on. --l2-bytes counts as the L2 here.
+    // A core with an L2 of 256 KiB or less (i5-3470, Ivy Bridge): the old
+    // core the small-cutoff and med64 rules below key on. --l2-bytes counts
+    // as the L2 here.
     constexpr uint64_t SMALL_L2_BYTES = 256 * uint64_t{1024};
     const bool small_l2_core = l2_core && l2_core <= SMALL_L2_BYTES;
 
     // Small/med64 cutoff, as a fraction of the sub-block: 1/4, tuned jointly
     // with med64_limit below
     // (docs/RESEARCH.md#small_limit-re-tuned-jointly-with-med64_limit-kept-2026-09-26).
-    // 1/2 on a small-L2 core, whose med64 kernel misses L1 on every byte: the
-    // primes just above the cutoff are better off L1-blocked there
+    // 1/2 on a small-L2 core, where the primes just above it are better off
+    // L1-blocked
     // (docs/RESEARCH.md#small-cutoff-12-of-the-sub-block-on-a-256-kib-l2-core-kept-2026-10-06).
     // --tune small=a/b overrides.
     uint64_t small_num = 1, small_den = 4;
@@ -204,16 +196,14 @@ inline SievePlan plan_sieve(const Options& opt, const BasePrimes& base, uint64_t
     unsigned l1_big_cores = 0;         // physical cores with the largest L1d (0: unknown)
     uint64_t l1_max = l1_bytes ? l1_bytes : 32 * 1024; // largest per-core L1d (segment ceiling below)
 
-    // Hybrid P-core/E-core correction: the detection above reads cpu0 only,
-    // so a P-core cpu0 would size E-core threads for cache they don't have.
+    // Hybrid P-core/E-core correction: the detection above reads cpu0 only.
     // The segment takes the smallest per-CPU L2 share, the sub-block the
-    // largest per-CPU L1d (the E-cores' was slower on the i5-13500) -- the
-    // same for every thread, since threads migrate between core types. See
+    // largest per-CPU L1d -- the same for every thread, since threads
+    // migrate between core types. See
     // docs/RESEARCH.md#cache-topology-sizing-per-cpu-minimum-step-kept.
     // Skipped when the user forced a value (-s, --l2-bytes, --l1-bytes) or
-    // detection found nothing (non-Linux, no sysfs).
+    // detection found nothing.
     const CpuCacheTopology topo = detect_cpu_cache_topology();
-    // Only recompute when some CPU's share is smaller than cpu0's own.
     if (!opt.segment_width_set && !opt.l2_bytes_override && !topo.l2_share.empty() && topo.l2_share[0]) {
         uint64_t min_l2_share = topo.l2_share[0];
         for (uint64_t s : topo.l2_share) if (s && s < min_l2_share) min_l2_share = s;
@@ -231,12 +221,10 @@ inline SievePlan plan_sieve(const Options& opt, const BasePrimes& base, uint64_t
         }
         // One thread per core: half the L1d is an HT pair's share, so with
         // no more threads than physical cores the sub-block takes the whole
-        // L1d (VMs without SMT, HT off, or -t below the core count: Linux
-        // spreads threads one per core, P-cores first). Only cores with the
-        // largest L1d count, each CPU on a shared L1d as 1/sharers of a
-        // core. The core count is topology, so --l1-bytes doesn't switch it
-        // off. small_limit keeps the half-L1d value (growing it measured
-        // worse). See
+        // L1d (Linux spreads threads one per core, P-cores first). Only
+        // cores with the largest L1d count, each CPU on a shared L1d as
+        // 1/sharers of a core; --l1-bytes doesn't switch it off.
+        // small_limit keeps the half-L1d value. See
         // docs/RESEARCH.md#sub-block-the-whole-l1d-when-each-thread-has-a-core-to-itself-kept-2026-10-01.
         double big_cores = 0;
         for (size_t c = 0; c < topo.l1_raw.size(); ++c)
@@ -252,11 +240,9 @@ inline SievePlan plan_sieve(const Options& opt, const BasePrimes& base, uint64_t
         if (s && (min_l2_share == 0 || s < min_l2_share)) min_l2_share = s;
 
     // Cap on the automatic base width: 32 x L1d, whatever sysfs claims for
-    // the L2. Every real machine measured sits at or under it; it is there
-    // for a lying topology (Docker Desktop's VM reported the host's L3 as a
-    // 4 MiB L2 per vCPU, and the segment that came out ran 2.14x
-    // primesieve). Applied before sparse_regime, so the doubling and the
-    // ceiling below see the capped width; only -s bypasses it. See
+    // the L2 (a VM can report the host's L3 as its L2). Applied before
+    // sparse_regime, so the doubling and the ceiling below see the capped
+    // width; only -s bypasses it. See
     // docs/RESEARCH.md#base-segment-capped-at-32-x-l1d-a-vm-whose-sysfs-reports-the-hosts-l3-as-l2-kept-2026-10-03.
     uint64_t seg_l1_capped_k = 0; // startup log: the width before this cap, 0 if it didn't apply
     if (!opt.segment_width_set) {
@@ -270,8 +256,8 @@ inline SievePlan plan_sieve(const Options& opt, const BasePrimes& base, uint64_t
     // The sparse regime: some base prime would be sparse (isqrt(N) >=
     // seg_k_width). From there the segment doubles to the whole L2 share:
     // every med64/medium prime pays a fixed cost per segment, and halving
-    // the number of segments is worth more than the extra cache pressure
-    // (below that N it isn't). Auto width only. See
+    // the number of segments outweighs the extra cache pressure. Auto width
+    // only. See
     // docs/RESEARCH.md#segment-width-doubled-once-the-sparse-tier-exists-kept-2026-09-27.
     // The same condition gates the lowered sparse cutoffs below.
     const bool sparse_regime = base_limit >= seg_k_width;
@@ -280,10 +266,9 @@ inline SievePlan plan_sieve(const Options& opt, const BasePrimes& base, uint64_t
     bool whole_l2_base = false;      // startup log
     bool half_l2_few_primes = false; // startup log
     // With few base primes (<= 40K, sqrt(N) ~ 500K) the whole-L2 width
-    // below doesn't pay: halving the segment doubles every med64 entry's
-    // per-segment visit, cheap while the primes are few, and leaves L2 ways
-    // to the state streams. Half of the whole-L2 width, on any one-per-core
-    // machine. See
+    // below doesn't pay: more segments cost little while the primes are
+    // few, and the smaller one leaves L2 ways to the state streams. Half of
+    // the whole-L2 width then, on any one-per-core machine. See
     // docs/RESEARCH.md#half-the-whole-l2-width-with-few-base-primes-on-every-one-per-core-machine-kept-2026-10-06
     constexpr uint64_t HALF_L2_MAX_BASE_PRIMES = 40000;
     if (!opt.segment_width_set && sparse_regime) {
@@ -292,10 +277,8 @@ inline SievePlan plan_sieve(const Options& opt, const BasePrimes& base, uint64_t
         // No sparse tier and a core to itself: the base segment is the
         // thread's whole L2 share, not half of it (the half is an HT
         // sibling's), within 32 x L1d -- every base prime is dense here and
-        // the medium tier pays per prime per segment. On an SMT machine the
-        // share is already half the L2 and nothing changes. --l2-bytes
-        // stands in for the detected share, so tests can force both
-        // branches. See
+        // the medium tier pays per prime per segment. --l2-bytes stands in
+        // for the detected share. See
         // docs/RESEARCH.md#whole-l2-base-segment-one-thread-per-core-no-sparse-tier-kept-2026-10-03.
         const uint64_t l2_thread = opt.l2_bytes_override ? opt.l2_bytes_override : min_l2_share;
         if (l2_thread) {
@@ -312,10 +295,9 @@ inline SievePlan plan_sieve(const Options& opt, const BasePrimes& base, uint64_t
 
     // Ceiling on the automatic segment in the sparse regime: the L2 per
     // thread, within 16 x L1d (primesieve's own ceiling) and 32 x L1d;
-    // the power-of-2 fixup below rounds it down. Without it the doubling
-    // fills a large L2 per thread (2 MiB on Emerald Rapids) and loses at the
-    // top tails. The HT machines (256 KiB per thread) sit below it. Auto
-    // width only. See
+    // the power-of-2 fixup below rounds it down. It keeps the doubling from
+    // filling a large L2 per thread (2 MiB on Emerald Rapids). Auto width
+    // only. See
     // docs/RESEARCH.md#segment-ceiling-half-the-l2-per-thread-within-16-32-x-l1d-kept-2026-10-02.
     uint64_t seg_uncapped_k = 0; // startup log: the width before the ceiling, 0 if it didn't apply
     if (!opt.segment_width_set && sparse_regime) {
@@ -384,14 +366,12 @@ inline SievePlan plan_sieve(const Options& opt, const BasePrimes& base, uint64_t
     }
 
     // med64/medium cutoff: primes in [small_limit, med64_limit) go to the
-    // med64 tier (SegmentSieve::process_med64, erat_small.hpp's
-    // cross_off_checked210 over 384 (class, entry phase) lists) -- a band
-    // close to small_limit, not the whole medium tier, whose population
-    // keeps growing with N
+    // med64 tier (SegmentSieve::process_med64) -- a band close to
+    // small_limit, not the whole medium tier, whose population keeps growing
+    // with N
     // (docs/RESEARCH.md#medium-tier-64-list-restructuring-scoped-to-a-bounded-sub-band-med64_primes-kept-2026-09-26).
     // 1/6 of the segment. The whole segment on a small-L2 core, where the
     // medium tier's table-driven stepping costs more than med64's lists
-    // (the modern cores rank them the other way)
     // (docs/RESEARCH.md#i5-3470-profile-at-1e12-the-med64-tier-over-the-whole-l2-segment-is-59-of-the-cycles-open-2026-10-04).
     // --tune med64=a/b overrides; 0 disables the tier.
     uint64_t med64_num = 1, med64_den = 6;
@@ -466,8 +446,7 @@ inline SievePlan plan_sieve(const Options& opt, const BasePrimes& base, uint64_t
     // Medium-tier prefetchnta gate: on once the medium state outgrows the
     // per-thread L3 share, where it comes from DRAM anyway and keeping it
     // out of L2 only protects the segment. The threshold counts 8 bytes per
-    // prime, as measured; the state is 5 since the qp deltas, and the gate
-    // was never re-measured at 5. See
+    // prime, as it was measured (the state is 5 now). See
     // docs/RESEARCH.md#cross_off_medium-struct-of-arrays-state--gated-prefetchnta-kept-2026-09-29.
     // Undetected L3 -> 1 MiB.
     {

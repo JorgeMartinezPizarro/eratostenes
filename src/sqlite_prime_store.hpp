@@ -4,16 +4,11 @@
 // thread's GapBlockSink via push()), and one dedicated writer thread that
 // drains the queue with batched transactions -- plus the .blk sidecar
 // (block_file.hpp) the compressed blocks themselves go to, written by the
-// sieve threads in parallel. SQLite's single writer only ever sees ~40-byte
-// rows (the blocks used to go through it as BLOBs: docs/RESEARCH.md).
+// sieve threads in parallel. SQLite's single writer only sees ~40-byte rows.
 //
-// No separate counting pre-pass feeds this any more (see gap_block_sink.hpp
-// and main.cpp's run_db): every block arrives with a
-// chunk-relative start_index and its chunk_id, and finish() corrects
-// start_index up to the true global offset with one UPDATE per chunk
-// (fix_offsets, called from finish before the start_index index is built)
-// once every chunk's real prime count -- a byproduct of the single sieve
-// pass, not a second one -- is known.
+// Every block arrives with a chunk-relative start_index and its chunk_id;
+// finish() corrects start_index to the global position with one UPDATE per
+// chunk (fix_offsets) once every chunk's prime count is known.
 
 #include <condition_variable>
 #include <cstdint>
@@ -40,15 +35,10 @@ public:
 
         check(sqlite3_open(path.c_str(), &db_), "open");
         exec("PRAGMA page_size=4096;");
-        // WAL, not journal_mode=OFF: OFF writes every page once instead of
-        // twice, and won 2-3x on the dev PC at 1e11, but lost clearly on the
-        // server at 1e12 (A/B, sync included) -- in-place page writes scatter
-        // where WAL appends. See docs/RESEARCH.md.
+        // WAL appends where journal_mode=OFF scatters in-place page writes
+        // (docs/RESEARCH.md).
         exec("PRAGMA journal_mode=WAL;");
         exec("PRAGMA synchronous=NORMAL;");
-        // A bigger PRAGMA cache_size (512MB, up from SQLite's own default
-        // 2MB) was tried and measured worse on the server at both N=1e12
-        // and N=1e13 -- see docs/RESEARCH.md.
         exec("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);");
         // One row per block: where it sits in the prime sequence
         // (start_index, corrected after the fact -- see fix_offsets -- and
@@ -75,11 +65,8 @@ public:
     SqlitePrimeStore& operator=(const SqlitePrimeStore&) = delete;
 
     ~SqlitePrimeStore() {
-        // Normal path is finish(); this only fires if an exception is
-        // unwinding past us without finish() having run -- shut the writer
-        // thread down cleanly (a joinable std::thread whose destructor
-        // still finds it joinable calls std::terminate()) but swallow any
-        // error, since we're already unwinding one.
+        // Only reached without finish() when an exception unwinds past us:
+        // stop and join the writer thread, ignoring its errors.
         if (writer_.joinable()) {
             { std::lock_guard<std::mutex> lk(mu_); done_ = true; }
             cv_.notify_all();
@@ -111,15 +98,10 @@ public:
     // checkpoints WAL back into a single clean file (no -wal/-shm sidecars)
     // fit for shipping/copying.
     //
-    // chunk_offset[i]: how many primes precede chunk i globally (a prefix
-    // sum over each chunk's real count, computed by the caller once every
-    // chunk has finished sieving -- see main.cpp's run_db).
-    // chunk_offset[0] is always 0 by construction. Empty is fine (e.g.
-    // write_tiny_db's single implicit chunk 0, already at the right
-    // offset) -- fix_offsets then has nothing to correct.
-    // range_start: the S of --start S (0 for a full run). Positions
-    // (start_index) count from the first prime >= S, so a tail's are
-    // relative to it -- see format_version below.
+    // chunk_offset[i]: how many primes precede chunk i (main.cpp's run_db);
+    // empty when there is nothing to correct (write_tiny_db).
+    // range_start: the S of --start S (0 for a full run); positions count
+    // from the first prime >= S.
     void finish(uint64_t total_primes, uint64_t range_start, uint64_t limit, uint64_t wheel_mod,
                 uint64_t block_size, int zstd_level,
                 const std::vector<uint64_t>& chunk_offset) {
@@ -196,9 +178,8 @@ private:
 
     void writer_loop() {
         try {
-            // Commits-per-transaction; 1000 measured best against
-            // 3000/10000/100000. See
-            // docs/RESEARCH.md#write-pipeline-knobs-batch---db-block-size-wal_autocheckpoint-all-measured-kept-at-their-defaults.
+            // Rows per transaction
+            // (docs/RESEARCH.md#write-pipeline-knobs-batch---db-block-size-wal_autocheckpoint-all-measured-kept-at-their-defaults).
             const size_t BATCH = 1000;
             size_t in_txn = 0;
             bool txn_open = false;
@@ -235,14 +216,10 @@ private:
         }
     }
 
-    // Adds each chunk's global offset to its blocks' (still chunk-relative)
-    // start_index -- a handful of UPDATEs (one per non-zero-offset chunk),
-    // not one per block. Blocks from different chunks land interleaved in
-    // insertion order (many sieve threads racing into one queue), so a
-    // temporary index on chunk_id is what keeps each UPDATE's WHERE an
-    // indexed lookup instead of a full table scan; dropped again right
-    // after since only idx_blocks_start (built next, in finish()) is meant
-    // to outlive this function.
+    // Adds each chunk's global offset to its blocks' chunk-relative
+    // start_index, one UPDATE per chunk. Blocks of different chunks are
+    // interleaved, so a temporary index on chunk_id keeps each UPDATE an
+    // indexed lookup; only idx_blocks_start outlives finish().
     void fix_offsets(const std::vector<uint64_t>& chunk_offset) {
         bool any = false;
         for (uint64_t off : chunk_offset) if (off != 0) { any = true; break; }

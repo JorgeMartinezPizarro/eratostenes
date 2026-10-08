@@ -23,8 +23,8 @@
 // the smallest primes, then pairs of a mid-size prime with a large one, so
 // every product stays around 6000-10000 bytes of period. All 16 tables:
 // ~123 KB of periods plus one PRESIEVE_CHUNK_BYTES tail each (~190 KB).
-// fill() costs a pass per group, whatever its primes, so extending past 163
-// measured slower in every form tried (docs/RESEARCH.md#extending-pre-sieve-coverage-past-prime-163-tried-three-ways-all-reverted).
+// fill() costs a pass per group whatever its primes, which is why coverage
+// stops at 163 (docs/RESEARCH.md#extending-pre-sieve-coverage-past-prime-163-tried-three-ways-all-reverted).
 inline const std::vector<std::vector<uint64_t>> PRESIEVE_GROUPS = {
     {7, 23, 37},
     {11, 19, 31},
@@ -74,11 +74,9 @@ struct Presieve {
     //
     // k_low is a multiple of 64 and every period a multiple of 8, so each
     // table's window starts on a byte: one unaligned 8-byte load per output
-    // word. Tables combine 4 at a time (dst written 4 times, not 16; GCC
-    // vectorizes the loop), and dst is covered in PRESIEVE_CHUNK_BYTES
-    // chunks, each table's offset advancing a chunk and wrapping by its
-    // period in between, so a table is one period plus one chunk long. See
-    // docs/RESEARCH.md#period-sized-tables-fill-in-4-kib-chunks-with-wraparound-kept-2026-09-29.
+    // word. Tables combine 4 at a time (dst written 4 times, not 16), and dst
+    // is covered in PRESIEVE_CHUNK_BYTES chunks, each table's offset wrapping
+    // by its period in between, so a table is one period plus one chunk long.
     __attribute__((noinline)) void fill(uint64_t* dst, uint64_t k_low, uint64_t count) const {
         constexpr uint64_t CHUNK_WORDS = PRESIEVE_CHUNK_BYTES / 8;
         const uint64_t words_needed = (count + 63) / 64;
@@ -103,8 +101,7 @@ struct Presieve {
                     for (uint64_t i = 0; i < n; ++i) d[i] |= load_u64(s0, i) | load_u64(s1, i) | load_u64(s2, i) | load_u64(s3, i);
                 }
             }
-            // Tail: fewer than 4 tables left (PRESIEVE_GROUPS is 16 long, an
-            // exact multiple of 4, but a smaller/custom group list wouldn't be).
+            // Fewer than 4 tables left (none with PRESIEVE_GROUPS' 16).
             for (; t < nt; ++t) {
                 const uint8_t* s = tables[t].bytes() + off[t];
                 if (first) {

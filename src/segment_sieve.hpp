@@ -195,9 +195,8 @@ public:
 
 private:
     // Count-only (NullSink): a plain popcount over the full words with four
-    // accumulators, the partial last word masked once after the loop (a
-    // per-word "last word?" test made GCC build a cmove chain, ~3x the
-    // instructions).
+    // accumulators; the partial last word is masked once after the loop, not
+    // tested per word (GCC turns that into a cmove chain).
     uint64_t count_primes(uint64_t count) const {
         const uint64_t* wp = words_.data();
         const size_t full = count / 64;
@@ -218,9 +217,8 @@ private:
     }
 
     // Sinks that take wheel indices (GapBlockSink::write_k): a prime's index
-    // is k_low plus its bit position, no value to rebuild. The count is
-    // accumulated in a local and returned (a reference into the caller's
-    // frame could alias the sink's state; a local stays in a register).
+    // is k_low plus its bit position, no value to rebuild. The count is a
+    // local, returned (a reference could alias the sink's state).
     template <typename Writer>
     uint64_t emit_indices(uint64_t k_low, uint64_t count, Writer& out) const {
         const size_t words_needed = (count + 63) / 64;
@@ -371,9 +369,8 @@ private:
     // sub-blocked: these primes have too few hits per sub-block to pay a call
     // each. Each entry is re-filed into m64_nxt_ by its exit phase, rebased
     // to the next segment. The state stream is read with prefetchnta, once
-    // per entry, to keep it out of L2. See
-    // docs/RESEARCH.md#med64-mod-210-stepping-on-the-checked-loop-cross_off_checked210-kept-2026-09-30
-    // and docs/RESEARCH.md#med64-prefetchnta-on-the-state-stream-kept-2026-09-29.
+    // per entry, to keep it out of L2
+    // (docs/RESEARCH.md#med64-prefetchnta-on-the-state-stream-kept-2026-09-29).
     template <int PR>
     void process_med64(uint8_t* bytes, uint64_t bytes_needed) {
         for (int w = 0; w < 48; ++w) {
@@ -389,8 +386,7 @@ private:
         }
     }
 
-    // Out of line (pinned): GCC otherwise inlines it into sieve_chunk on its
-    // own when surrounding code changes.
+    // Out of line (pinned), like cross_off_medium.
     __attribute__((noinline)) void run_med64(uint8_t* bytes, uint64_t bytes_needed) {
         process_med64<0>(bytes, bytes_needed);
         process_med64<1>(bytes, bytes_needed);

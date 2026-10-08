@@ -40,9 +40,8 @@ struct SparsePrimes {
 // Every prime <= limit (= isqrt(N)), as a bitmap on the wheel: bit k is set
 // when wheel_number(k) is a prime, for every k with wheel_number(k) <= limit.
 // WHEEL_SIZE bits per WHEEL_MOD numbers: 33 MB for limit 1e9 (N = 1e18),
-// where a vector<uint64_t> of the same primes took 406 MB, and every thread's
-// activation read it all. The wheel's own primes (WHEEL_PRIMES) aren't in the
-// bitmap; `count` includes them.
+// against 406 MB as a list of uint64_t. The wheel's own primes
+// (WHEEL_PRIMES) aren't in the bitmap; `count` includes them.
 struct BasePrimes {
     static constexpr uint64_t RANK_WORDS = 64; // words per rank block
 
@@ -112,10 +111,7 @@ constexpr uint64_t BASE_SIEVE_WINDOW_K = 32 * 1024 * 8;
 // prime from 167 to isqrt(limit) (at most 65,536 for any 64-bit N) from its
 // square up, and each word goes into the bitmap inverted (set bit = prime).
 // The windows are split into up to `threads` contiguous parts of whole words,
-// sieved in parallel. Until 2026-10-07 this was a byte-per-odd-number sieve
-// emitting every prime with a wheel_index division and an atomic OR into the
-// bitmap: 0.8 s on one thread up to 1e9, most of what a narrow window high up
-// cost (docs/RESEARCH.md).
+// sieved in parallel.
 inline BasePrimes sieve_base_primes(uint64_t limit, const Presieve& presieve, unsigned threads = 1) {
     BasePrimes b;
     b.limit = limit;

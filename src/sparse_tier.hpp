@@ -33,10 +33,9 @@
 #define ERA_BIG_PF 16
 #endif
 // Activation: ERA_ACT_IDX takes p / 30 and p % 30 from the prime's wheel
-// index instead of dividing. Fewer instructions and faster on modern cores,
-// but slower on Ivy Bridge (its 64-bit division stalls longer once the
-// independent work around it is gone), so it is on only where BMI2 exists.
-// See docs/RESEARCH.md#sparse-activation-from-the-bitmap-index-18-fewer-instructions-per-prime-kept-2026-10-05.
+// index instead of dividing. Faster on modern cores, slower on Ivy Bridge,
+// so on only where BMI2 exists. See
+// docs/RESEARCH.md#sparse-activation-from-the-bitmap-index-18-fewer-instructions-per-prime-kept-2026-10-05.
 #ifndef ERA_ACT_IDX
 #ifdef __BMI2__
 #define ERA_ACT_IDX 1
@@ -82,11 +81,9 @@ public:
         if (log2_sb_ > 24 || base_prime_max / WHEEL_MOD >= (uint64_t{1} << 28)) {
             throw std::runtime_error("sparse tier: segment or base prime too large for the packed entry");
         }
-        // Largest BYTE step between one prime's consecutive hits: qp *
-        // max(dm) + max(corr), with max(dm) = 14 on the mod-2310 multiplier
-        // wheel (the largest gap between consecutive 2310-coprime residues)
-        // -- a few extra WHEEL_SIZE's of slack (+16) cost nothing (buckets
-        // are cheap) and keep this comfortably safe.
+        // Largest byte step between one prime's consecutive hits: qp *
+        // max(dm) + max(corr), max(dm) = 14 being the largest gap between
+        // 2310-coprime residues; +16 of slack.
         uint64_t maxstep = base_prime_max / WHEEL_MOD * 14 + 16;
         uint64_t ahead = (maxstep >> log2_sb_) + 2;
         num_buckets_ = 1;
@@ -106,9 +103,7 @@ public:
         next_k_ = 0;
         std::fill(head_.begin(), head_.end(), nullptr);
         std::fill(tail_.begin(), tail_.end(), nullptr);
-        // Blocks aren't freed, just handed back to the pool: every block
-        // ever allocated here is reusable, so repopulate the free list from
-        // scratch rather than reallocate.
+        // Every block ever allocated goes back on the free list.
         free_.clear();
         for (auto& c : chunks_)
             for (size_t i = 0; i < arena_bytes_ / BLK_BYTES; ++i)
@@ -143,31 +138,24 @@ public:
 
     // Drains this segment's slot into the segment bytes `s`: for each entry,
     // mark its hit, step to the next one with the mod-2310 table
-    // (big::TABLE2310; 11 is presieved too, ~9% fewer hits than mod 210) and
-    // copy the entry into the tail block of the slot that hit falls in. The
-    // entry is idx (class and phase) | pos << 12 | qp << 36, pos relative to
-    // the segment it is due in. noinline: its own register allocation, away
-    // from the dense tiers'. See
-    // docs/RESEARCH.md#sparse-tier-design-current-fixed-size-pooled-blocks-attempt-6
-    // and docs/RESEARCH.md#sparse-tier-mod-2310-multiplier-wheel-kept-2026-09-30.
+    // (big::TABLE2310) and copy the entry into the tail block of the slot
+    // that hit falls in. The entry is idx (class and phase) | pos << 12 |
+    // qp << 36, pos relative to the segment it is due in. noinline: its own
+    // register allocation, away from the dense tiers'.
     //
-    // Ring slots: this segment's is cur_segment_ (kept below num_buckets_,
-    // see wrap_ring), a hit `ahead` segments on files into cur_segment_ +
-    // ahead, always below the 2 x num_buckets_ slots allocated (the ring's
-    // sizing has ahead < num_buckets_ / 2 for a re-filed hit, and
-    // file_sparse checks ahead < num_buckets_ for an activation), so the
-    // loop needs no wrap mask.
+    // Ring slots: this segment's is cur_segment_ (below num_buckets_, see
+    // wrap_ring); a hit `ahead` segments on files into cur_segment_ + ahead,
+    // below the 2 x num_buckets_ slots allocated (the sizing keeps ahead <
+    // num_buckets_ / 2 for a re-filed hit; file_sparse checks an
+    // activation), so the loop needs no wrap mask.
     __attribute__((noinline))
     void process_big(uint8_t* const s) {
         const uint32_t slot = static_cast<uint32_t>(cur_segment_);
-        // This segment's tail pointer, as a pointer: a hit `ahead` segments
-        // on files into tails_cur[ahead], so neither the array base (which
-        // the s[pos] store would force GCC to reload) nor the cursor is live
-        // in the loop. The slow path recovers the slot index from
-        // tail_.data().
+        // A hit `ahead` segments on files into tails_cur[ahead], so neither
+        // the array base nor the cursor is live in the loop. The slow path
+        // recovers the slot index from tail_.data().
         erat::DenseState** const tails_cur = tail_.data() + cur_segment_;
-        // uint32_t on purpose: as uint64_t GCC kept two copies and spilled
-        // tails_cur (docs/RESEARCH.md).
+        // uint32_t on purpose: as uint64_t GCC spills tails_cur.
         const uint32_t log2sb = log2_sb_;
         const uint64_t modsb = (uint64_t{1} << log2sb) - 1;
         while (head_[slot]) {
@@ -178,11 +166,9 @@ public:
             while (blk) {
                 Blk* next_blk = blk->next;
                 // The blocks of a chain are scattered in memory (LIFO free
-                // list), so the next one is prefetched into L2 a line at a
-                // time over this block's first half. The last block of a
-                // chain prefetches itself (already cached), so the loops
-                // below test nothing for it. See
-                // docs/RESEARCH.md#sparse-tier-next-block-prefetch-spread-over-the-current-block-kept-2026-10-04.
+                // list), so the next one is prefetched a line at a time over
+                // this block's first groups. The last block of a chain
+                // prefetches itself, so the loops test nothing for it.
                 const char* nb = reinterpret_cast<const char*>(next_blk ? next_blk : blk);
                 erat::DenseState* it = blk->entries();
                 erat::DenseState* end = next_blk ? blk->block_end() : last_end;
@@ -190,13 +176,11 @@ public:
                 // segment RMWs are issued before either push, so their misses
                 // overlap (EratBig's loop shape). The pushes stay in order: a
                 // shared slot's second push reads the tail the first one just
-                // wrote. Each entry and table row is one 8-byte load, the new
-                // entry one 8-byte store, the new-block path out of line.
+                // wrote.
                 constexpr int U = 2;
-                // The segment byte of the entries ERA_BIG_PF ahead of p, cnt
-                // of them (inside the block; the caller keeps it so): that RMW
-                // is the load that misses once two threads share an L2. See
-                // docs/RESEARCH.md#sparse-tier-two-entries-per-iteration-in-process_big-and-a-segment-byte-prefetch-16-entries-ahead-both-kept-2026-10-02.
+                // Prefetches the segment byte of the cnt entries ERA_BIG_PF
+                // ahead of p (inside the block; the caller keeps it so): the
+                // RMW that misses once two threads share an L2.
                 auto seg_pf = [&](const erat::DenseState* p, size_t cnt) __attribute__((always_inline)) {
                     if constexpr (ERA_BIG_PF > 0) {
                         for (size_t k = 0; k < cnt; ++k) {
@@ -241,8 +225,7 @@ public:
                 // lines over the block's first 256 entries), the rest only the
                 // segment bytes ERA_BIG_PF ahead; the entries whose
                 // ERA_BIG_PF-ahead neighbours are past `end` go through the
-                // plain pairs. No test inside either loop but its own end. See
-                // docs/RESEARCH.md#sparse-tier-process_big-in-groups-of-4-entries-no-per-iteration-edge-tests-kept-2026-10-06.
+                // plain pairs. No test inside either loop but its own end.
                 constexpr size_t G = 4;
                 constexpr size_t PF = ERA_BIG_PF > 0 ? ERA_BIG_PF : 0;
                 const size_t n = static_cast<size_t>(end - it);
@@ -284,13 +267,10 @@ public:
     }
 
     // The last number of the whole run (N). A prime whose first multiple at
-    // activation is past it never hits any segment this tier will see --
-    // not this chunk's, nor the contiguous chunks a worker carries the ring
-    // into -- so file_sparse doesn't file it (primesieve's EratBig drops
-    // those the same way). For a narrow window most base primes are such:
-    // the last 1e4 below 1e18 is hit by ~8K of the 50.8M primes up to 1e9,
-    // and filing every one cost a random tail-line write into the ring for
-    // nothing. Default: no bound.
+    // activation is past it never hits any segment this tier will see, so
+    // file_sparse doesn't file it (as primesieve's EratBig). In a narrow
+    // window that is most base primes: the last 1e4 below 1e18 is hit by
+    // ~8K of the 50.8M primes up to 1e9. Default: no bound.
     void set_range_end(uint64_t n) { range_end_n_ = n; }
 
     // Moves the cursor to the next segment's slot, after every segment.
@@ -377,12 +357,9 @@ private:
         return nb->entries();
     }
 
-    // BLK_BYTES-aligned blocks pulled from a pool of aligned_alloc'd
-    // arena_bytes_-sized arenas (indices/pointers into chunks_ stay valid
-    // across pool growth since chunks_ holds owning pointers, never moved
-    // or resized in place). free_ is a stack of blocks not currently in
-    // any ring slot; begin_chunk() repopulates it from every arena ever
-    // allocated, never shrinking the pool.
+    // BLK_BYTES-aligned blocks from a pool of arena_bytes_-sized arenas
+    // that never shrinks (chunks_ owns them, so block pointers stay valid as
+    // it grows). free_ is a stack of the blocks in no ring slot.
     static constexpr size_t BLK_BYTES = ERA_BLK_BYTES;
     struct Blk {
         Blk* next;

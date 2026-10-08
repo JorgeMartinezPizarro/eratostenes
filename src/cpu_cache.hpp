@@ -15,12 +15,9 @@
 #include "wheel.hpp"
 
 // Best-effort cache size (bytes) of cpu0's cache at a given level (1 = L1
-// data, 2 = L2, 3 = L3), from Linux sysfs (also visible inside a Docker
-// container running on the host kernel -- Docker Desktop's own VM reports
-// a made-up topology instead, see docs/RESEARCH.md). 0 on any failure
-// (non-Linux, sysfs unavailable, unexpected format): callers fall back to
-// a sane default rather than divide by it. The cpu0 case of
-// detect_cpu_cache_info below.
+// data, 2 = L2, 3 = L3), from Linux sysfs (also inside a Docker container
+// on the host kernel; Docker Desktop's VM reports a made-up topology). 0 on
+// any failure. The cpu0 case of detect_cpu_cache_info below.
 inline uint64_t detect_cache_bytes(int target_level);
 inline uint64_t detect_l2_cache_bytes() { return detect_cache_bytes(2); }
 inline uint64_t detect_l1d_cache_bytes() { return detect_cache_bytes(1); }
@@ -106,13 +103,10 @@ inline CpuCacheInfo detect_cpu_cache_info(int cpu_id, int target_level) {
 
 inline uint64_t detect_cache_bytes(int target_level) { return detect_cpu_cache_info(0, target_level).total_bytes; }
 
-// A logical CPU's own EFFECTIVE share (bytes) of a given cache level:
-// that cache instance's total size divided by how many logical CPUs
-// actually share it (e.g. 2 for a hyperthread pair, 4 for an E-core
-// cluster). This is what detect_cache_bytes() (above) can't tell apart on
-// a hybrid P-core/E-core CPU: it always reads cpu0, so every thread gets
-// sized for cpu0's own cache-sharing situation regardless of which
-// physical core it actually lands on. Returns 0 on any failure.
+// A logical CPU's share (bytes) of a given cache level: that cache
+// instance's size divided by the logical CPUs sharing it (2 for a
+// hyperthread pair, 4 for an E-core cluster) -- what tells P-cores from
+// E-cores on a hybrid CPU. Returns 0 on any failure.
 inline uint64_t detect_cpu_cache_share(int cpu_id, int target_level) {
     CpuCacheInfo info = detect_cpu_cache_info(cpu_id, target_level);
     if (info.sharers <= 0) return 0;
@@ -149,10 +143,9 @@ inline CpuCacheTopology detect_cpu_cache_topology() {
 }
 
 // Wheel-index segment width (a multiple of 64) that fills half of
-// `l2_bytes`: plan_sieve's base segment (tuning.hpp). Its hybrid step
-// applies this /2 on top of an already per-thread L2 share, on purpose
-// (measured faster), see
-// docs/RESEARCH.md#seg_k_width_from_l2_bytess-extra-2-margin-applied-on-top-of-an-already-per-thread-l2-share-kept-counterintuitive.
+// `l2_bytes`: plan_sieve's base segment (tuning.hpp). The hybrid step
+// halves an already per-thread share too, on purpose
+// (docs/RESEARCH.md#seg_k_width_from_l2_bytess-extra-2-margin-applied-on-top-of-an-already-per-thread-l2-share-kept-counterintuitive).
 // 0 falls back to 256 KiB.
 inline uint64_t seg_k_width_from_l2_bytes(uint64_t l2_bytes) {
     if (l2_bytes == 0) l2_bytes = 256 * 1024;

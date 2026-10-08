@@ -5,10 +5,8 @@
 // those candidates (k = 0 is 1, k = 1 is 7, ...); wheel_number() and
 // wheel_index() convert. The layout is fixed: the dense tiers' masks and
 // offsets (erat_small.hpp) and the multiplier tables (wheel210_big.hpp) are
-// derived for it. Bigger wheels (mod 210, 2310) were measured before the
-// tiered design and lost; see
-// docs/RESEARCH.md#wheel-size-mod-6-vs-mod-30-vs-mod-210-historical-pre-tiered-marking-architecture.
-// The multiples of 7 and 11 are skipped by the multiplier wheels instead.
+// derived for it. The multiples of 7 and 11 are skipped by the multiplier
+// wheels (wheel210_big.hpp), not by a bigger bit wheel.
 
 #include <cstdint>
 #include <array>
@@ -94,9 +92,8 @@ constexpr std::array<int, WHEEL_MOD> make_wheel_pos() {
 constexpr std::array<int, WHEEL_MOD> WHEEL_POS = make_wheel_pos();
 
 // STEP_TO_COPRIME[r] = smallest s >= 0 such that (r+s) % WHEEL_MOD is
-// coprime with WHEEL_MOD. Lets callers jump straight to the next wheel
-// candidate with a single lookup instead of a division-per-step search
-// loop (used once per base prime per segment, not in any hot inner loop).
+// coprime with WHEEL_MOD: the next wheel candidate in one lookup (prime
+// activation, presieve tables).
 constexpr std::array<uint32_t, WHEEL_MOD> make_step_to_coprime() {
     std::array<uint32_t, WHEEL_MOD> step{};
     for (uint64_t r = 0; r < WHEEL_MOD; ++r) {
@@ -137,10 +134,9 @@ inline uint64_t wheel_count_upto(uint64_t limit) {
 }
 
 // The wheel-index advance when a multiplier of p moves from phase jj to
-// phase jj+1 (n grows by p*WHEEL_GAP[jj]); p_mod is p % WHEEL_MOD. Only
-// used to build presieve tables (compute_wheel_deltas) -- the marking
-// tiers step with erat_small.hpp's constant offsets (small, med64) or
-// wheel210_big.hpp's mod-210 tables (medium, sparse).
+// phase jj+1 (n grows by p*WHEEL_GAP[jj]); p_mod is p % WHEEL_MOD. Presieve
+// tables only; the marking tiers step with erat_small.hpp's offsets and
+// wheel210_big.hpp's tables.
 inline uint64_t wheel_delta_at(uint64_t p, uint64_t p_mod, int jj) {
     uint64_t rp = (p_mod * WHEEL_R[jj]) % WHEEL_MOD;
     uint64_t d = p * WHEEL_GAP[jj];

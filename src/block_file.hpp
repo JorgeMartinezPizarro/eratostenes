@@ -5,10 +5,9 @@
 // pwrite() at that offset, so any number of threads append at once with no
 // lock, no gaps and no merge step; blocks land in completion order,
 // interleaved across threads, and the SQLite index (sqlite_prime_store.hpp)
-// records each one's offset and length. Before this file existed the blocks
-// went as BLOBs through the single SQLite writer thread, which capped .db
-// output at ~260 MB/s on an NVMe RAID0 (i5-13500, 1e12: 77 s against a
-// 43 s CPU floor) -- see docs/RESEARCH.md#db-output-where-the-time-goes-2026-10-02.
+// records each one's offset and length. Keeping the blocks out of SQLite's
+// single writer is what lets .db output scale with the threads
+// (docs/RESEARCH.md#db-output-where-the-time-goes-2026-10-02).
 
 #include <algorithm>
 #include <atomic>

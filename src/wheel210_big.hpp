@@ -46,7 +46,7 @@ constexpr std::array<uint8_t, 211> make_next() {
 }
 inline constexpr std::array<uint8_t, 211> NEXT_W = make_next();
 
-// Mod-2310 multiplier wheel for the sparse tier (SegmentSieve::process_big): 11
+// Mod-2310 multiplier wheel for the sparse tier (SparseTier::process_big): 11
 // is presieved too (presieve.hpp), so multipliers that are multiples of 11
 // only re-mark composites the presieve pattern already has -- 480/2310 phases
 // instead of 48/210, ~9.1% fewer sparse hits.
@@ -68,9 +68,7 @@ inline constexpr std::array<uint16_t, 2311> NEXT_W2310 = make_next2310();
 // Per (residue class ri, phase w), index ri * 480 + w, packed in 32 bits
 // (15 KiB): mask | dm << 8 | corr << 16 | next << 20. Same mask/dm/corr
 // meaning as TABLE (dm <= 14, corr <= 14); next is the following phase's
-// index, wrapping at w == 479. A 16-bit row (dm/2 and a wrap bit, next
-// computed as idx + 1 - wrap * 480) was tried first: 43 instructions per
-// hit instead of mod-210's 37, eating part of the ~9% fewer hits.
+// index, wrapping at w == 479.
 constexpr std::array<uint32_t, 8 * W2310> make_table2310() {
     std::array<uint32_t, 8 * W2310> t{};
     for (uint32_t ri = 0; ri < 8; ++ri) for (uint32_t w = 0; w < W2310; ++w) {
@@ -94,13 +92,11 @@ inline constexpr std::array<uint32_t, 8 * W2310> TABLE2310 = make_table2310();
 // medium prime is > 163 and 7 is always presieved, so skipping multipliers
 // that are multiples of 7 saves ~14% of this tier's hits.
 //
-// Indexed by (ri, fixed per prime) and w, a plain register loop variable --
-// NOT through TABLE's "next" field, whose load-to-use chain serializes one
-// lookup behind the previous one every hit. One packed word instead of three
-// arrays: the loop was bound by load ports (4 loads per hit with the
-// store's own), and the extra shifts go to otherwise idle ALU ports -- see
-// docs/RESEARCH.md. Two full 48-phase cycles, so the loop can run w past 47
-// without wrapping it on every hit.
+// Indexed by (ri, fixed per prime) and w, a plain register loop variable,
+// so no lookup waits on the previous one. One packed word per hit keeps the
+// loop off the load ports (the shifts go to idle ALU ports). Two full
+// 48-phase cycles, so the loop can run w past 47 without wrapping it on
+// every hit.
 constexpr std::array<std::array<uint32_t, 96>, 8> make_pack210() {
     std::array<std::array<uint32_t, 96>, 8> a{};
     for (int ri = 0; ri < 8; ++ri) for (int w = 0; w < 96; ++w) {

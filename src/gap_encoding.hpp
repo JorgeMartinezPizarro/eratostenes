@@ -2,7 +2,7 @@
 // Byte encoding for the gap between two consecutive primes, used by the
 // .db (SQLite + zstd) output mode. Shared verbatim by the writer
 // (gap_block_sink.hpp) and the reader (nth_prime.cpp) so encode and
-// decode can never drift apart. Format version 2 (meta.format_version).
+// decode can never drift apart. Unchanged since .db format version 2.
 //
 //   byte b in [1,255] -> next = wheel_number(wheel_index(prev) + b), i.e.
 //                        the gap counted in wheel indices (candidates
@@ -14,13 +14,10 @@
 //                         (2, 3, 5 -> 7) and for a wheel gap > 255 (an
 //                         integer gap > ~960 on mod 30; never below 1e15)
 //
-// Why wheel indices: version 1 stored delta/2, whose distribution carries
-// the residue-class structure (which gaps are possible from each residue
-// mod 30) that zstd can't model without that context; the wheel gap is
-// close to geometric and independent between primes, which zstd's Huffman
-// stage codes within ~1% of its entropy. Measured on real prime windows,
-// zstd -1: 5.16 -> 4.26 bits/prime at 1e12, 5.27 -> 4.39 at 1e13, 5.48 ->
-// 4.62 at 1e15. See docs/RESEARCH.md#gap-encoding-wheel-index-deltas.
+// Why wheel indices: the wheel gap is close to geometric and independent
+// between primes, which zstd's Huffman stage codes within ~1% of its
+// entropy; an integer gap carries the residue-class structure zstd can't
+// see. See docs/RESEARCH.md#gap-encoding-wheel-index-deltas.
 
 #include <cstdint>
 #include <cstring>

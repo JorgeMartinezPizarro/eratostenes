@@ -49,8 +49,8 @@ constexpr uint64_t QP_LIMIT = uint64_t{1} << 26;
 // pending hit (i, j); on return (i, j) is the first hit at or past `end`.
 // A switch enters the cycle at phase j, the unchecked loop runs whole
 // cycles, a checked chain leaves at `end`. Out of line, one call per prime
-// from cross_off_class. The locals stay uint64_t: narrowing them to uint32_t
-// measured slower (docs/RESEARCH.md).
+// from cross_off_class. The locals are uint64_t on purpose (uint32_t is
+// slower, docs/RESEARCH.md).
 template <int PR>
 __attribute__((noinline)) void cross_off(uint8_t* s, uint64_t end, uint64_t qp, uint64_t& i_io, uint32_t& j_io) {
     const uint64_t p = 30 * qp + R[PR];
@@ -115,14 +115,11 @@ done:
 
 // med64 tier: same contract as cross_off, EratMedium's loop shape -- a
 // switch into a for (;;) with one running byte index and one bounds check
-// per hit, so a call leaves at a single loop exit (cross_off's unrolled
-// cycle plus tail exit mispredicts more with tens of hits per call). Steps
-// on the mod-210 multiplier wheel (w = 0..47, M210[w]): the 1/7 of mod-30
-// hits whose multiplier is a multiple of 7 is skipped, 7 being presieved.
-// The byte step from phase w to w+1 is qp*dm + corr with dm in
-// {2,4,6,8,10}: five multiples of qp in registers plus compile-time
-// constants from big::TABLE cover all 48 cases, with no per-call table.
-// No software prefetch: every form tried cost more than it hid. See
+// per hit, so a call leaves at a single loop exit. Steps on the mod-210
+// multiplier wheel (w = 0..47, M210[w]): multipliers divisible by 7 are
+// skipped, 7 being presieved. The byte step from phase w to w+1 is
+// qp*dm + corr with dm in {2,4,6,8,10}: five multiples of qp in registers
+// plus compile-time constants from big::TABLE cover all 48 cases. See
 // docs/RESEARCH.md#med64-mod-210-stepping-on-the-checked-loop-cross_off_checked210-kept-2026-09-30.
 template <int PR>
 __attribute__((always_inline)) inline void cross_off_checked210(uint8_t* s, uint64_t end, uint64_t qp, uint64_t& i_io, uint32_t& w_io) {
@@ -193,10 +190,10 @@ inline void cross_off_class(uint8_t* s, uint64_t end, DenseState* first, DenseSt
 //
 // State is a struct of arrays: dyn[i] = (pos << 6) | w, rewritten every
 // segment, and qp, read-only, as a 1-byte delta from the class's previous
-// prime (qds[i]; the list is sorted by p and never reordered; the largest
-// same-class gap below sqrt(1e15) is 52 * 30, checked at activation). Only
-// the dyn half is ever dirty, 5 bytes stream per prime per segment, and the
-// segment stays in L2. pos fits 26 bits (SegmentSieve's constructor).
+// prime (qds[i]; the list is sorted by p and never reordered; medium primes
+// are below the segment width, where same-class gaps stay far under 255 * 30,
+// checked at activation). Only the dyn half is ever dirty: 5 bytes stream
+// per prime per segment. pos fits 26 bits (SegmentSieve's constructor).
 //
 // NTA: both streams prefetched MEDIUM_NTA_DIST entries ahead with
 // prefetchnta, once per prime, so they reach L1 without being kept in L2;
@@ -204,8 +201,7 @@ inline void cross_off_class(uint8_t* s, uint64_t end, DenseState* first, DenseSt
 // medium_nta_min_primes). See
 // docs/RESEARCH.md#cross_off_medium-struct-of-arrays-state--gated-prefetchnta-kept-2026-09-29.
 //
-// The tier is bound by its loop exit per prime, not by its hits: every
-// variant that cut hits or interleaved primes was measured slower
+// The tier is bound by its loop exit per prime, not by its hits
 // (RESEARCH.md's `cross_off_medium` entries). Out of line (pinned): GCC
 // inlines some classes into sieve_chunk on its own otherwise.
 constexpr uint64_t MEDIUM_NTA_DIST = 32;

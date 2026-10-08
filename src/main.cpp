@@ -24,9 +24,8 @@
 //      chunk-relative at first; SqlitePrimeStore::finish corrects it once
 //      every chunk's prime count is known.
 //
-// The wheel's own primes (WHEEL_PRIMES) are special-cased in thread 0 --
-// they don't take part in the wheel numbering, so they're just emitted
-// directly instead of being found by sieving.
+// The wheel's own primes (WHEEL_PRIMES) don't take part in the wheel
+// numbering: chunk 0's writer emits them directly (wheel_primes_from).
 
 #include <algorithm>
 #include <cstdio>
@@ -156,10 +155,8 @@ static std::vector<ChunkRange> split_ranges(uint64_t limit, unsigned chunks, uin
 // writing) -- they only differ in which Writer they pass in.
 //
 // One SegmentSieve per thread and tier set, reused across that thread's
-// chunks (begin_chunk() resets every piece of per-chunk state; the segment
-// buffer needs no clearing, the presieve fill overwrites it), instead of
-// one per chunk: each construction allocated the 768 med64 lists and the
-// segment buffer again. Worker threads only live for one pass
+// chunks (begin_chunk() resets the per-chunk state; the presieve fill
+// overwrites the segment). Worker threads only live for one pass
 // (run_parallel_chunks), so the cache goes away with them.
 //
 // A chunk that starts where the thread's previous one on the same tiers
@@ -279,11 +276,9 @@ static void emit_db_worker(int idx, ChunkRange range, const TierSet& t, uint64_t
     out_count = local_count;
 }
 
-// Wakes the progress thread as soon as ProgressGuard sets `done`, instead
-// of it finishing out a 500ms sleep: with a plain sleep_for, joining it
-// delayed every pass's end by up to 500ms, which quantized the reported
-// "total:" time to the next 0.5s tick (1e8..1e10 all read 0.51s). Only one
-// progress thread is ever alive at a time, so one shared pair is enough.
+// Wakes the progress thread as soon as ProgressGuard sets `done`, so joining
+// it doesn't add up to its 500 ms tick to the reported time. Only one
+// progress thread is alive at a time, so one shared pair is enough.
 static std::mutex g_progress_mu;
 static std::condition_variable g_progress_cv;
 
@@ -304,10 +299,8 @@ static void print_progress(const Colors& C, const char* label, std::atomic<uint6
     std::fprintf(stderr, "\r  %s%s:%s %s100.0%%%s   \n", C.label, label, C.reset, C.time, C.reset);
 }
 
-// Stops the progress thread on scope exit, normal or exceptional -- a
-// joinable std::thread whose destructor runs while still joinable calls
-// std::terminate(), so a worker exception unwinding past `prog` without
-// this would crash before ever reaching the catch in main().
+// Stops and joins the progress thread on scope exit, also when a worker
+// exception unwinds past it (a still-joinable std::thread terminates).
 struct ProgressGuard {
     std::atomic<bool>& done;
     std::thread& th;
@@ -333,9 +326,7 @@ struct ProgressGuard {
 // A worker whose run is empty steals the back of another run, paying one
 // activation for the whole piece. Many more chunks than workers keep the
 // steals fine-grained: chunks aren't equal-work (see ALGORITHM.md §4) and
-// neither are cores (P/E, SMT siblings). See
-// docs/RESEARCH.md#run_parallel_chunks-chunk-granularity-idle-time-investigation-2026-09-25-external-review-opus-55
-// for CHUNKS_PER_THREAD=150 (tuned with a plain shared-counter queue).
+// neither are cores (P/E, SMT siblings).
 //
 // Steals are priced with what the run itself has measured (sieve_chunk's
 // ChunkStats, no extra work): each worker's sieving rate (wheel indices per
@@ -412,7 +403,7 @@ static void run_parallel_chunks(unsigned workers, const std::vector<ChunkRange>&
     std::vector<std::thread> pool;
     pool.reserve(workers);
     // --debug-idle: per-thread finish timestamp, to check the runs and steals
-    // keep every thread busy. See docs/RESEARCH.md (link above).
+    // keep every thread busy.
     const bool debug_idle = cfg.debug_idle;
     auto t0 = std::chrono::steady_clock::now();
     std::vector<double> finish(debug_idle ? workers : 0);
@@ -652,9 +643,8 @@ int main(int argc, char** argv) {
     try {
         opt = parse_args(argc, argv);
     } catch (const std::exception& e) {
-        // No arguments at all: the help is what was asked for. Otherwise
-        // the error alone, with a pointer to it -- the full usage text
-        // pushed the one line that mattered off the screen.
+        // No arguments at all: the help. Otherwise the error alone, with a
+        // pointer to the help.
         if (argc == 1) {
             print_usage(argv[0]);
         } else {
@@ -666,10 +656,6 @@ int main(int argc, char** argv) {
         print_usage(argv[0]);
         return 0;
     }
-    // --start S (see below) with -o writes the primes of [S, N] only: text
-    // as usual, .db with positions relative to the tail (the first prime >=
-    // S is position 1; pi(S - 1) is not known without sieving [0, S)) and
-    // meta.range_start = S, which nth_prime reports.
 
     const Colors C(stderr_supports_color());
 
@@ -725,27 +711,22 @@ int main(int argc, char** argv) {
     SievePlan P = plan_sieve(opt, base, base_limit);
 
     // Many more, narrower chunks than threads, so the steals between
-    // threads' runs are fine-grained (run_parallel_chunks). Floored at
-    // MIN_SEGS_PER_CHUNK segments each: at small N, threads*150 chunks would
-    // be narrower than one segment. See
+    // threads' runs are fine-grained (run_parallel_chunks), but never under
+    // MIN_SEGS_PER_CHUNK segments each. See
     // docs/RESEARCH.md#run_parallel_chunks-contiguous-runs-the-sieve-carried-across-chunks-steals-kept-2026-10-01.
     constexpr unsigned CHUNKS_PER_THREAD = 150;
     constexpr uint64_t MIN_SEGS_PER_CHUNK = 1;
     uint64_t width_cap = wheel_count_upto(opt.limit) / (MIN_SEGS_PER_CHUNK * P.seg_k_width);
-    // No floor of one chunk per thread either: a range under threads *
-    // MIN_SEGS_PER_CHUNK segments runs on fewer threads (actual_threads
-    // below), each with at least that much work, instead of every thread
-    // paying its own setup (SegmentSieve, activating every base prime) for a
-    // sliver of a segment -- primesieve also drops to fewer threads for small
-    // ranges. Only small N and short --start tails are affected (1e9 already
-    // has 31 chunks of 4 segments).
+    // No floor of one chunk per thread: a range under threads segments runs
+    // on fewer threads (actual_threads below) instead of every thread
+    // paying its own setup for a sliver of a segment, as primesieve does.
     unsigned target_chunks = static_cast<unsigned>(std::max<uint64_t>(1,
         std::min<uint64_t>(uint64_t{opt.threads} * CHUNKS_PER_THREAD, width_cap)));
-    // --start N0 (benchmarking only): sieve just [N0, N] instead of [0, N].
-    // Every base prime is still activated for that range, so a tail of a
-    // large N costs exactly what the same segments cost in a full run --
-    // e.g. the last 1% of 1e14 in about a minute instead of the whole run.
-    // The printed count is then only for that tail, not pi(N).
+    // --start N0: sieve just [N0, N] instead of [0, N]. Every base prime is
+    // still activated for that range, so a tail of a large N costs what the
+    // same segments cost in a full run. The count is the tail's, not pi(N);
+    // with -o only the tail is written (a .db's positions start at its
+    // first prime, meta.range_start = N0).
     uint64_t range_start = opt.start; // below N, parse_args
     if (range_start) {
         std::fprintf(stderr, "WARNING: --start %llu -- only [%llu, %llu] is sieved; the count is NOT pi(N).\n",
@@ -803,10 +784,8 @@ int main(int argc, char** argv) {
                          gib(mem.shared + mem.per_thread * mem.threads), mem.threads, gib(mem.budget), why);
     }
 
-    // Every pass runs worker threads that can throw (pwrite() on a full disk,
-    // or the bucket-sieve sizing check) -- see run_parallel_chunks for why
-    // that needs this try/catch rather than main()'s existing one around
-    // parse_args.
+    // Worker exceptions (pwrite() on a full disk, the bucket ring's sizing
+    // check) are rethrown by run_parallel_chunks and end here.
     const RunPlan plan{opt, C, std::move(ranges), actual_threads, P.wide, P.narrow, P.narrow_k_end, base_limit, presieve,
                        P.cfg, std::move(fresh_primes), total_span, range_start, t_start};
     try {
