@@ -121,10 +121,10 @@ What this project is built from, one term each — follow the link for the conce
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
-| 1e10 | 0.123s | 0.127s | 0.97x |
-| 1e11 | 1.773s | 2.101s | 0.84x |
-| 1e12 | 22.360s | 25.227s | 0.89x |
-| 1e13 | 279.024s | 296.144s | 0.94x |
+| 1e10 | 0.125s | 0.131s | 0.95x |
+| 1e11 | 1.759s | 2.112s | 0.83x |
+| 1e12 | 22.395s | 25.182s | 0.89x |
+| 1e13 | 279.230s | 294.566s | 0.95x |
 | 1e14 | 3386.88s | 3349.907s | 1.01x |
 | 1e15 | 39517.53s | 39053.581s | 1.01x |
 
