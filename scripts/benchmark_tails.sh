@@ -40,11 +40,11 @@ WIDTH="${WIDTH:-1e11}"
 SEGMENT="${SEGMENT:-}"   # forced -s for eratostenes (default: the CLI's own auto width)
 
 if ! command -v primesieve >/dev/null 2>&1; then
-    echo "primesieve no esta en el PATH -- instalalo (docs/ISSUES.md: la misma version en todas las maquinas)." >&2
+    echo "primesieve is not on the PATH -- install it (docs/ISSUES.md: the same version on every machine)." >&2
     exit 1
 fi
 if [ ! -x "$BIN" ]; then
-    echo "No existe $BIN -- compila antes (make)." >&2
+    echo "$BIN not found -- build it first (make)." >&2
     exit 1
 fi
 
@@ -99,11 +99,11 @@ for n in $NS; do
     need_kb=$(awk -v n="$stop" -v t="$THREADS" 'BEGIN{r = sqrt(n); printf "%d", (t + 1) * 8 * 1.15 * r / log(r) / 1024}')
     avail_kb=$(sed -nE 's/^MemAvailable: *([0-9]+) kB$/\1/p' /proc/meminfo 2>/dev/null || true)
     if [ -n "$avail_kb" ] && [ "$need_kb" -gt "$avail_kb" ]; then
-        echo "  N=$n: saltado, necesita ~$(awk -v k="$need_kb" 'BEGIN{printf "%.1f", k / 1048576}') GiB con $THREADS hilos y MemAvailable da $(awk -v k="$avail_kb" 'BEGIN{printf "%.1f", k / 1048576}') GiB (prueba con menos THREADS)" >&2
+        echo "  N=$n: skipped, needs ~$(awk -v k="$need_kb" 'BEGIN{printf "%.1f", k / 1048576}') GiB with $THREADS threads and MemAvailable is $(awk -v k="$avail_kb" 'BEGIN{printf "%.1f", k / 1048576}') GiB (try fewer THREADS)" >&2
         continue
     fi
     if ! diff=$(dec_sub "$stop" "$width") || [ "$diff" = 0 ]; then
-        echo "WIDTH=$WIDTH no cabe por debajo de N=$n" >&2
+        echo "WIDTH=$WIDTH doesn't fit below N=$n" >&2
         exit 1
     fi
     # --start rounds down to a multiple of 64 wheel indices (8 * 30 = 240
@@ -116,12 +116,12 @@ for n in $NS; do
         if (( r % 2 )); then run_era "$stop" "$start"; run_ps "$stop" "$start"
         else run_ps "$stop" "$start"; run_era "$stop" "$start"; fi
         if [ -z "$c_e" ] || [ "$c_e" != "$c_p" ]; then
-            echo "N=$n rep=$r: los recuentos no coinciden: eratostenes=${c_e:-?} primesieve=${c_p:-?}" >&2
+            echo "N=$n rep=$r: the counts differ: eratostenes=${c_e:-?} primesieve=${c_p:-?}" >&2
             exit 1
         fi
         count="$c_e"
         times_e+=("$t_e"); times_p+=("$t_p")
-        echo "  N=$n rep=$r eratostenes=${t_e}s primesieve=${t_p}s ($count primos) [ok]" >&2
+        echo "  N=$n rep=$r eratostenes=${t_e}s primesieve=${t_p}s ($count primes) [ok]" >&2
     done
     MEAN_E[$n]=$(mean_of 3 "${times_e[@]}")
     MEAN_P[$n]=$(mean_of 3 "${times_p[@]}")

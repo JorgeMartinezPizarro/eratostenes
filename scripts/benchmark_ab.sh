@@ -39,12 +39,12 @@ REPS="${REPS:-3}"
 EVENTS="${EVENTS:-cycles:u,instructions:u}"
 
 if [ "$BIN_A" = "$BIN_B" ] && [ "$A_CFG" = "$B_CFG" ]; then
-    echo "A y B son la misma ejecucion: da B (opciones, p.ej. B=\"--tune sparse=1/2\") o BIN_A/BIN_B (otro binario)" >&2
+    echo "A and B are the same run: give B (options, e.g. B=\"--tune sparse=1/2\") or BIN_A/BIN_B (another binary)" >&2
     exit 1
 fi
 for b in "$BIN_A" "$BIN_B"; do
     if [ ! -x "$b" ]; then
-        make -s "$b" || { echo "No existe $b y make no sabe construirlo (compila antes: make)." >&2; exit 1; }
+        make -s "$b" || { echo "$b not found and make can't build it (build it first: make)." >&2; exit 1; }
     fi
 done
 
@@ -106,7 +106,7 @@ compare() {
 
 for N_IN in $NS; do
     N=$(to_dec "$N_IN")
-    if (( N <= WIDTH )); then echo "WIDTH=$WIDTH_IN no cabe por debajo de N=$N_IN" >&2; continue; fi
+    if (( N <= WIDTH )); then echo "WIDTH=$WIDTH_IN doesn't fit below N=$N_IN" >&2; continue; fi
     START=$(( (N - WIDTH) / 240 * 240 ))
     echo
     if [ $HAVE_PERF = 1 ]; then printf "%-6s %-3s %-3s %16s %16s %8s  %s\n" N bin rep "$E1" "${E2:--}" wall count

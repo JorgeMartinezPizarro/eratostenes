@@ -15,5 +15,5 @@ ps_ver=$(primesieve --version 2>/dev/null | head -1 | sed 's/,.*//')
 # pass the host's `git describe` in ERATOSTENES_COMMIT instead.
 commit=${ERATOSTENES_COMMIT:-$(git -c safe.directory='*' describe --always --dirty 2>/dev/null || echo "?")}
 
-echo "${cpu:-CPU desconocida}, $1 threads (${tpc:-?} per core); ${caches:-caches ?}"
+echo "${cpu:-unknown CPU}, $1 threads (${tpc:-?} per core); ${caches:-caches ?}"
 echo "${ps_ver:-primesieve ?}; eratostenes $commit; $(date +%F)${2:+; $2}"

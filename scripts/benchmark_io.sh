@@ -6,8 +6,8 @@
 # pass, not an isolated write phase.
 #
 # Usage: ./scripts/benchmark_io.sh   (or: make benchmark-io)
-# Env overrides: THREADS (default: nproc), SEGMENT (default: 4194304),
-# WRITE_PATH (default: $HOME/eratostenes-io-bench; must be on the
+# Env overrides: THREADS (default: nproc), SEGMENT (forced -s; default:
+# unset, the CLI's automatic width, as in benchmark.sh), WRITE_PATH (default: $HOME/eratostenes-io-bench; must be on the
 # Linux-native filesystem, not a /mnt/c... mount, much slower), KEEP_DB
 # (default: 0 -- each .db is deleted right after it's measured, as the
 # sweep adds up to tens of GB; KEEP_DB=1 keeps them). A trap also removes
@@ -34,14 +34,14 @@ cleanup_current_io_file() {
 }
 trap cleanup_current_io_file EXIT
 
-echo "Reconstruyendo eratostenes..." >&2
+echo "Rebuilding eratostenes..." >&2
 make re >/tmp/benchmark_build.log 2>&1 || { cat /tmp/benchmark_build.log >&2; exit 1; }
 
 case "$(cd "$(dirname "$WRITE_PATH")" 2>/dev/null && pwd)/$(basename "$WRITE_PATH")" in
     /mnt/*)
-        echo "Aviso: WRITE_PATH=$WRITE_PATH esta bajo /mnt (filesystem de Windows montado via 9p/DrvFs)." >&2
-        echo "       Eso ralentiza la E/S y falsea los tiempos de escritura medidos aqui." >&2
-        echo "       Usa un directorio en el filesystem nativo de Linux, p.ej. \$HOME." >&2
+        echo "Warning: WRITE_PATH=$WRITE_PATH is under /mnt (the Windows filesystem, mounted via 9p/DrvFs)." >&2
+        echo "         That slows the I/O down and skews the write times measured here." >&2
+        echo "         Use a directory on the native Linux filesystem, e.g. \$HOME." >&2
         ;;
 esac
 
@@ -71,11 +71,13 @@ for i in "${!IO_SIZES[@]}"; do
     expected="${IO_EXPECTED[$i]}"
     file="$WRITE_PATH/primes-$n.db"
 
-    echo "== N=$n (limite $limit) ==" >&2
+    echo "== N=$n (limit $limit) ==" >&2
     CURRENT_IO_FILE="$file"
-    out=$("$BIN" "$n" -t "$THREADS" -s "${SEGMENT:-4194304}" -o "$file" 2>&1) || {
+    seg_args=()
+    [ -n "$SEGMENT" ] && seg_args=(-s "$SEGMENT")
+    out=$("$BIN" "$n" -t "$THREADS" "${seg_args[@]}" -o "$file" 2>&1) || {
         echo "$out" >&2
-        echo "eratostenes fallo para N=$n" >&2
+        echo "eratostenes failed for N=$n" >&2
         exit 1
     }
 
@@ -83,13 +85,13 @@ for i in "${!IO_SIZES[@]}"; do
     total_s=$(echo "$out" | sed -nE 's/.*total: *([0-9.]+)s.*/\1/p')
 
     if [ "$count" != "$expected" ]; then
-        echo "FAIL N=$n: pi(N) esperado=$expected obtenido=${count:-<sin salida>}" >&2
+        echo "FAIL N=$n: pi(N) expected=$expected got=${count:-<no output>}" >&2
         echo "$out" >&2
         fail=1
         break
     fi
     if [ -z "$total_s" ]; then
-        echo "FAIL N=$n: no se pudo parsear el tiempo total de la salida" >&2
+        echo "FAIL N=$n: could not parse the total time from the output" >&2
         echo "$out" >&2
         fail=1
         break
@@ -102,7 +104,7 @@ for i in "${!IO_SIZES[@]}"; do
     IO_TOTAL_S[$n]="$total_s"
     IO_COUNT[$n]="$count"
 
-    echo "  pi(N)=$count  tamano=$(human_size "$bytes")  total=${total_s}s" >&2
+    echo "  pi(N)=$count  size=$(human_size "$bytes")  total=${total_s}s" >&2
 
     if [ "$KEEP_DB" = "0" ]; then
         rm -f "$file" "${file%.db}.blk"
@@ -111,14 +113,14 @@ for i in "${!IO_SIZES[@]}"; do
 done
 
 if [ "$fail" -ne 0 ]; then
-    echo "Barrido de E/S abortado." >&2
+    echo "I/O sweep aborted." >&2
     exit 1
 fi
 
 # Header, separator and rows share the same column widths, sized to the
 # content, so the table stays aligned in a terminal.
 echo
-bash scripts/machine_info.sh "$THREADS" "segment ${SEGMENT:-4194304}"
+bash scripts/machine_info.sh "$THREADS" "segment ${SEGMENT:-auto}"
 echo
 printf "| %-6s | %-10s | %9s | %6s | %8s |\n" \
     "limit" "db size" "bit/prime" "MB/s" "total(s)"

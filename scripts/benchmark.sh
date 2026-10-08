@@ -38,12 +38,12 @@ SEGMENT="${SEGMENT:-}"
 REPS="${REPS:-1}"
 
 if ! command -v primesieve >/dev/null 2>&1; then
-    echo "primesieve no esta en el PATH -- instalalo (docs/ISSUES.md: la misma version en todas las maquinas)" >&2
-    echo "para poder generar la columna de comparacion." >&2
+    echo "primesieve is not on the PATH -- install it (docs/ISSUES.md: the same version on every machine)" >&2
+    echo "for the comparison column." >&2
     exit 1
 fi
 
-echo "Reconstruyendo eratostenes..." >&2
+echo "Rebuilding eratostenes..." >&2
 make re >/tmp/benchmark_build.log 2>&1 || { cat /tmp/benchmark_build.log >&2; exit 1; }
 
 source scripts/lib.sh # mean_of
@@ -62,7 +62,7 @@ run_era() { # n expected -> sets t_e
     t_e=$(echo "$out" | sed -nE 's/.*total: *([0-9.]+)s.*/\1/p')
     count_e=$(echo "$out" | sed -nE 's/.*Done\. ([0-9,]+) primes.*/\1/p' | tr -d ',')
     if [ "$count_e" != "$2" ]; then
-        echo "n=$1: eratostenes MAL: obtenido $count_e, esperado $2" >&2
+        echo "n=$1: eratostenes WRONG: got $count_e, expected $2" >&2
         exit 1
     fi
 }
@@ -72,7 +72,7 @@ run_ps() { # n expected -> sets t_p
     t_p=$(echo "$out" | sed -nE 's/^Seconds: *([0-9.]+)$/\1/p')
     count_p=$(echo "$out" | grep -oE '^[0-9]+$' | head -1 || true)
     if [ "$count_p" != "$2" ]; then
-        echo "n=$1: primesieve MAL: obtenido $count_p, esperado $2" >&2
+        echo "n=$1: primesieve WRONG: got $count_p, expected $2" >&2
         exit 1
     fi
 }

@@ -29,18 +29,18 @@ WIDTH_IN="${WIDTH:-1e10}"
 SEGMENTS="${SEGMENTS:-3932160 7864320 15728640 31457280}"
 
 if ! command -v primesieve >/dev/null 2>&1; then
-    echo "primesieve no esta en el PATH -- instalalo (docs/ISSUES.md: la misma version en todas las maquinas)." >&2
+    echo "primesieve is not on the PATH -- install it (docs/ISSUES.md: the same version on every machine)." >&2
     exit 1
 fi
 if [ ! -x "$BIN" ]; then
-    echo "No existe $BIN -- compila antes (make)." >&2
+    echo "$BIN not found -- build it first (make)." >&2
     exit 1
 fi
 
 source scripts/lib.sh # to_dec, num_lt
 N=$(to_dec "$N_IN")
 WIDTH=$(to_dec "$WIDTH_IN")
-if (( N <= WIDTH )); then echo "WIDTH=$WIDTH_IN no cabe por debajo de N=$N_IN" >&2; exit 1; fi
+if (( N <= WIDTH )); then echo "WIDTH=$WIDTH_IN doesn't fit below N=$N_IN" >&2; exit 1; fi
 # --start rounds down to a multiple of 240 (64 wheel indices); give
 # primesieve the same window so the counts can be compared.
 START=$(( (N - WIDTH) / 240 * 240 ))

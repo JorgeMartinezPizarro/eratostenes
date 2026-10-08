@@ -27,7 +27,7 @@ make debug            # ASan/UBSan, for debugging
 make test             # checks output against primecount across N and across
                       # several parameter combinations, plus .db vs text output
 make benchmark        # Count-only times against primesieve, N = 1e10..1e13
-make benchmark-io     # .db size and write throughput, N = 1e8..1e12
+make benchmark-io     # .db size and write throughput, N = 1e8..1e13
 make benchmark-tails  # Count-only, the last 1e11 numbers below 1e13..1e18
 ```
 

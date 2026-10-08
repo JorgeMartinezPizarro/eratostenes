@@ -12,7 +12,7 @@ to_dec() {
     elif [[ "$1" =~ ^[0-9]+$ ]]; then
         d=$1
     else
-        echo "valor no valido: $1 (usa un entero o 1eX)" >&2
+        echo "invalid value: $1 (use an integer or 1eX)" >&2
         return 1
     fi
     d=$(echo "$d" | sed 's/^0*//')
