@@ -1126,9 +1126,20 @@ memory, not the cores. How high that regime starts, i5-13500, last 1e11 below N,
 
 The crossing is between 1e17 and 1e18; below it every thread helps. No thread rule is taken from
 this: the knee is a property of the memory system, not of anything sysfs reports (`l1_big_cores`
-would say 6 on both machines by accident, and 2 on the i5-1235U). Open: find it at run time, by
-starting workers in steps and adding one only while the measured throughput gain pays its
-activation (the scheduler already measures both for its steals).
+would say 6 on both machines by accident, and 2 on the i5-1235U).
+
+Finding it at run time was tried and reverted (2026-10-08): `run_parallel_chunks` started the
+workers in steps (every 4th, every 2nd, all; on from 50M base primes), a later step's workers on a
+2-chunk probe off the back of the longest run, and kept a step only if the sum of the running
+workers' per-chunk rates rose >= 10%. The first version left a one-chunk run with no running owner
+unstolen (wrong counts) and handed late starters full runs (34 activation-priced steals); the
+second counted right and decided right on the dev PC at the ceiling tail (3 -> 6 workers +68%, 6 ->
+12 +8%, parked) but lost anyway: 21.3 / 20.0 s against 16.5 / 16.1 s with 12 threads and 15.5 /
+15.8 s with 6; at the 1e18 tail 11.7 s against 10.8 and 10.4-11.3 s. Every step's probe must
+activate pi(sqrt N) primes before it can be measured (2-3 s each at the ceiling, in a 15 s run),
+so the measuring costs about what it saves, and leaves the runs unbalanced (finish times 12.4 s to
+20.2 s). It would only pay on windows far wider than 1e11. Not pursued either: timing the memory
+system itself at startup (random writes from 1, 2, 4... threads) as a proxy for the knee.
 
 What went in is the safety half: `cap_threads_by_memory` (tuning.hpp) estimates a worker at ~8 B x
 pi(sqrt N) x 1.02 + 16 MiB and the shared part at the base-prime bitmap + 64 MiB (ceiling: 9.6 GiB
