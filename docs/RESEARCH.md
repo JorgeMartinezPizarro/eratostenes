@@ -92,7 +92,8 @@ What is in the code today, by the day it went in:
 - **2026-10-08**: error messages name the largest N; [threads vs tail height](#threads-vs-tail-height-dram-bandwidth-caps-the-sparse-tier-near-264-a-memory-budget-kept-2026-10-08)
   measured (DRAM bandwidth past ~1e18) and a memory budget, `--max-mem`.
 - **2026-10-09**: the medium [prefetchnta gate re-measured](#medium-prefetchnta-gate-re-measured-with-the-5-byte-state-kept-2026-10-09)
-  with the 5-byte state: unchanged.
+  with the 5-byte state: unchanged; the `.db` encoder [over the whole segment, its state in locals](#db-encoder-over-the-whole-segment-its-state-in-locals-kept-2026-10-09);
+  the text output's [counting pass from the prime count](#text-output-byte-counts-from-the-prime-count-where-a-chunks-numbers-share-a-digit-count-kept-2026-10-09).
 
 ## Contents
 
@@ -1250,6 +1251,17 @@ pass: byte-identical, a tie (laptop, 1e9, 1 thread: 0.56 vs 0.57 s). The cost is
 `emit_values` plus the sink is ~7 ns per prime (0.56 s vs 0.20 s count-only); profiling it
 needs `noinline` under `-flto`. Reverted.
 
+### Text output: byte counts from the prime count where a chunk's numbers share a digit count (kept, 2026-10-09)
+
+The counting pass doesn't need the primes, only their digits: where a chunk's first and last
+numbers have the same digit count, its bytes are its prime count x (digits + 1), so it runs
+with `NullSink` (a popcount per word); only the chunks across a power of 10 decode their primes
+with `ByteCounter`. For both sinks to share the thread's `SegmentSieve` (and carry it across
+chunks), the per-thread cache moved out of the `sieve_chunk<Writer>` template into
+`sieve_slot`. Output byte-identical (1e9, 1e10, a range across 1e10, `--start` tails). Dev PC,
+1e10 to tmpfs, 12 threads, mean of 5: counting pass **0.911 s -> 0.202 s** (count-only takes
+0.18 s). The write pass (5.0 s on tmpfs) is kernel time and stays.
+
 ## Wheel and stepping tables
 
 The bitmap uses a mod-30 wheel (`wheel.hpp`). Small and med64 primes step with `erat_small.hpp`'s
@@ -1354,6 +1366,23 @@ divided it back into wheel indices to subtract them. `sieve_and_emit` now hands 
 `write_k`; the gap is `k - last_k_`, the value is rebuilt only for a block's first prime and
 escapes; output byte-identical. Dev PC, 1e10 `-t 12`: instructions:u -26.7%, cycles:u -17.8%; wall
 flat on the WSL disk (I/O-bound), on tmpfs -10% at `-t 12` and -20% at `-t 2`.
+
+### `.db` encoder over the whole segment, its state in locals (kept, 2026-10-09)
+
+The profile of a 1e11 `.db` on tmpfs (dev PC, 12 threads: 6.5 s against 2.56 s count-only) put
+41% of cycles in the extraction + encoding loop and 15.6% in libzstd. Almost every hot
+instruction of the loop was a stack access: `bits` (`blsr` on memory), `count_in_block_`,
+`last_k_` and `last_on_wheel_` were loaded and stored on every prime. Each gap byte went out
+through a `uint8_t` pointer, which may alias any member, so the sink's state could not stay in
+registers. `GapBlockSink::write_segment` now takes the whole segment (the words, `k_low`, the
+count) and walks its primes with the state in locals, written back once per segment or block;
+the gaps go to a fixed buffer (`MAX_GAP_BYTES` per prime) through a pointer, no `push_back`.
+`write_k` and `SegmentSieve::emit_indices` are gone. Same primes (1e9 `--slice` md5). Dev PC,
+`benchmark_ab.sh` with `-o` on tmpfs, last 1e11 below 1e12, 6 interleaved pairs: cycles:u
+**-12.8%**, instructions:u -12.0%, wall **-8.0%**, every B run below every A run.
+
+Not adopted: one `ZSTD_CCtx` per sink (`ZSTD_compressCCtx`) instead of `ZSTD_compress`'s own per
+block: 5.06 vs 5.11 s mean of 5, a tie. The zstd share is the compression itself.
 
 ### `journal_mode=OFF` for the bulk load (tried, reverted, 2026-10-01)
 

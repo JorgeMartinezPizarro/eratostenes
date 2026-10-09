@@ -126,7 +126,9 @@ available RAM) runs on fewer threads (`tuning.hpp`'s `cap_threads_by_memory`).
 Text output needs two passes over this same structure (count bytes, then write) so
 that `pwrite()` can have every thread's exact, disjoint file offset known before any
 byte is written, letting all threads write in parallel with no locking and no merge
-step; `.db` output only needs one pass, since each block goes to the next free
+step. The counting pass is a count-only sieve wherever a chunk's numbers share a digit
+count (bytes = primes x (digits + 1)); only the chunks across a power of 10 decode
+their primes; `.db` output only needs one pass, since each block goes to the next free
 offset of the `.blk` and its position is corrected afterwards (see §8). Count-only
 runs (no `-o`) are one pass and just `popcount` each finished word.
 
@@ -229,7 +231,9 @@ sparse, then extraction.
   iteration. [RESEARCH.md](RESEARCH.md#sparse-tier) has the measurements.
 
 Finally, **extraction**: invert each word (bit = 0 means prime) and either
-`popcount` it (count-only) or walk its set bits with `ctz` to emit values.
+`popcount` it (count-only), hand the whole segment to the `.db` encoder (which walks
+its set bits with `ctz` and turns each into a wheel-index gap), or walk the set bits
+to emit values (text).
 
 The two cutoffs are tuned jointly (the lower bound of med64 *is* `small_limit`):
 `small_limit = sub-block / 4` (L1d/8: 6144 on a 48 KiB L1d) and `med64_limit =

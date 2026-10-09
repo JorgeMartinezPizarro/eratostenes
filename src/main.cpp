@@ -12,7 +12,8 @@
 //   3. No -o (the default): one pass that only counts.
 //   4. Text output (-o *.txt) needs two passes, because pwrite() needs an
 //      exact byte offset per chunk up front: a COUNT PASS sizes each
-//      chunk's text, prefix sums give the offsets, the file is resized
+//      chunk's text (from its prime count where all its numbers share a
+//      digit count), prefix sums give the offsets, the file is resized
 //      once, and a WRITE PASS re-sieves each chunk and pwrite()s it into
 //      its disjoint region, every thread in parallel. Every output byte is
 //      written once; the price is sieving twice, which is cheap next to a
