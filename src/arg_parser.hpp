@@ -150,7 +150,7 @@ inline uint64_t parse_size(const std::string& raw) {
 inline constexpr uint64_t MAX_LIMIT = UINT64_MAX - 16 * (uint64_t{1} << 32);
 inline std::string max_limit_text() { return std::to_string(MAX_LIMIT) + " = 2^64 - 2^32 * 16"; }
 
-// --db-block-size bounds: each writer thread buffers ~7 bytes per prime of a
+// --db-block-size bounds: each writer thread buffers ~10 bytes per prime of a
 // block (GapBlockSink), and nth_prime decodes a whole block per query.
 inline constexpr uint64_t MAX_DB_BLOCK_SIZE = uint64_t{1} << 22;
 

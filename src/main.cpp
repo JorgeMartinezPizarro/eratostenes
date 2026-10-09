@@ -150,14 +150,38 @@ static std::vector<ChunkRange> split_ranges(uint64_t limit, unsigned chunks, uin
     return ranges;
 }
 
+// The calling thread's SegmentSieve for tier set t, built on first use and
+// reused across that thread's chunks whatever their sink (begin_chunk()
+// resets the per-chunk state; the presieve fill overwrites the segment).
+// next_k: where its state stands, if a chunk can go on from it. Worker
+// threads only live for one pass (run_parallel_chunks), so the cache goes
+// away with them.
+struct SieveSlot {
+    const TierSet* tiers = nullptr;
+    std::unique_ptr<SegmentSieve> sieve;
+    uint64_t next_k = UINT64_MAX;
+};
+static SieveSlot& sieve_slot(const TierSet& t, uint64_t base_prime_max, const Presieve& presieve,
+                             const SieveConfig& cfg) {
+    thread_local SieveSlot slots[2]; // a run has at most two tier sets (narrow, wide)
+    SieveSlot* slot = slots[0].tiers == &t ? &slots[0]
+                    : slots[1].tiers == &t ? &slots[1]
+                    : slots[0].tiers == nullptr ? &slots[0] : &slots[1];
+    if (slot->tiers != &t) {
+        slot->sieve = std::make_unique<SegmentSieve>(t.width, base_prime_max, presieve, cfg.sub_block_bytes,
+                                                     !t.sparse.empty(),
+                                                     t.medium.size() >= cfg.medium_nta_min_primes, cfg.huge_arenas);
+        slot->sieve->set_skip_below_k(cfg.skip_below_k);
+        slot->sieve->set_range_end(cfg.range_end);
+        slot->tiers = &t;
+        slot->next_k = UINT64_MAX;
+    }
+    return *slot;
+}
+
 // Runs a chunk through SegmentSieve, segment by segment, feeding every
 // found prime to 'out'. Shared by every pass (count-only, byte-counting,
 // writing) -- they only differ in which Writer they pass in.
-//
-// One SegmentSieve per thread and tier set, reused across that thread's
-// chunks (begin_chunk() resets the per-chunk state; the presieve fill
-// overwrites the segment). Worker threads only live for one pass
-// (run_parallel_chunks), so the cache goes away with them.
 //
 // A chunk that starts where the thread's previous one on the same tiers
 // ended (run_parallel_chunks hands out contiguous runs) carries on from that
@@ -169,24 +193,7 @@ template <typename Writer>
 static void sieve_chunk(ChunkRange range, const TierSet& t, uint64_t base_prime_max,
                          const Presieve& presieve, const SieveConfig& cfg, Writer& out, uint64_t& local_count,
                          std::atomic<uint64_t>& progress) {
-    struct Slot {
-        const TierSet* tiers = nullptr;
-        std::unique_ptr<SegmentSieve> sieve;
-        uint64_t next_k = UINT64_MAX; // where the sieve's state stands, if a chunk can go on from it
-    };
-    thread_local Slot slots[2]; // a run has at most two tier sets (narrow, wide)
-    Slot* slot = slots[0].tiers == &t ? &slots[0]
-               : slots[1].tiers == &t ? &slots[1]
-               : slots[0].tiers == nullptr ? &slots[0] : &slots[1];
-    if (slot->tiers != &t) {
-        slot->sieve = std::make_unique<SegmentSieve>(t.width, base_prime_max, presieve, cfg.sub_block_bytes,
-                                                     !t.sparse.empty(),
-                                                     t.medium.size() >= cfg.medium_nta_min_primes, cfg.huge_arenas);
-        slot->sieve->set_skip_below_k(cfg.skip_below_k);
-        slot->sieve->set_range_end(cfg.range_end);
-        slot->tiers = &t;
-        slot->next_k = UINT64_MAX;
-    }
+    SieveSlot* const slot = &sieve_slot(t, base_prime_max, presieve, cfg);
     SegmentSieve& sieve = *slot->sieve;
     ChunkStats& st = t_chunk_stats;
     st = {};
@@ -486,12 +493,24 @@ static int run_text(const RunPlan& plan) {
     const Colors& C = plan.C;
     const unsigned num_chunks = static_cast<unsigned>(plan.ranges.size());
     // --- Pass 1: byte counting (no I/O) ---
+    // Where every number of a chunk has the same digit count, its bytes are
+    // its prime count x (digits + 1): a count-only sieve. Only the chunks
+    // across a power of 10 decode their primes to measure them.
+    const auto digits = [](uint64_t v) { uint64_t d = 1; while (v >= 10) { v /= 10; ++d; } return d; };
     std::vector<uint64_t> byte_counts(num_chunks, 0);
     std::vector<uint64_t> prime_counts(num_chunks, 0);
     plan.pass("counting", [&](unsigned i, auto sieve) {
-        ByteCounter counter;
-        prime_counts[i] = sieve(counter);
-        byte_counts[i] = counter.total_bytes;
+        const ChunkRange& r = plan.ranges[i];
+        const uint64_t d = digits(wheel_number(r.low));
+        if (d == digits(wheel_number(r.high - 1))) {
+            NullSink sink;
+            prime_counts[i] = sieve(sink);
+            byte_counts[i] = prime_counts[i] * (d + 1);
+        } else {
+            ByteCounter counter;
+            prime_counts[i] = sieve(counter);
+            byte_counts[i] = counter.total_bytes;
+        }
     });
 
     const std::string head_text = wheel_primes_text(plan.range_start); // written by chunk 0

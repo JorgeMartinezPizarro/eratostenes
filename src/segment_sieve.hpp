@@ -178,9 +178,11 @@ public:
         sparse_.next_segment();
 
         // Extraction: bit=0 => prime candidate. Three paths, by what the
-        // sink can take (see below).
+        // sink can take: a count, the whole segment (GapBlockSink), or
+        // values one by one (see below).
         if constexpr (!Writer::WANTS_VALUES) prime_count += count_primes(count);
-        else if constexpr (requires { out.write_k(uint64_t{0}); }) prime_count += emit_indices(k_low, count, out);
+        else if constexpr (requires { out.write_segment(words_.data(), k_low, count); })
+            prime_count += out.write_segment(words_.data(), k_low, count);
         else prime_count += emit_values(k_low, count, out);
     }
 
@@ -216,27 +218,6 @@ private:
         if (const uint64_t rem = count % 64)
             primes += static_cast<uint64_t>(__builtin_popcountll(~wp[full] & ((uint64_t{1} << rem) - 1)));
         return primes;
-    }
-
-    // Sinks that take wheel indices (GapBlockSink::write_k): a prime's index
-    // is k_low plus its bit position, no value to rebuild. The count is a
-    // local, returned (a reference could alias the sink's state).
-    template <typename Writer>
-    uint64_t emit_indices(uint64_t k_low, uint64_t count, Writer& out) const {
-        const size_t words_needed = (count + 63) / 64;
-        uint64_t n = 0;
-        for (size_t w = 0; w < words_needed; ++w) {
-            uint64_t bits = ~words_[w];
-            uint64_t remaining = count - w * 64ULL; // >= 1 for every w < words_needed
-            if (remaining < 64) bits &= (1ULL << remaining) - 1ULL;
-            const uint64_t k_word = k_low + w * 64ULL;
-            while (bits) {
-                out.write_k(k_word + static_cast<uint64_t>(__builtin_ctzll(bits)));
-                ++n;
-                bits &= bits - 1;
-            }
-        }
-        return n;
     }
 
     // Value sinks: invert each word, decompose into (q, r) = (k / WHEEL_SIZE,

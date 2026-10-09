@@ -37,43 +37,67 @@ public:
 
     GapBlockSink(uint64_t chunk_id, uint64_t block_size, int zstd_level, BlockFile& blocks, PushFn push)
         : chunk_id_(chunk_id), block_size_(block_size), zstd_level_(zstd_level), blocks_(blocks),
-          push_(std::move(push)) {
-        raw_.reserve(block_size_ * 2); // ~1 byte per gap, rare 5-byte escapes; generous headroom
-        cbuf_.resize(ZSTD_compressBound(block_size_ * 5 + 16)); // worst case: every gap escapes (5 bytes)
-    }
+          push_(std::move(push)), raw_(block_size * MAX_GAP_BYTES), cbuf_(ZSTD_compressBound(raw_.size())) {}
 
     GapBlockSink(const GapBlockSink&) = delete;
     GapBlockSink& operator=(const GapBlockSink&) = delete;
 
     ~GapBlockSink() { try { flush(); } catch (...) {} }
 
+    // One prime by value: the wheel's own primes, write_tiny_db's lists.
     void write_uint64(uint64_t p) {
-        if (count_in_block_ == 0) {
-            block_start_prime_ = p;
-        } else {
-            encode_gap(last_value(), p, raw_);
-        }
+        if (count_in_block_ == 0) block_start_prime_ = p;
+        else raw_len_ = static_cast<size_t>(encode_gap(last_value(), p, raw_.data() + raw_len_) - raw_.data());
         last_ = p;
         last_on_wheel_ = on_wheel(p);
         if (last_on_wheel_) last_k_ = wheel_index(p);
         if (++count_in_block_ == block_size_) flush_block();
     }
 
-    // Same encoding, fed the prime's wheel index instead of its value
-    // (SegmentSieve::sieve_and_emit uses this when the sink has it): the
-    // wheel gap is just k - last_k_, no value <-> index conversions. The
-    // value is only rebuilt for a block's first prime and the rare escape.
-    void write_k(uint64_t k) {
-        if (count_in_block_ == 0) {
-            block_start_prime_ = wheel_number(k);
-        } else if (last_on_wheel_ && k - last_k_ <= 255) {
-            raw_.push_back(static_cast<uint8_t>(k - last_k_));
-        } else {
-            encode_gap(last_value(), wheel_number(k), raw_);
+    // Every prime of a sieved segment (SegmentSieve::sieve_and_emit): wheel
+    // index k_low + i is prime when bit i of `words` is clear, for i < count.
+    // Returns how many. The gap is k - the previous k; a value is only
+    // rebuilt for a block's first prime and the rare escape. The encoder's
+    // state stays in locals for the whole segment: written through a
+    // uint8_t pointer, the bytes could alias any member, so member state
+    // would be reloaded and stored on every prime.
+    uint64_t write_segment(const uint64_t* words, uint64_t k_low, uint64_t count) {
+        const uint64_t block_size = block_size_;
+        uint8_t* const raw = raw_.data();
+        uint8_t* p = raw + raw_len_;
+        uint64_t in_block = count_in_block_;
+        uint64_t last_k = last_k_;
+        bool on = last_on_wheel_;
+        uint64_t n = 0;
+        const uint64_t words_needed = (count + 63) / 64;
+        for (uint64_t w = 0; w < words_needed; ++w) {
+            uint64_t bits = ~words[w];
+            const uint64_t remaining = count - w * 64; // >= 1 for every w < words_needed
+            if (remaining < 64) bits &= (uint64_t{1} << remaining) - 1;
+            const uint64_t k_word = k_low + w * 64;
+            n += static_cast<uint64_t>(__builtin_popcountll(bits));
+            while (bits) {
+                const uint64_t k = k_word + static_cast<uint64_t>(__builtin_ctzll(bits));
+                bits &= bits - 1;
+                if (in_block == 0) block_start_prime_ = wheel_number(k);
+                else if (on && k - last_k <= 255) *p++ = static_cast<uint8_t>(k - last_k);
+                else p = encode_gap(on ? wheel_number(last_k) : last_, wheel_number(k), p);
+                last_k = k;
+                on = true;
+                if (++in_block == block_size) {
+                    raw_len_ = static_cast<size_t>(p - raw);
+                    count_in_block_ = in_block;
+                    flush_block();
+                    p = raw;
+                    in_block = 0;
+                }
+            }
         }
-        last_k_ = k;
-        last_on_wheel_ = true;
-        if (++count_in_block_ == block_size_) flush_block();
+        raw_len_ = static_cast<size_t>(p - raw);
+        count_in_block_ = in_block;
+        last_k_ = last_k;
+        last_on_wheel_ = on;
+        return n;
     }
 
     // Flushes a short final block (the last block of a thread's chunk).
@@ -84,11 +108,11 @@ public:
 
 private:
     // The previous prime's value: kept as a wheel index when it's on the
-    // wheel (write_k never computes the value), as the value otherwise.
+    // wheel (write_segment never computes the value), as the value otherwise.
     uint64_t last_value() const { return last_on_wheel_ ? wheel_number(last_k_) : last_; }
 
     void flush_block() {
-        size_t csize = ZSTD_compress(cbuf_.data(), cbuf_.size(), raw_.data(), raw_.size(), zstd_level_);
+        size_t csize = ZSTD_compress(cbuf_.data(), cbuf_.size(), raw_.data(), raw_len_, zstd_level_);
         if (ZSTD_isError(csize)) throw std::runtime_error("zstd compression failed");
 
         PendingBlock blk;
@@ -102,7 +126,7 @@ private:
 
         start_index_ += count_in_block_;
         count_in_block_ = 0;
-        raw_.clear();
+        raw_len_ = 0;
     }
 
     uint64_t chunk_id_;
@@ -112,7 +136,8 @@ private:
     BlockFile& blocks_;
     PushFn push_;
 
-    std::vector<uint8_t> raw_;
+    std::vector<uint8_t> raw_;   // the block's gaps: at most MAX_GAP_BYTES per prime
+    size_t raw_len_ = 0;
     std::vector<uint8_t> cbuf_;
     uint64_t count_in_block_ = 0;
     uint64_t block_start_prime_ = 0;

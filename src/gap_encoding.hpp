@@ -19,27 +19,30 @@
 // entropy; an integer gap carries the residue-class structure zstd can't
 // see. See docs/RESEARCH.md#gap-encoding-wheel-index-deltas.
 
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <vector>
 
 #include "wheel.hpp"
 
 inline bool on_wheel(uint64_t n) { return n >= FIRST_WHEEL_PRIME; }
 
-inline void encode_gap(uint64_t prev, uint64_t next, std::vector<uint8_t>& out) {
+// The most bytes one gap takes (an escape).
+constexpr size_t MAX_GAP_BYTES = 5;
+
+// Writes the gap from prev to next at out; returns the end of what it wrote.
+inline uint8_t* encode_gap(uint64_t prev, uint64_t next, uint8_t* out) {
     if (on_wheel(prev)) {
-        uint64_t dk = wheel_index(next) - wheel_index(prev);
+        const uint64_t dk = wheel_index(next) - wheel_index(prev);
         if (dk <= 255) {
-            out.push_back(static_cast<uint8_t>(dk));
-            return;
+            *out = static_cast<uint8_t>(dk);
+            return out + 1;
         }
     }
-    out.push_back(0);
-    uint32_t d32 = static_cast<uint32_t>(next - prev);
-    uint8_t buf[4];
-    std::memcpy(buf, &d32, sizeof(buf));
-    out.insert(out.end(), buf, buf + sizeof(buf));
+    *out = 0;
+    const uint32_t d32 = static_cast<uint32_t>(next - prev);
+    std::memcpy(out + 1, &d32, sizeof(d32));
+    return out + MAX_GAP_BYTES;
 }
 
 // Decodes a whole block: `first` (the block's start_prime) and the count - 1
