@@ -25,17 +25,18 @@ make                  # release build: -O3 -march=native -flto, plus nth_prime
 make portable         # no -march=native, for a binary you'll copy to another machine
 make debug            # ASan/UBSan, for debugging
 make test             # checks output against primecount across N and across
-                      # several parameter combinations, plus .db vs text output
+                      # several parameter combinations, plus .db vs --print
 make benchmark        # Count-only times against primesieve, N = 1e10..1e13
 make benchmark-io     # .db size and write throughput, N = 1e8..1e13
 make benchmark-tails  # Count-only, the last 1e11 numbers below 1e13..1e18
+make benchmark-print  # --print against primesieve --print, N = 1e8..1e10
 ```
 
 ## Docker
 
 ```sh
 make docker                             # build the image
-make run ARGS="100b -o primes.txt"      # run it
+make run ARGS="100b -o /output/primes.db"  # run it
 ```
 
 `make run` mounts `./output` (host) at `/output` (container); use
@@ -50,16 +51,17 @@ outside the container.
   N                       Upper bound (inclusive), positional (no flag --
                           primesieve-style). Accepts suffixes:
                           k=1e3  m=1e6  b=g=1e9 (short-scale billion)  t=1e12
-  -o, --output PATH       Output file. Without it, only counts primes --
-                          no file is written. .db suffix switches to the
-                          compact SQLite format (see below).
+  -o, --output PATH.db    Store the primes in PATH.db and PATH.blk, the
+                          compact indexed database (see below)
+      --print             Print the primes on stdout, one per line
+                          (without -o or --print it only counts them)
   -t, --threads N         Thread count (default: available cores)
   -s, --segment-width N   Numeric width per segment
                           (default: auto, sized from N and the caches)
       --db-block-size N   Primes per compressed block in .db mode (default: 65536)
       --zstd-level N      zstd compression level in .db mode (default: 1)
-      --start N0          Only the range [N0, N]: count it, or with -o
-                          write just its primes
+      --start N0          Only the range [N0, N]: count it, or store or
+                          print just its primes
       --max-mem N         Memory the run may take, e.g. 8g (default: 90% of
                           the available RAM; 0 = no limit): fewer threads
                           run when they wouldn't fit (each keeps ~8 bytes
@@ -68,10 +70,10 @@ outside the container.
 ```
 
 ```sh
-./eratostenes 1m -o primes_1M.txt        # Write to text
 ./eratostenes 10b -t 12                   # Count using 12 threads
-./eratostenes 1t -o ~/primes_1t.db        # Write to db
-./eratostenes 1e18 --start 999999e12 -o tail.db   # Write only a range (a tail)
+./eratostenes 1t -o ~/primes_1t.db        # Store in a database
+./eratostenes 1e18 --start 999999e12 -o tail.db   # Store only a range (a tail)
+./eratostenes 1m --print > primes_1M.txt  # Print them
 ```
 
 ## Database
@@ -136,7 +138,7 @@ For more machines and results, see: [docs/BENCHMARK.md](docs/BENCHMARK.md).
 
 ## Validation
 
-`make test` checks pi(N) and primes by position against [primecount](https://github.com/kimwalisch/primecount) across several N and parameter combinations (threads, segment width, cache-size overrides, `.db` block size, zstd level), and checks `.db` output against plain text output position by position.
+`make test` checks pi(N) and primes by position against [primecount](https://github.com/kimwalisch/primecount) across several N and parameter combinations (threads, segment width, cache-size overrides, `.db` block size, zstd level), and checks `.db` output against `--print` position by position.
 
 ## Issues
 

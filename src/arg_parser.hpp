@@ -1,8 +1,8 @@
 #pragma once
 // Command-line argument parsing: sizes with suffixes (k/m/b/g/t), thread
-// count, output path (empty means count-only -- there's no default file,
-// see Options::output below), segment width, --tune knobs. The automatic
-// sizes are decided later, in tuning.hpp (plan_sieve).
+// count, the .db path or --print (neither: count only), segment width,
+// --tune knobs. The automatic sizes are decided later, in tuning.hpp
+// (plan_sieve).
 
 #include <algorithm>
 #include <cctype>
@@ -14,13 +14,15 @@
 
 #include <zstd.h>
 
+#include "block_file.hpp" // has_db_suffix
+
 struct Options {
     uint64_t limit = 0;                 // N: sieve up to N (inclusive)
     unsigned threads = 0;                // 0 => auto (hardware_concurrency)
-    // Empty (the default) means count-only: no file, no -o needed to just
-    // get pi(N). Set via -o/--output; ".db" switches to the compact SQLite
-    // format, anything else is plain text.
+    // -o/--output: the .db to write (its PATH must end in .db). --print: the
+    // primes on stdout, one per line. Neither (the default): count only.
     std::string output;
+    bool print = false;
     // -s: numeric width per segment, used as given (tuning.hpp only rounds
     // it to whole words, and to a power of 2 in bytes for the sparse ring).
     // Without -s, plan_sieve sizes the segment from the caches.
@@ -28,9 +30,8 @@ struct Options {
     bool segment_width_set = false;      // true once -s/--segment-width is parsed
     bool show_help = false;
 
-    // Only used when --output ends in ".db" (SQLite + zstd gap encoding,
-    // see gap_block_sink.hpp / sqlite_prime_store.hpp). Ignored for plain
-    // text output.
+    // .db only (SQLite + zstd gap encoding, see gap_block_sink.hpp /
+    // sqlite_prime_store.hpp).
     uint64_t db_block_size = 65536;      // primes per compressed block
     int zstd_level = 1;                  // docs/RESEARCH.md#--zstd-level-default-1-kept-2026-09-28
 
@@ -230,21 +231,20 @@ inline void print_usage(const char* prog) {
     std::fprintf(stderr,
         "Usage: %s N [options]\n"
         "\n"
-        "Segmented, parallel Sieve of Eratosthenes. Without -o/--output it\n"
-        "only counts the primes up to N (inclusive) -- no file is written.\n"
-        "With -o it writes them one per line as plain text, or, if PATH ends\n"
-        "in .db, into a compact SQLite file (gaps between consecutive\n"
-        "primes, 1-byte encoded and zstd-compressed in blocks), queryable by\n"
-        "position with the nth_prime binary.\n"
+        "Segmented, parallel Sieve of Eratosthenes. By default it only counts\n"
+        "the primes up to N (inclusive). With -o it stores them in a compact\n"
+        "indexed database (PATH.db, an SQLite index, and PATH.blk, the gaps\n"
+        "between consecutive primes 1-byte encoded and zstd-compressed in\n"
+        "blocks), queryable by position or value with the nth_prime binary.\n"
+        "With --print it prints them on stdout, one per line.\n"
         "\n"
         "Options:\n"
         "  N                      Upper limit. Accepts k/m/b/g/t suffixes\n"
         "                         (b = g = billion = 1e9) and 1e11-style\n"
         "                         notation. E.g. 100b = 1e11.\n"
-        "  -o, --output PATH      Output file. Without it, only counts\n"
-        "                         (writes nothing). If PATH ends in .db,\n"
-        "                         writes SQLite instead of plain text\n"
-        "                         (see above).\n"
+        "  -o, --output PATH.db   Write the primes to PATH.db and PATH.blk\n"
+        "                         (see above)\n"
+        "      --print            Print the primes on stdout, one per line\n"
         "  -t, --threads N        Number of threads (default: available cores)\n"
         "  -s, --segment-width N  Numeric width of each segment\n"
         "                         (default: auto, derived from N and the L2;\n"
@@ -268,8 +268,8 @@ inline void print_usage(const char* prog) {
         "Ranges and benchmarking:\n"
         "      --start N0         Sieve only [N0, N]: the count is that range's,\n"
         "                         not pi(N). E.g. N = 1e15 with\n"
-        "                         --start 990e12 is the last 1%%. With -o it\n"
-        "                         writes only those primes (in a .db, their\n"
+        "                         --start 990e12 is the last 1%%. With -o or\n"
+        "                         --print, only those primes (in a .db, their\n"
         "                         positions start at the first prime >= N0)\n"
         "      --debug-idle       Print how far apart the threads finished\n"
         "\n"
@@ -287,13 +287,12 @@ inline void print_usage(const char* prog) {
         "                         on with one thread per core)\n"
         "\n"
         "Examples:\n"
-        "  %s 1000000 -o primes_1M.txt\n"
-        "  %s 100b -o primes_100b.txt -t 12\n"
         "  %s 100b -t 12\n"
         "  %s 100b -o primes_100b.db -t 12\n"
+        "  %s 1000000 --print > primes_1M.txt\n"
         "  %s 1e15 --start 990e12 --debug-idle\n"
         "  %s 1e18 --start 999999e12 -o tail.db\n",
-        prog, prog, prog, prog, prog, prog, prog);
+        prog, prog, prog, prog, prog, prog);
 }
 
 inline Options parse_args(int argc, char** argv) {
@@ -310,6 +309,8 @@ inline Options parse_args(int argc, char** argv) {
             opt.show_help = true;
         } else if (a == "-o" || a == "--output") {
             opt.output = need_value(i, a.c_str());
+        } else if (a == "--print") {
+            opt.print = true;
         } else if (a == "-t" || a == "--threads") {
             opt.threads = parse_threads(need_value(i, a.c_str()));
         } else if (a == "-s" || a == "--segment-width") {
@@ -370,6 +371,10 @@ inline Options parse_args(int argc, char** argv) {
     if (opt.start >= opt.limit && opt.start != 0)
         throw std::runtime_error("--start must be below N (" + std::to_string(opt.start) + " >= " +
                                  std::to_string(opt.limit) + ")");
+    if (!opt.output.empty() && !has_db_suffix(opt.output))
+        throw std::runtime_error("-o writes a database: '" + opt.output +
+                                 "' must end in .db (--print prints the primes as text)");
+    if (!opt.output.empty() && opt.print) throw std::runtime_error("-o and --print can't be combined");
     if (opt.threads == 0) {
         opt.threads = std::max(1u, std::thread::hardware_concurrency());
     }

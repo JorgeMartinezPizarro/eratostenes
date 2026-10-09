@@ -1,80 +1,75 @@
 #pragma once
-// "Sinks" for SegmentSieve: three ways to consume the primes it finds.
+// "Sinks" for SegmentSieve: what is done with the primes of each segment.
 //
-//  - NullSink: count mode (no -o); sieve_and_emit keeps the count itself.
+//  - NullSink: count mode (no -o, no --print); sieve_and_emit only counts.
+//  - TextSink: --print, the primes as text into a buffer that main.cpp's
+//    run_print writes to stdout in order.
+//  - GapBlockSink (gap_block_sink.hpp): -o, the .db's compressed blocks.
 //
-//  - ByteCounter: writes nothing, just counts how many bytes the result
-//    would take as text (digits + newline). Used in a first pass, with no
-//    I/O, to know exactly where each thread must start writing.
-//
-//  - DirectWriter: writes with pwrite() at an absolute position in the
-//    final, already-sized file. Since each thread owns a disjoint byte
-//    range, all of them can write in parallel on the same descriptor with
-//    no locking and no later merge step.
+// A sink with write_segment(words, k_low, count) gets every segment whole;
+// one without it gets a count only.
 
+#include <algorithm>
+#include <charconv>
 #include <cstdint>
 #include <cstring>
-#include <charconv>
-#include <vector>
-#include <stdexcept>
-#include <unistd.h>
+#include <memory>
 
-struct NullSink {
-    // Extraction is a popcount per word, no prime is decoded.
-    static constexpr bool WANTS_VALUES = false;
-};
+#include "wheel.hpp"
 
-struct ByteCounter {
-    static constexpr bool WANTS_VALUES = true;
-    uint64_t total_bytes = 0;
+struct NullSink {};
 
-    void write_uint64(uint64_t v) {
-        char scratch[24];
-        auto res = std::to_chars(scratch, scratch + sizeof(scratch), v);
-        total_bytes += static_cast<uint64_t>(res.ptr - scratch) + 1; // +1 for '\n'
-    }
-};
+// A growable char buffer that leaves what it grows into uninitialized
+// (std::vector would zero it before every segment's text is written).
+struct TextBuffer {
+    std::unique_ptr<char[]> data;
+    size_t size = 0;
+    size_t cap = 0;
 
-class DirectWriter {
-public:
-    static constexpr bool WANTS_VALUES = true;
-
-    DirectWriter(int fd, uint64_t start_offset, size_t buffer_size = (1u << 22)) // 4 MiB
-        : fd_(fd), offset_(start_offset), buf_(buffer_size) {}
-
-    DirectWriter(const DirectWriter&) = delete;
-    DirectWriter& operator=(const DirectWriter&) = delete;
-
-    ~DirectWriter() { try { flush(); } catch (...) {} }
-
-    void write_uint64(uint64_t v) {
-        if (pos_ + 21 > buf_.size()) flush();
-        auto res = std::to_chars(buf_.data() + pos_, buf_.data() + buf_.size(), v);
-        pos_ = static_cast<size_t>(res.ptr - buf_.data());
-        buf_[pos_++] = '\n';
-    }
-
-    void write_raw(const char* data, size_t len) {
-        if (pos_ + len > buf_.size()) flush();
-        std::memcpy(buf_.data() + pos_, data, len);
-        pos_ += len;
-    }
-
-    void flush() {
-        size_t total_written = 0;
-        while (total_written < pos_) {
-            ssize_t w = ::pwrite(fd_, buf_.data() + total_written, pos_ - total_written,
-                                  static_cast<off_t>(offset_ + total_written));
-            if (w < 0) throw std::runtime_error("pwrite failed writing the output file");
-            total_written += static_cast<size_t>(w);
+    // Room for `extra` more bytes; returns where they start.
+    char* reserve(size_t extra) {
+        if (size + extra > cap) {
+            const size_t c = std::max(cap * 2, size + extra);
+            std::unique_ptr<char[]> d(new char[c]);
+            if (size) std::memcpy(d.get(), data.get(), size);
+            data = std::move(d);
+            cap = c;
         }
-        offset_ += pos_;
-        pos_ = 0;
+        return data.get() + size;
     }
+};
 
-private:
-    int fd_;
-    uint64_t offset_;
-    std::vector<char> buf_;
-    size_t pos_ = 0;
+struct TextSink {
+    TextBuffer& out;
+
+    // Every prime of a sieved segment, one per line: wheel index k_low + i is
+    // prime when bit i of `words` is clear, for i < count. Returns how many.
+    // The primes are counted first so that room for all of them is made
+    // once and the lines go out through a local pointer (see
+    // GapBlockSink::write_segment on why locals).
+    uint64_t write_segment(const uint64_t* words, uint64_t k_low, uint64_t count) {
+        constexpr size_t MAX_LINE = 21; // 20 digits and '\n'
+        const uint64_t words_needed = (count + 63) / 64;
+        const auto primes_of = [&](uint64_t w) {
+            uint64_t bits = ~words[w];
+            const uint64_t remaining = count - w * 64; // >= 1 for every w < words_needed
+            if (remaining < 64) bits &= (uint64_t{1} << remaining) - 1;
+            return bits;
+        };
+        uint64_t n = 0;
+        for (uint64_t w = 0; w < words_needed; ++w) n += static_cast<uint64_t>(__builtin_popcountll(primes_of(w)));
+        char* p = out.reserve(n * MAX_LINE);
+        for (uint64_t w = 0; w < words_needed; ++w) {
+            uint64_t bits = primes_of(w);
+            const uint64_t k_word = k_low + w * 64;
+            while (bits) {
+                const uint64_t k = k_word + static_cast<uint64_t>(__builtin_ctzll(bits));
+                bits &= bits - 1;
+                p = std::to_chars(p, p + MAX_LINE, (k >> WHEEL_SIZE_LOG2) * WHEEL_MOD + WHEEL_R[k & (WHEEL_SIZE - 1)]).ptr;
+                *p++ = '\n';
+            }
+        }
+        out.size = static_cast<size_t>(p - out.data.get());
+        return n;
+    }
 };

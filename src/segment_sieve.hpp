@@ -177,13 +177,11 @@ public:
         if (!sparse_primes.empty()) sparse_.process_big(bytes);
         sparse_.next_segment();
 
-        // Extraction: bit=0 => prime candidate. Three paths, by what the
-        // sink can take: a count, the whole segment (GapBlockSink), or
-        // values one by one (see below).
-        if constexpr (!Writer::WANTS_VALUES) prime_count += count_primes(count);
-        else if constexpr (requires { out.write_segment(words_.data(), k_low, count); })
+        // Extraction: bit=0 => prime candidate. The whole segment to a sink
+        // that takes it (sinks.hpp), a count otherwise.
+        if constexpr (requires { out.write_segment(words_.data(), k_low, count); })
             prime_count += out.write_segment(words_.data(), k_low, count);
-        else prime_count += emit_values(k_low, count, out);
+        else prime_count += count_primes(count);
     }
 
 private:
@@ -218,42 +216,6 @@ private:
         if (const uint64_t rem = count % 64)
             primes += static_cast<uint64_t>(__builtin_popcountll(~wp[full] & ((uint64_t{1} << rem) - 1)));
         return primes;
-    }
-
-    // Value sinks: invert each word, decompose into (q, r) = (k / WHEEL_SIZE,
-    // k % WHEEL_SIZE) once per word, then walk the set bits with ctz +
-    // clear-lowest-bit, stepping (q, r) by the bit distance.
-    template <typename Writer>
-    uint64_t emit_values(uint64_t k_low, uint64_t count, Writer& out) const {
-        const size_t words_needed = (count + 63) / 64;
-        uint64_t n = 0;
-        for (size_t w = 0; w < words_needed; ++w) {
-            uint64_t bits = ~words_[w];
-            uint64_t base_idx = w * 64ULL;
-            uint64_t remaining = count - base_idx; // >= 1 for every w < words_needed
-            if (remaining < 64) bits &= (1ULL << remaining) - 1ULL;
-            if (bits == 0) continue;
-
-            uint64_t k_word_start = k_low + base_idx;
-            uint64_t q = k_word_start / WHEEL_SIZE;
-            uint64_t r = k_word_start % WHEEL_SIZE;
-
-            uint64_t prev_bit = 0;
-            while (bits) {
-                uint64_t bit_pos = static_cast<uint64_t>(__builtin_ctzll(bits));
-                uint64_t step2 = bit_pos - prev_bit;
-                prev_bit = bit_pos;
-                const uint64_t rq = r + step2;
-                q += rq >> WHEEL_SIZE_LOG2;
-                r = rq & (static_cast<uint64_t>(WHEEL_SIZE) - 1);
-
-                uint64_t value = q * WHEEL_MOD + WHEEL_R[r];
-                out.write_uint64(value);
-                ++n;
-                bits &= bits - 1; // clear the lowest set bit
-            }
-        }
-        return n;
     }
 
     // Small tier: appends the state of every prime from `next` on whose

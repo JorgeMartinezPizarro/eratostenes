@@ -20,8 +20,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-// Whether `path` ends in ".db", case-insensitively: what selects the .db
-// output mode (main.cpp's is_db_output) and what blk_path_for replaces.
+// Whether `path` ends in ".db", case-insensitively: what -o requires
+// (arg_parser.hpp) and what blk_path_for replaces.
 inline bool has_db_suffix(const std::string& path) {
     const std::string suffix = ".db";
     return path.size() >= suffix.size() &&

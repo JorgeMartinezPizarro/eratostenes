@@ -123,14 +123,15 @@ its own state for every base prime (~8 bytes each, 1.5 GiB per thread at the
 64-bit ceiling), so a run that wouldn't fit in `--max-mem` (default: 90% of the
 available RAM) runs on fewer threads (`tuning.hpp`'s `cap_threads_by_memory`).
 
-Text output needs two passes over this same structure (count bytes, then write) so
-that `pwrite()` can have every thread's exact, disjoint file offset known before any
-byte is written, letting all threads write in parallel with no locking and no merge
-step. The counting pass is a count-only sieve wherever a chunk's numbers share a digit
-count (bytes = primes x (digits + 1)); only the chunks across a power of 10 decode
-their primes; `.db` output only needs one pass, since each block goes to the next free
-offset of the `.blk` and its position is corrected afterwards (see §8). Count-only
-runs (no `-o`) are one pass and just `popcount` each finished word.
+`--print` writes to stdout, which takes no offsets, so its chunks go out in order
+instead of as contiguous runs: each worker sieves the next chunk (~1-2M primes) into
+a text buffer, and the main thread writes the buffers in chunk order with a few in
+flight. A worker's chunks don't follow each other, so each activates the base primes
+afresh; once that would cost more than ~10% of a chunk (N above ~4e12) one worker
+prints alone, its chunks contiguous. `.db` output needs one pass, since each block
+goes to the next free offset of the `.blk` and its position is corrected afterwards
+(see §8). Count-only runs (no `-o`, no `--print`) are one pass and just `popcount`
+each finished word.
 
 ## 5. Base prime activation
 
@@ -232,8 +233,8 @@ sparse, then extraction.
 
 Finally, **extraction**: invert each word (bit = 0 means prime) and either
 `popcount` it (count-only), hand the whole segment to the `.db` encoder (which walks
-its set bits with `ctz` and turns each into a wheel-index gap), or walk the set bits
-to emit values (text).
+its set bits with `ctz` and turns each into a wheel-index gap), or to the text sink
+of `--print` (which turns each into a decimal line).
 
 The two cutoffs are tuned jointly (the lower bound of med64 *is* `small_limit`):
 `small_limit = sub-block / 4` (L1d/8: 6144 on a 48 KiB L1d) and `med64_limit =
@@ -325,7 +326,7 @@ entries on each half-size margin.
 
 ## 8. Output: text vs `.db`
 
-Text output is one prime per line, written directly. `.db` output is two files:
+`--print` writes one prime per line on stdout (§4). `-o` writes a `.db`, two files:
 `out.blk`, the primes grouped into fixed-size blocks, each block **delta-encoded**
 (storing gaps between consecutive primes instead of the primes themselves) and then
 zstd-compressed, one block after another; and `out.db`, a SQLite index with one
@@ -366,7 +367,7 @@ the latter with a binary search over the blocks' first primes.
 [primecount](https://github.com/kimwalisch/primecount), an independent reference
 implementation -- not hardcoded constants -- across several N and several
 parameter combinations (threads, segment width, cache-size overrides, `.db` block
-size, zstd level), plus checks `.db` output against plain text output position by
+size, zstd level), plus checks `.db` output against `--print` position by
 position. Raw sieve performance is checked separately against
 [primesieve](https://github.com/kimwalisch/primesieve) (see
 [BENCHMARK.md](BENCHMARK.md)).

@@ -39,8 +39,9 @@ GIT_DESC := $(shell git describe --always --dirty 2>/dev/null || echo "?")
 COMPOSE_ENV := -e ERATOSTENES_COMMIT=$(GIT_DESC)
 
 .PHONY: all portable debug clean fclean re docker run nth-prime variant \
-        test benchmark benchmark-io benchmark-tails benchmark-mini benchmark-ab docker-dev docker-test docker-benchmark \
-        docker-benchmark-io docker-benchmark-tails docker-benchmark-mini docker-benchmark-ab
+        test benchmark benchmark-io benchmark-tails benchmark-mini benchmark-ab benchmark-print docker-dev docker-test \
+        docker-benchmark docker-benchmark-io docker-benchmark-tails docker-benchmark-mini docker-benchmark-ab \
+        docker-benchmark-print
 
 # --- release (default) ---
 all: $(BIN) $(NTH_BIN)
@@ -95,7 +96,7 @@ docker:
 # Runs the binary inside the image. The host's ./output is mounted at
 # /output (docker/docker-compose.yml): use -o /output/<file> in ARGS to get
 # the result out of the container. Every option goes in ARGS (see --help).
-# Example: make run ARGS="1e9 -o /output/primes.txt -t 8"
+# Example: make run ARGS="1e9 -o /output/primes.db -t 8"
 # Example: make run ARGS="1e15 --start 990e12 --debug-idle"
 run:
 	mkdir -p $(OUT_DIR)
@@ -108,7 +109,7 @@ nth-prime:
 	mkdir -p $(OUT_DIR)
 	$(COMPOSE) run --rm --entrypoint nth_prime eratostenes $(ARGS)
 
-# Correctness against primecount: counts, tails, .db and text output,
+# Correctness against primecount: counts, tails, .db and --print output,
 # nth_prime queries, argument errors (scripts/test.sh). THREADS=N fixes
 # the thread count.
 test: $(BIN) $(NTH_BIN)
@@ -150,6 +151,13 @@ benchmark-mini: $(BIN)
 benchmark-ab: $(BIN)
 	bash scripts/benchmark_ab.sh
 
+# --print against primesieve --print (scripts/benchmark_print.sh): to /dev/null,
+# to a file and to a file flushed to the disk, both programs run from and
+# writing to /tmp; the outputs are compared. NS/TARGETS/THREADS/REPS/DIR from
+# the environment.
+benchmark-print:
+	bash scripts/benchmark_print.sh
+
 # --- the same targets inside Docker (docker/Dockerfile's `dev` stage), built
 # with the container's gcc for its CPU. The environment variables above are
 # forwarded when set (e.g. THREADS=8 make docker-benchmark).
@@ -173,3 +181,6 @@ docker-benchmark-mini: docker-dev
 
 docker-benchmark-ab: docker-dev
 	$(COMPOSE) run --rm -e THREADS -e N -e NS -e WIDTH -e REPS -e A -e B -e BIN_A -e BIN_B -e EVENTS -e PERF $(COMPOSE_ENV) dev make benchmark-ab
+
+docker-benchmark-print: docker-dev
+	$(COMPOSE) run --rm -e THREADS -e NS -e TARGETS -e REPS -e DIR $(COMPOSE_ENV) dev make benchmark-print

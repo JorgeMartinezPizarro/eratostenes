@@ -93,7 +93,8 @@ What is in the code today, by the day it went in:
   measured (DRAM bandwidth past ~1e18) and a memory budget, `--max-mem`.
 - **2026-10-09**: the medium [prefetchnta gate re-measured](#medium-prefetchnta-gate-re-measured-with-the-5-byte-state-kept-2026-10-09)
   with the 5-byte state: unchanged; the `.db` encoder [over the whole segment, its state in locals](#db-encoder-over-the-whole-segment-its-state-in-locals-kept-2026-10-09);
-  the text output's [counting pass from the prime count](#text-output-byte-counts-from-the-prime-count-where-a-chunks-numbers-share-a-digit-count-kept-2026-10-09).
+  the text output's [counting pass from the prime count](#text-output-byte-counts-from-the-prime-count-where-a-chunks-numbers-share-a-digit-count-kept-2026-10-09);
+  then [text files replaced by `--print`](#text-files-replaced-by---print-on-stdout-2026-10-09): `-o` writes a `.db` only.
 
 ## Contents
 
@@ -1261,6 +1262,22 @@ chunks), the per-thread cache moved out of the `sieve_chunk<Writer>` template in
 `sieve_slot`. Output byte-identical (1e9, 1e10, a range across 1e10, `--start` tails). Dev PC,
 1e10 to tmpfs, 12 threads, mean of 5: counting pass **0.911 s -> 0.202 s** (count-only takes
 0.18 s). The write pass (5.0 s on tmpfs) is kernel time and stays.
+
+### Text files replaced by `--print` on stdout (2026-10-09)
+
+A text file of the primes is ~11 bytes per prime at 1e10 (4.7 GB) against ~0.47 in the `.db`
+(213 MB), and no faster to look things up in. `-o` now writes a `.db` only (any other path is
+an error) and `--print` writes the primes on stdout, one per line; the two-pass text writer
+(`ByteCounter`, `DirectWriter`, `pwrite` at precomputed offsets) is gone. stdout takes no
+offsets, so `run_print` hands the chunks out in order: workers sieve ~1-2M primes each into a
+text buffer (`TextSink::write_segment`, its state in locals like the `.db` encoder's) and the
+main thread writes them in chunk order, `workers + 2` in flight. A worker's chunks aren't
+contiguous, so each activates the base primes afresh; with more base primes than a chunk's
+primes / 15 (N above ~4e12) one worker prints alone and carries its sieve over. Dev PC, 1e10,
+12 threads: `--print > /dev/null` 0.9 s, to a tmpfs file 1.65 s (the old two-pass file 3.7 s),
+`primesieve -p > /dev/null` 6.0 s; last 1e10 below 1e18 (one worker) 8.2 s vs primesieve's
+10.9 s. On a disk the bytes decide: ext4 (WSL), `sync` included, `--print` to a file 33.3 s,
+the old parallel writer 29.8 s, the `.db` 0.86 s.
 
 ## Wheel and stepping tables
 

@@ -9,16 +9,12 @@
 //      of them, carrying its sieve from chunk to chunk, and steals the back
 //      of another run when its own is done (run_parallel_chunks: work isn't
 //      uniform across chunks, nor across cores).
-//   3. No -o (the default): one pass that only counts.
-//   4. Text output (-o *.txt) needs two passes, because pwrite() needs an
-//      exact byte offset per chunk up front: a COUNT PASS sizes each
-//      chunk's text (from its prime count where all its numbers share a
-//      digit count), prefix sums give the offsets, the file is resized
-//      once, and a WRITE PASS re-sieves each chunk and pwrite()s it into
-//      its disjoint region, every thread in parallel. Every output byte is
-//      written once; the price is sieving twice, which is cheap next to a
-//      temp-file-and-merge copy.
-//   5. .db output (-o *.db) needs one pass: each thread appends its
+//   3. No -o or --print (the default): one pass that only counts.
+//   4. --print: the primes on stdout, in order. The chunks go out in order
+//      instead of as contiguous runs: workers sieve them into text buffers
+//      that the main thread writes in chunk order, a few in flight
+//      (run_print).
+//   5. -o PATH.db: one pass. Each thread appends its
 //      compressed blocks to the .blk sidecar at offsets handed out by an
 //      atomic counter (block_file.hpp), and only the small index rows go
 //      through a queue to SQLite's single writer. Each block's position is
@@ -40,11 +36,11 @@
 #include <condition_variable>
 #include <mutex>
 #include <chrono>
+#include <cmath>
 #include <filesystem>
-#include <fstream>
 #include <memory>
+#include <optional>
 #include <stdexcept>
-#include <fcntl.h>
 #include <unistd.h>
 
 #include "arg_parser.hpp"
@@ -59,12 +55,6 @@
 #include "wheel.hpp"
 
 namespace fs = std::filesystem;
-
-// Dispatches -o/--output on its extension: ".db" (case-insensitive, the same
-// test blk_path_for applies) means the SQLite + zstd gap-encoded format
-// (gap_block_sink.hpp, sqlite_prime_store.hpp); anything else keeps the
-// original one-prime-per-line text format.
-static bool is_db_output(const std::string& path) { return has_db_suffix(path); }
 
 // Writes a (small, already-known) list of primes straight into a .db store,
 // with no threading -- used by the tiny-N early-return paths below, where
@@ -381,7 +371,7 @@ static void run_parallel_chunks(unsigned workers, const std::vector<ChunkRange>&
 }
 
 // Everything main() has decided by the time the sieve starts, for the three
-// output modes below.
+// modes below.
 struct RunPlan {
     const Options& opt;
     const Colors& C;
@@ -412,7 +402,7 @@ struct RunPlan {
     }
 };
 
-// Count-only (no -o): a single pass, no I/O of any kind.
+// Count-only (no -o, no --print): a single pass, no I/O of any kind.
 static int run_count(const RunPlan& plan) {
     const Colors& C = plan.C;
     std::vector<uint64_t> prime_counts(plan.ranges.size(), 0);
@@ -488,91 +478,119 @@ static int run_db(const RunPlan& plan) {
     return 0;
 }
 
-// -o text: two passes, byte counting then parallel pwrite (see the top-of-file comment).
-static int run_text(const RunPlan& plan) {
-    const Options& opt = plan.opt;
+// --print: the primes on stdout, one per line, in order. stdout takes no
+// offsets, so the chunks are handed out in order: each worker sieves the
+// next one into a text buffer, and the main thread writes the buffers out
+// in chunk order, with at most `window` chunks in flight (main() sizes the
+// chunks at ~1-2M primes and picks the workers). A worker's chunks follow
+// each other only when it is the only one; otherwise each starts afresh
+// (sieve_chunk activates the base primes again).
+static int run_print(const RunPlan& plan) {
     const Colors& C = plan.C;
-    const unsigned num_chunks = static_cast<unsigned>(plan.ranges.size());
-    // --- Pass 1: byte counting (no I/O) ---
-    // Where every number of a chunk has the same digit count, its bytes are
-    // its prime count x (digits + 1): a count-only sieve. Only the chunks
-    // across a power of 10 decode their primes to measure them.
-    const auto digits = [](uint64_t v) { uint64_t d = 1; while (v >= 10) { v /= 10; ++d; } return d; };
-    std::vector<uint64_t> byte_counts(num_chunks, 0);
-    std::vector<uint64_t> prime_counts(num_chunks, 0);
-    plan.pass("counting", [&](unsigned i, auto sieve) {
-        const ChunkRange& r = plan.ranges[i];
-        const uint64_t d = digits(wheel_number(r.low));
-        if (d == digits(wheel_number(r.high - 1))) {
-            NullSink sink;
-            prime_counts[i] = sieve(sink);
-            byte_counts[i] = prime_counts[i] * (d + 1);
-        } else {
-            ByteCounter counter;
-            prime_counts[i] = sieve(counter);
-            byte_counts[i] = counter.total_bytes;
+    const unsigned n = static_cast<unsigned>(plan.ranges.size());
+    const unsigned workers = plan.actual_threads;
+    const unsigned window = workers + 2;
+    struct Slot {
+        TextBuffer text;
+        uint64_t primes = 0;
+        unsigned chunk = 0;
+        bool ready = false;
+    };
+    std::vector<Slot> slots(window);
+    std::mutex mu;
+    std::condition_variable cv;
+    unsigned next = 0;    // next chunk to hand out
+    unsigned written = 0; // chunks written to stdout
+    bool stop = false;    // an error: everyone leaves
+    std::exception_ptr error;
+
+    // No progress line when stdout is the terminal too: it would land among the primes.
+    std::atomic<uint64_t> no_progress{0};
+    std::optional<Progress> progress;
+    if (!isatty(STDOUT_FILENO)) progress.emplace(C, "printing", plan.total_span);
+    std::atomic<uint64_t>& done_k = progress ? progress->k : no_progress;
+
+    const auto worker = [&] {
+        try {
+            for (;;) {
+                unsigned i;
+                {
+                    std::unique_lock<std::mutex> lk(mu);
+                    cv.wait(lk, [&] { return stop || next >= n || next < written + window; });
+                    if (stop || next >= n) return;
+                    i = next++;
+                }
+                Slot& s = slots[i % window]; // chunk i - window's, already written
+                s.text.size = 0;
+                TextSink sink{s.text};
+                const ChunkRange& r = plan.ranges[i];
+                uint64_t primes = 0;
+                sieve_chunk(r, plan.sp.tiers_for(r), plan.base_limit, plan.presieve, plan.sp.cfg, sink, primes, done_k);
+                {
+                    std::lock_guard<std::mutex> lk(mu);
+                    s.primes = primes;
+                    s.chunk = i;
+                    s.ready = true;
+                }
+                cv.notify_all();
+            }
+        } catch (...) {
+            std::lock_guard<std::mutex> lk(mu);
+            if (!error) error = std::current_exception();
+            stop = true;
+            cv.notify_all();
         }
-    });
+    };
+    std::vector<std::thread> pool;
+    for (unsigned w = 0; w < workers; ++w) pool.emplace_back(worker);
 
-    const std::string head_text = wheel_primes_text(plan.range_start); // written by chunk 0
-    byte_counts[0] += head_text.size();
-    prime_counts[0] += wheel_primes_from(plan.range_start).size();
-
-    std::vector<uint64_t> offsets(num_chunks, 0);
-    for (unsigned i = 1; i < num_chunks; ++i) offsets[i] = offsets[i - 1] + byte_counts[i - 1];
-    uint64_t total_bytes = offsets.back() + byte_counts.back();
-    uint64_t total_primes = 0;
-    for (auto c : prime_counts) total_primes += c;
-
-    auto t_count_done = std::chrono::steady_clock::now();
-
-    // --- Size the final file exactly ---
-    {
-        std::ofstream(opt.output, std::ios::binary | std::ios::trunc); // create/truncate
-    }
-    fs::resize_file(opt.output, total_bytes);
-
-    int fd = ::open(opt.output.c_str(), O_WRONLY);
-    if (fd < 0) {
-        std::fprintf(stderr, "Error: could not open %s for writing\n", opt.output.c_str());
-        return 1;
-    }
-
-    // --- Pass 2: every chunk re-sieved and pwrite()n into its own region ---
+    const auto put = [](const char* data, size_t len) {
+        if (len && std::fwrite(data, 1, len, stdout) != len) throw std::runtime_error("writing to stdout failed");
+    };
+    uint64_t total_primes = wheel_primes_from(plan.range_start).size();
     try {
-        plan.pass("writing", [&](unsigned i, auto sieve) {
-            DirectWriter out(fd, offsets[i]);
-            if (i == 0) out.write_raw(head_text.data(), head_text.size());
-            sieve(out);
-            out.flush();
-        });
+        const std::string head = wheel_primes_text(plan.range_start);
+        put(head.data(), head.size());
+        for (unsigned i = 0; i < n; ++i) {
+            Slot& s = slots[i % window];
+            {
+                std::unique_lock<std::mutex> lk(mu);
+                cv.wait(lk, [&] { return stop || (s.ready && s.chunk == i); });
+                if (stop) break;
+            }
+            put(s.text.data.get(), s.text.size);
+            total_primes += s.primes;
+            {
+                std::lock_guard<std::mutex> lk(mu);
+                s.ready = false;
+                ++written;
+            }
+            cv.notify_all();
+        }
+        if (std::fflush(stdout) != 0) throw std::runtime_error("writing to stdout failed");
     } catch (...) {
-        ::close(fd);
+        {
+            std::lock_guard<std::mutex> lk(mu);
+            stop = true;
+        }
+        cv.notify_all();
+        for (auto& t : pool) t.join();
         throw;
     }
-    ::close(fd);
+    for (auto& t : pool) t.join();
+    if (error) std::rethrow_exception(error);
+    progress.reset(); // its last line before the summary
 
     auto t_end = std::chrono::steady_clock::now();
-    double count_s = std::chrono::duration<double>(t_count_done - plan.t_start).count();
-    double write_s = std::chrono::duration<double>(t_end - t_count_done).count();
     double total_s = std::chrono::duration<double>(t_end - plan.t_start).count();
-    double count_mprimes = count_s > 0 ? (total_primes / 1e6 / count_s) : 0.0;
-    double write_gbps = write_s > 0 ? (total_bytes / 1e9 / write_s) : 0.0;
     double total_mprimes = total_s > 0 ? (total_primes / 1e6 / total_s) : 0.0;
-
     std::fprintf(stderr,
-        "%sDone.%s %s%s%s primes found %s %s(%.2f GB)%s.\n"
-        "  %scount:%s      %s%7.3fs%s  (%s%.1f M primes/s%s)\n"
-        "  %swrite:%s      %s%7.3fs%s  (%s%.2f GB/s%s)\n"
-        "  %stotal:%s      %s%7.3fs%s  (%s%.1f M primes/s%s)\n",
+        "%sDone.%s %s%s%s primes printed %s.\n"
+        "  %stotal:%s      %s%.3fs%s (%s%.1f M primes/s%s)\n",
         C.headline, C.reset,
         C.bold, format_thousands(total_primes).c_str(), C.reset,
-        range_desc(plan.range_start, opt.limit).c_str(),
-        C.dim, total_bytes / 1e9, C.reset,
-        C.label, C.reset, C.time, count_s, C.reset, C.rate, count_mprimes, C.reset,
-        C.label, C.reset, C.time, write_s, C.reset, C.io, write_gbps, C.reset,
+        range_desc(plan.range_start, plan.opt.limit).c_str(),
         C.headline, C.reset, C.time, total_s, C.reset, C.headline, total_mprimes, C.reset);
-
     return 0;
 }
 
@@ -599,35 +617,20 @@ int main(int argc, char** argv) {
 
     auto t_start = std::chrono::steady_clock::now();
 
-    if (opt.limit < 2) {
-        if (opt.output.empty()) {
-            std::fprintf(stderr, "Done. 0 primes found up to %llu.\n",
-                         static_cast<unsigned long long>(opt.limit));
-        } else if (is_db_output(opt.output)) {
-            write_tiny_db(opt.output, {}, opt.start, opt.limit, opt.db_block_size, opt.zstd_level);
-            std::fprintf(stderr, "N < 2: no primes. Empty .db file created at %s\n", opt.output.c_str());
-        } else {
-            std::ofstream(opt.output, std::ios::binary | std::ios::trunc);
-            std::fprintf(stderr, "N < 2: no primes. Empty file created at %s\n", opt.output.c_str());
-        }
-        return 0;
-    }
     if (opt.limit < FIRST_WHEEL_PRIME) {
         // The wheel's own primes fall outside its numbering; for limits
         // this small there is no wheel range to sieve at all, so this is
         // resolved directly, without the parallel machinery.
         std::vector<uint64_t> small;
         for (uint64_t p : wheel_primes_from(opt.start)) if (opt.limit >= p) small.push_back(p);
-        if (opt.output.empty()) {
-            std::fprintf(stderr, "Done. %zu prime(s) found %s.\n",
-                         small.size(), range_desc(opt.start, opt.limit).c_str());
-        } else if (is_db_output(opt.output)) {
+        if (opt.print) {
+            for (uint64_t p : small) std::printf("%llu\n", static_cast<unsigned long long>(p));
+            std::fprintf(stderr, "Done. %zu prime(s) printed %s.\n", small.size(), range_desc(opt.start, opt.limit).c_str());
+        } else if (!opt.output.empty()) {
             write_tiny_db(opt.output, small, opt.start, opt.limit, opt.db_block_size, opt.zstd_level);
             std::fprintf(stderr, "Done. %zu prime(s) written to %s\n", small.size(), opt.output.c_str());
         } else {
-            std::ofstream ofs(opt.output, std::ios::binary | std::ios::trunc);
-            for (uint64_t p : small) ofs << p << "\n";
-            std::fprintf(stderr, "Done. %zu prime(s) written to %s\n", small.size(), opt.output.c_str());
+            std::fprintf(stderr, "Done. %zu prime(s) found %s.\n", small.size(), range_desc(opt.start, opt.limit).c_str());
         }
         return 0;
     }
@@ -639,6 +642,16 @@ int main(int argc, char** argv) {
     const Presieve presieve = build_presieve(PRESIEVE_GROUPS);
     const BasePrimes base = sieve_base_primes(base_limit, presieve, opt.threads);
     std::fprintf(stderr, "  %llu base primes found.\n", static_cast<unsigned long long>(base.count));
+
+    // --print: chunks of ~1-2M primes, ~15-40 MB of text each (run_print).
+    // Its workers' chunks don't follow each other, so each activates every
+    // base prime afresh; that stays under ~10% of a chunk's work while there
+    // are no more base primes than the chunk's primes / PRINT_ACTIVATION_RATIO
+    // (N up to ~4e12). Past that, one worker, whose chunks follow each other
+    // and carry its sieve over.
+    constexpr uint64_t PRINT_CHUNK_MIN_PRIMES = uint64_t{1} << 20, PRINT_CHUNK_MAX_PRIMES = uint64_t{1} << 21;
+    constexpr uint64_t PRINT_ACTIVATION_RATIO = 15;
+    if (opt.print && base.count * PRINT_ACTIVATION_RATIO > PRINT_CHUNK_MAX_PRIMES) opt.threads = 1;
 
     // Fewer threads when they wouldn't fit the memory budget, before the plan
     // so its per-thread choices (huge arenas, the L3-per-thread cutoff) see
@@ -662,8 +675,8 @@ int main(int argc, char** argv) {
     // --start N0: sieve just [N0, N] instead of [0, N]. Every base prime is
     // still activated for that range, so a tail of a large N costs what the
     // same segments cost in a full run. The count is the tail's, not pi(N);
-    // with -o only the tail is written (a .db's positions start at its
-    // first prime, meta.range_start = N0).
+    // with -o or --print only the tail is written (a .db's positions start
+    // at its first prime, meta.range_start = N0).
     uint64_t range_start = opt.start; // below N, parse_args
     if (range_start) {
         std::fprintf(stderr, "WARNING: --start %llu -- only [%llu, %llu] is sieved; the count is NOT pi(N).\n",
@@ -682,6 +695,15 @@ int main(int argc, char** argv) {
         uint64_t floor_chunks = std::min<uint64_t>(uint64_t{opt.threads} * TAIL_CHUNKS_PER_THREAD,
                                                    span_k / P.seg_k_width);
         target_chunks = static_cast<unsigned>(std::max<uint64_t>({uint64_t{1}, scaled, floor_chunks}));
+    }
+    if (opt.print) {
+        // Primes per wheel index near N: WHEEL_MOD / WHEEL_SIZE numbers each, 1 / ln N of them prime.
+        const uint64_t chunk_primes =
+            std::clamp(base.count * PRINT_ACTIVATION_RATIO, PRINT_CHUNK_MIN_PRIMES, PRINT_CHUNK_MAX_PRIMES);
+        const double primes_per_k = (double(WHEEL_MOD) / WHEEL_SIZE) / std::log(static_cast<double>(opt.limit));
+        const uint64_t chunk_k = std::max(P.seg_k_width, static_cast<uint64_t>(chunk_primes / primes_per_k));
+        const uint64_t span_k = wheel_count_upto(opt.limit) - (range_start ? wheel_count_upto(range_start - 1) : 0);
+        target_chunks = static_cast<unsigned>(std::clamp<uint64_t>(span_k / chunk_k, 1, UINT32_MAX));
     }
     auto ranges = split_ranges(opt.limit, target_chunks, range_start, P.seg_k_width);
     if (ranges.empty()) {
@@ -722,13 +744,13 @@ int main(int argc, char** argv) {
     }
 
     // Worker exceptions (pwrite() on a full disk, the bucket ring's sizing
-    // check) are rethrown by run_parallel_chunks and end here.
+    // check) are rethrown by the run_* functions and end here.
     const RunPlan plan{opt, C, P, std::move(ranges), actual_threads, base_limit, presieve,
                        std::move(fresh_primes), total_span, range_start, t_start};
     try {
-        if (opt.output.empty()) return run_count(plan);
-        if (is_db_output(opt.output)) return run_db(plan);
-        return run_text(plan);
+        if (opt.print) return run_print(plan);
+        if (!opt.output.empty()) return run_db(plan);
+        return run_count(plan);
     } catch (const std::exception& e) {
         std::fprintf(stderr, "\nError: %s\n", e.what());
         return 1;

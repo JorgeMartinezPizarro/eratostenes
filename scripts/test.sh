@@ -10,23 +10,25 @@
 #      --zstd-level/--tune at once (not one by one) at a small N (1e7),
 #      each without -o (count mode) and as .db: none should change the
 #      result, only how it is computed or packed.
-#   4. Text vs .db round trip at N=1e5..1e7: the same pi(N) and, position by
-#      position (all of them at the smallest N, a random sample at the
+#   4. --print vs .db round trip at N=1e5..1e7: the same pi(N) and, position
+#      by position (all of them at the smallest N, a random sample at the
 #      others -- every position through nth_prime is a process per query,
 #      expensive from hundreds of thousands of primes up), the same prime
-#      in both formats.
+#      in both; and --print at 1e9 (many chunks, written in order) against
+#      primecount.
 #   5. Count mode at N=1e10 against primecount on the paths that only show
 #      up at a large N or a small -s (forced sparse tier; no med64; lowered
 #      cutoffs, combined), and --start over several ranges (the count is
 #      pi(N) - pi(N0 - 1)), one of them above 2^53 (exact parsing of N).
-#   6. Small limits (N < 2, N < 7) in all three modes, arguments that must
+#   6. Small limits (N < 2, N < 7) in all three modes (count, --print, .db),
+#      arguments that must
 #      be rejected, and the segment sizing rules read from the startup log
 #      with forced --l1-bytes/--l2-bytes (deterministic).
 #   7. A range in the real sparse regime (the last 1e8 below 1e15) against
 #      primecount, and the errors nth_prime must catch (a truncated or
 #      missing .blk, positions out of range).
-#   8. Ranges with -o (--start): .txt and .db of several tails of [0, 2e6]
-#      against the tail of the full .txt, nth_prime's queries (position,
+#   8. Ranges (--start): --print and .db of several tails of [0, 2e6]
+#      against the tail of the full --print, nth_prime's queries (position,
 #      --next, --count X Y, --range, --slice, --info) at block and range
 #      edges, their rejections, and a tail of 1e15 against primecount.
 # The expected values in 1, 2, 3, 5 and 8 come from primecount, not from
@@ -191,7 +193,7 @@ check_combo "combo forced medium NTA"          -t "$THREADS" -s 100000 --tune me
 check_combo "combo largest block (2^22)"       -t 2 --db-block-size 4194304
 check_combo "combo one-prime block"            -t 2 -s 100000 --db-block-size 1
 
-# --- 4: text vs .db round trip, position by position ---
+# --- 4: --print vs .db round trip, position by position ---
 NS2=(100000 1000000 10000000)
 SAMPLES=(0 300 300)
 
@@ -201,8 +203,8 @@ for i in "${!NS2[@]}"; do
     txt="$WORKDIR/rt$n.txt"
     db="$WORKDIR/rt$n.db"
 
-    "$BIN" "$n" -t "$THREADS" -o "$txt" >/dev/null 2>&1
-    "$BIN" "$n" -t "$THREADS" -o "$db"  >/dev/null 2>&1
+    "$BIN" "$n" -t "$THREADS" --print > "$txt" 2>/dev/null
+    "$BIN" "$n" -t "$THREADS" -o "$db" >/dev/null 2>&1
 
     mapfile -t lines < "$txt"
     expected_count=${#lines[@]}
@@ -239,6 +241,29 @@ for i in "${!NS2[@]}"; do
         fail=1
     fi
 done
+
+# --print at 1e9: dozens of chunks sieved in parallel and written in order.
+# Every line above the previous one, as many as pi(1e9), and a random sample
+# of positions against primecount --nth-prime.
+N4=1000000000
+expected_pi_1e9=$("$PRIMECOUNT" "$N4")
+mapfile -t pos4 < <(random_positions 20 "$expected_pi_1e9" | sort -n)
+got4=$("$BIN" "$N4" -t "$THREADS" --print 2>/dev/null |
+       awk -v list="${pos4[*]}" 'BEGIN { n = split(list, w, " "); for (i = 1; i <= n; i++) want[w[i]] = 1 }
+            NR > 1 && $1 <= prev { bad++ } { prev = $1 } (NR in want) { print NR, $1 }
+            END { print "lines", NR, "unordered", bad + 0 }')
+ok4=1
+[ "$(echo "$got4" | tail -1)" == "lines $expected_pi_1e9 unordered 0" ] || ok4=0
+while read -r pos val; do
+    [ "$pos" == "lines" ] && continue
+    [ "$("$PRIMECOUNT" "$pos" --nth-prime)" == "$val" ] || ok4=0
+done <<< "$got4"
+if [ "$ok4" -eq 1 ]; then
+    printf "OK   --print N=%-14s pi(N)=%s, in order, %s positions (vs primecount)\n" "$N4" "$expected_pi_1e9" "${#pos4[@]}"
+else
+    printf "FAIL --print N=%-14s %s\n" "$N4" "$(echo "$got4" | tail -1)"
+    fail=1
+fi
 
 
 # --- 5: large-N paths and --start, count mode, against primecount ---
@@ -283,13 +308,13 @@ check_start 240000000 239999999 -t 2
 # --- 6: small limits, rejections and sizing rules (all instant) ---
 
 # N < 2 and N < 7 (main's short paths) and a small regular N, as a count,
-# .txt and .db; the .db's last prime against the .txt's last line.
+# --print and .db; the .db's last prime against the last printed line.
 check_tiny() {
     local n="$1" expected="$2" out c lines dbc
     out=$("$BIN" "$n" 2>&1)
     c=$(echo "$out" | sed -nE 's/.*Done\. ([0-9]+) prime.*/\1/p')
     [ "$c" == "$expected" ] || { printf "FAIL tiny N=%-4s count=%s expected=%s\n" "$n" "$c" "$expected"; fail=1; return; }
-    "$BIN" "$n" -o "$WORKDIR/tiny.txt" >/dev/null 2>&1
+    "$BIN" "$n" --print > "$WORKDIR/tiny.txt" 2>/dev/null
     lines=$(grep -c . "$WORKDIR/tiny.txt" || true)
     [ "$lines" == "$expected" ] || { printf "FAIL tiny N=%-4s txt=%s expected=%s\n" "$n" "$lines" "$expected"; fail=1; return; }
     "$BIN" "$n" -o "$WORKDIR/tiny.db" >/dev/null 2>&1
@@ -301,7 +326,7 @@ check_tiny() {
         want=$(tail -1 "$WORKDIR/tiny.txt")
         [ "$last" == "$want" ] || { printf "FAIL tiny N=%-4s db[%s]=%s txt=%s\n" "$n" "$expected" "$last" "$want"; fail=1; return; }
     fi
-    printf "OK   tiny N=%-4s pi(N)=%-3s (count, txt, db)\n" "$n" "$expected"
+    printf "OK   tiny N=%-4s pi(N)=%-3s (count, --print, db)\n" "$n" "$expected"
 }
 check_tiny 0 0
 check_tiny 1 0
@@ -335,6 +360,8 @@ expect_reject "--tune sparse=2/1"        1000 --tune sparse=2/1
 expect_reject "--tune sparse=0"          1000 --tune sparse=0
 expect_reject "--zstd-level abc"         1000 --zstd-level abc
 expect_reject "--zstd-level 99"          1000 --zstd-level 99
+expect_reject "-o without .db"           1000 -o "$WORKDIR/primes.txt"
+expect_reject "-o with --print"          1000 -o "$WORKDIR/primes.db" --print
 
 # Segment sizing rules, read from the startup log of a short tail (instant):
 # with --l1-bytes/--l2-bytes forced the decisions don't depend on the
@@ -358,6 +385,8 @@ expect_log "N = 1e20: names the largest N"         "N too large: 1e20 \($MAXN"  
 expect_log "N = 2^64: names the largest N"         "N too large: 18446744073709551616 \($MAXN" 18446744073709551616
 expect_log "N = largest + 1: names the largest N"  "N too large: 18446744004990074880 \($MAXN" 18446744004990074880
 expect_log "--start 1e20: names the largest N"     "start too large: 1e20 .*$MAXN"  1e15 --start 1e20
+# -o is a database only: any other path is rejected, pointing at --print.
+expect_log "-o x.txt: names --print"                "must end in .db \(--print prints the primes as text\)" 1000 -o x.txt
 # --db-block-size outside [1, 2^22]: rejected while reading the arguments.
 expect_log "--db-block-size 0"                      "db-block-size out of range: 0 \(1 to 4194304"    1000 -o /dev/null.db --db-block-size 0
 expect_log "--db-block-size 1e12"                   "db-block-size out of range: 1e12 \(1 to 4194304" 1000 -o /dev/null.db --db-block-size 1e12
@@ -459,21 +488,21 @@ else
     printf "FAIL nth_prime %-30s\n" "last prime < 1e5"; fail=1
 fi
 
-# --- 8: ranges with -o (--start) and nth_prime's queries ---
-# Reference: the full .txt up to 2e6 (its primes are already compared with
-# primecount in parts 1-4); every range as .txt and as .db (blocks of 1000
-# primes, to cross block boundaries) must be exactly its tail.
+# --- 8: ranges (--start), printed and as .db, and nth_prime's queries ---
+# Reference: everything up to 2e6 printed (its primes are already compared
+# with primecount in parts 1-4); every range printed and as .db (blocks of
+# 1000 primes, to cross block boundaries) must be exactly its tail.
 ok8() { printf "OK   range %-46s %s\n" "$1" "$2"; }
 fail8() { printf "FAIL range %-46s %s\n" "$1" "$2"; fail=1; }
 FULL8="$WORKDIR/full8.txt"
-"$BIN" 2000000 -o "$FULL8" >/dev/null 2>&1
+"$BIN" 2000000 --print > "$FULL8" 2>/dev/null
 for s8 in 2 7 239 1000000 1999993; do
     exp8="$WORKDIR/exp8.txt"
     awk -v s="$s8" '$1 >= s' "$FULL8" > "$exp8"
     n8=$(wc -l < "$exp8")
-    "$BIN" 2000000 --start "$s8" -t 3 -o "$WORKDIR/t8.txt" >/dev/null 2>&1
+    "$BIN" 2000000 --start "$s8" -t 3 --print > "$WORKDIR/t8.txt" 2>/dev/null
     "$BIN" 2000000 --start "$s8" -t 3 -o "$WORKDIR/t8.db" --db-block-size 1000 >/dev/null 2>&1
-    if cmp -s "$exp8" "$WORKDIR/t8.txt"; then ok8 "[$s8, 2e6] .txt" "$n8 primes"; else fail8 "[$s8, 2e6] .txt" "differs from the full .txt's tail"; fi
+    if cmp -s "$exp8" "$WORKDIR/t8.txt"; then ok8 "[$s8, 2e6] --print" "$n8 primes"; else fail8 "[$s8, 2e6] --print" "differs from the tail of the full print"; fi
     c8=$("$NTH_BIN" "$WORKDIR/t8.db" --count 2>&1)
     if [ "$c8" == "$n8" ] && "$NTH_BIN" "$WORKDIR/t8.db" --slice 1 "$n8" 2>&1 | cmp -s "$exp8" -; then
         ok8 "[$s8, 2e6] .db --count and --slice 1..$n8" "$n8 primes"
@@ -525,7 +554,7 @@ fi
 # A tail in the sparse regime: the last 1e7 below 1e15, against primecount.
 N8=1000000000000000; S8=999999990000000
 "$BIN" "$N8" --start "$S8" -t "$THREADS" -o "$WORKDIR/t15.db" >/dev/null 2>&1
-"$BIN" "$N8" --start "$S8" -t "$THREADS" -o "$WORKDIR/t15.txt" >/dev/null 2>&1
+"$BIN" "$N8" --start "$S8" -t "$THREADS" --print > "$WORKDIR/t15.txt" 2>/dev/null
 want=$(( $("$PRIMECOUNT" "$N8") - $("$PRIMECOUNT" $((S8 - 1))) ))
 c8=$("$NTH_BIN" "$WORKDIR/t15.db" --count 2>&1); l8=$(wc -l < "$WORKDIR/t15.txt")
 X8=999999995000000; Y8=999999997500000
@@ -533,9 +562,9 @@ wantxy=$(( $("$PRIMECOUNT" "$Y8") - $("$PRIMECOUNT" $((X8 - 1))) ))
 gotxy=$("$NTH_BIN" "$WORKDIR/t15.db" --count "$X8" "$Y8" 2>&1)
 if [ "$c8" == "$want" ] && [ "$l8" == "$want" ] && [ "$gotxy" == "$wantxy" ] &&
    "$NTH_BIN" "$WORKDIR/t15.db" --slice 1 "$c8" | cmp -s - "$WORKDIR/t15.txt"; then
-    ok8 "[1e15 - 1e7, 1e15] .db/.txt vs primecount" "$want primes, [X, Y] $wantxy"
+    ok8 "[1e15 - 1e7, 1e15] .db/--print vs primecount" "$want primes, [X, Y] $wantxy"
 else
-    fail8 "[1e15 - 1e7, 1e15]" "db=$c8 txt=$l8 primecount=$want; [X,Y] $gotxy vs $wantxy"
+    fail8 "[1e15 - 1e7, 1e15]" "db=$c8 print=$l8 primecount=$want; [X,Y] $gotxy vs $wantxy"
 fi
 
 if [ "$fail" -eq 0 ]; then
