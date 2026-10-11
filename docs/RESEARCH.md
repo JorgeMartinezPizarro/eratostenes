@@ -98,7 +98,8 @@ What is in the code today, by the day it went in:
 - **2026-10-11**: med64's [cache counters](#med64-l2-latency-at-24-34-misses-in-flight-not-l1-l2-bandwidth-measured-2026-10-11)
   on the tower and the dev PC: L2 latency, not bandwidth; the sparse cutoff at
   [5/8 without a cache gate](#sparse-cutoff-58-in-the-sparse-regime-without-a-cache-gate-kept-2026-10-11);
-  `process_big`'s [last spills](#sparse-tier-process_bigs-last-spills-out-of-the-loop-tried-neutral-2026-10-11) neutral.
+  `process_big`'s [last spills](#sparse-tier-process_bigs-last-spills-out-of-the-loop-tried-neutral-2026-10-11) neutral;
+  the [med64 cutoff re-swept](#med64-cutoff-re-swept-after-the-58-sparse-cutoff-16-stays-measured-2026-10-11): 1/6 stays.
 
 ## Contents
 
@@ -356,8 +357,8 @@ knob removed.
 
 ### med64: L2 latency at 2.4-3.4 misses in flight, not L1<->L2 bandwidth (measured, 2026-10-11)
 
-`scripts/med64_counters.sh`: perf stat totals times med64's share of each event in perf record,
-one thread per core:
+`scripts/tier_counters.sh` (then `med64_counters.sh`): perf stat totals times med64's share of
+each event in perf record, one thread per core:
 
 | | i5-3470, last 1e11 below 1e12, 4 threads | i5-11400F, last 1e11 below 1e13, 6 threads |
 |---|---:|---:|
@@ -379,6 +380,19 @@ measured). So issuing more misses doesn't pay (the prefetch above, the medium ti
 4-way interleave); only fewer misses per hit would, which needs a footprint nearer L1 (the
 L1-blocked band, half the L2: refuted on every machine). With two threads per core (dev PC
 `-t 12`) the core moves ~40 bytes per cycle at 2.96 cycles per hit: SMT overlaps more misses.
+
+### med64 cutoff re-swept after the 5/8 sparse cutoff: 1/6 stays (measured, 2026-10-11)
+
+With the medium tier shortened from above by the 5/8 sparse cutoff, dev PC, 12 threads, last 1e11
+below N, cycles:u against 1/6, 3 pairs:
+
+| med64 | 1e12 | 1e13 | 1e15 | 1e17 |
+|---|---:|---:|---:|---:|
+| 1/4 | -0.58% | +0.64% | +0.68% | +1.20% |
+| 1/8 | +0.46% | +0.95% | -0.09% | +0.79% |
+
+1/4 cuts 1.1-2.7% of the instructions and still loses cycles from 1e13 up; 1/8 adds both. 1/6
+stays.
 
 ## Medium tier
 
