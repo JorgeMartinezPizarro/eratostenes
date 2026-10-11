@@ -24,7 +24,8 @@
 #      more N, default 1e13; N works too), WIDTH (default 1e10), THREADS
 #      (default nproc), REPS (default 3), EVENTS (default
 #      cycles:u,instructions:u, at most two), PERF=0 (wall time even where
-#      perf works)
+#      perf works), WARMUP (seconds of sieving before the first pair,
+#      default 30; 0 = none; see warm_up in scripts/lib.sh)
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -37,6 +38,7 @@ WIDTH_IN="${WIDTH:-1e10}"
 THREADS="${THREADS:-$(nproc)}"
 REPS="${REPS:-3}"
 EVENTS="${EVENTS:-cycles:u,instructions:u}"
+WARMUP="${WARMUP:-30}"
 
 if [ "$BIN_A" = "$BIN_B" ] && [ "$A_CFG" = "$B_CFG" ]; then
     echo "A and B are the same run: give B (options, e.g. B=\"--tune sparse=1/2\") or BIN_A/BIN_B (another binary)" >&2
@@ -48,13 +50,16 @@ for b in "$BIN_A" "$BIN_B"; do
     fi
 done
 
-source scripts/lib.sh # to_dec
+source scripts/lib.sh # to_dec, warm_up
 WIDTH=$(to_dec "$WIDTH_IN")
 
-# perf usable with these events on this machine: every event counted.
+# perf usable with these events on this machine: every event counted. On a
+# hybrid CPU each event comes once per core type (cpu_core/cycles/u,
+# cpu_atom/cycles/u), the one that ran nothing "<not counted>"; run_one
+# adds them up.
 HAVE_PERF=0
 if [ "${PERF:-1}" != 0 ] && command -v perf >/dev/null 2>&1 &&
-   perf stat -x, -e "$EVENTS" true 2>&1 | awk -F, 'NF > 2 { n++; if ($1 !~ /^[0-9][0-9.]*$/) bad = 1 } END { exit !(n > 0 && !bad) }'; then
+   perf stat -x, -e "$EVENTS" true 2>&1 | awk -F, 'NF > 2 { if ($1 ~ /^[0-9][0-9.]*$/) n++; else if ($1 !~ /not counted/) bad = 1 } END { exit !(n > 0 && !bad) }'; then
     HAVE_PERF=1
 fi
 E1=${EVENTS%%,*}
@@ -71,7 +76,11 @@ run_one() {
     local bin=$1 cfg=$2 n=$3 start=$4 out vals
     if [ $HAVE_PERF = 1 ]; then
         out=$(perf stat -x, -e "$EVENTS" "$bin" "$n" --start "$start" -t "$THREADS" $cfg 2>&1) || { echo "$out" >&2; return 1; }
-        vals=$(echo "$out" | awk -F, 'NF > 2 && $1 ~ /^[0-9][0-9.]*$/ { printf "%s ", $1 }')
+        # Each event's count, summed over the core types of a hybrid CPU.
+        vals=$(echo "$out" | awk -F, -v e1="$E1" -v e2="$E2" '
+            function norm(s) { sub(/^cpu_[a-z]+\//, "", s); sub(/\/[a-zA-Z]*$/, "", s); sub(/:[a-zA-Z]*$/, "", s); return s }
+            NF > 2 && $1 ~ /^[0-9][0-9.]*$/ { v[norm($3)] += $1 }
+            END { printf "%.0f %s\n", v[norm(e1)], e2 == "" ? "-" : sprintf("%.0f", v[norm(e2)]) }')
         read -r m1 m2 _ <<< "$vals"
     else
         out=$("$bin" "$n" --start "$start" -t "$THREADS" $cfg 2>&1) || { echo "$out" >&2; return 1; }
@@ -104,6 +113,7 @@ compare() {
         }'
 }
 
+warm_up "$BIN_A" "$THREADS" "$WARMUP"
 for N_IN in $NS; do
     N=$(to_dec "$N_IN")
     if (( N <= WIDTH )); then echo "WIDTH=$WIDTH_IN doesn't fit below N=$N_IN" >&2; continue; fi

@@ -147,7 +147,7 @@ benchmark-mini: $(BIN)
 # cycles:u/instructions:u where perf is available, wall time otherwise.
 #   B="--tune sparse=1/2" make benchmark-ab
 #   BIN_A=/tmp/era_A/eratostenes NS="1e15 1e17" make benchmark-ab
-# BIN_A/BIN_B/A/B/NS/WIDTH/THREADS/REPS/EVENTS/PERF from the environment.
+# BIN_A/BIN_B/A/B/NS/WIDTH/THREADS/REPS/EVENTS/PERF/WARMUP from the environment.
 benchmark-ab: $(BIN)
 	bash scripts/benchmark_ab.sh
 
@@ -180,7 +180,7 @@ docker-benchmark-mini: docker-dev
 	$(COMPOSE) run --rm -e THREADS -e N -e WIDTH -e SEGMENTS $(COMPOSE_ENV) dev make benchmark-mini
 
 docker-benchmark-ab: docker-dev
-	$(COMPOSE) run --rm -e THREADS -e N -e NS -e WIDTH -e REPS -e A -e B -e BIN_A -e BIN_B -e EVENTS -e PERF $(COMPOSE_ENV) dev make benchmark-ab
+	$(COMPOSE) run --rm -e THREADS -e N -e NS -e WIDTH -e REPS -e A -e B -e BIN_A -e BIN_B -e EVENTS -e PERF -e WARMUP $(COMPOSE_ENV) dev make benchmark-ab
 
 docker-benchmark-print: docker-dev
 	$(COMPOSE) run --rm -e THREADS -e NS -e TARGETS -e REPS -e DIR $(COMPOSE_ENV) dev make benchmark-print

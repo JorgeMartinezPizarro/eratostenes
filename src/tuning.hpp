@@ -88,6 +88,7 @@ struct SievePlan {
     bool half_l2_few_primes = false; // base at half the whole-L2 width: one per core, few base primes
     bool whole_l2_base = false;
     bool sub_block_whole_l1d = false;
+    bool sub_block_tuned = false;    // --tune subblock: neither rule applies
     uint64_t base_count = 0;
     uint64_t seg_l1_capped_k = 0, seg_uncapped_k = 0, seg_unrounded_k = 0; // widths before a cap / fixup
     uint64_t seg_max_capped_k = 0;
@@ -98,7 +99,7 @@ struct SievePlan {
     // -t: the sub-block grows to the whole L1d when the threads that
     // actually run fit one per core with the largest L1d (see plan_sieve).
     void finish_threads(unsigned actual_threads) {
-        if (l1_big_cores && actual_threads <= l1_big_cores) { cfg.sub_block_bytes *= 2; sub_block_whole_l1d = true; }
+        if (!sub_block_tuned && l1_big_cores && actual_threads <= l1_big_cores) { cfg.sub_block_bytes *= 2; sub_block_whole_l1d = true; }
     }
 };
 
@@ -232,6 +233,12 @@ inline SievePlan plan_sieve(const Options& opt, const BasePrimes& base, uint64_t
             if (topo.l1_raw[c] == max_l1_raw && topo.l1_sharers[c] > 0) big_cores += 1.0 / topo.l1_sharers[c];
         P.l1_big_cores = static_cast<unsigned>(big_cores + 0.5);
         // Applied in finish_threads, against the threads that actually run.
+    }
+    // --tune subblock=a/b: the sub-block as a/b of the largest L1d, in place
+    // of both rules (small_limit keeps its half-L1d value).
+    if (opt.tune_subblock.den) {
+        cfg.sub_block_bytes = std::max<uint64_t>(64, l1_max * opt.tune_subblock.num / opt.tune_subblock.den / 64 * 64);
+        P.sub_block_tuned = true;
     }
 
     // Cap on the automatic base width: 32 x L1d, whatever sysfs claims for
@@ -481,6 +488,10 @@ inline void print_plan(const SievePlan& P, const Options& opt, unsigned actual_t
     if (P.sub_block_whole_l1d)
         std::fprintf(stderr, "  sub-block: whole L1d (%u threads <= %u cores with the largest L1d)\n",
                      actual_threads, P.l1_big_cores);
+    if (P.sub_block_tuned)
+        std::fprintf(stderr, "  sub-block: %llu/%llu of the L1d (--tune subblock)\n",
+                     static_cast<unsigned long long>(opt.tune_subblock.num),
+                     static_cast<unsigned long long>(opt.tune_subblock.den));
     if (P.whole_l2_base)
         std::fprintf(stderr, "  segment: whole L2 per thread (%u threads <= %u cores, no sparse tier)\n",
                      opt.threads, P.l1_big_cores);

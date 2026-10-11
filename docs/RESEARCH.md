@@ -99,7 +99,9 @@ What is in the code today, by the day it went in:
   on the tower and the dev PC: L2 latency, not bandwidth; the sparse cutoff at
   [5/8 without a cache gate](#sparse-cutoff-58-in-the-sparse-regime-without-a-cache-gate-kept-2026-10-11);
   `process_big`'s [last spills](#sparse-tier-process_bigs-last-spills-out-of-the-loop-tried-neutral-2026-10-11) neutral;
-  the [med64 cutoff re-swept](#med64-cutoff-re-swept-after-the-58-sparse-cutoff-16-stays-measured-2026-10-11): 1/6 stays.
+  the [med64 cutoff re-swept](#med64-cutoff-re-swept-after-the-58-sparse-cutoff-16-stays-measured-2026-10-11): 1/6 stays;
+  [small and med64 on Golden Cove](#small-and-med64-on-golden-cove-one-store-per-core-cycle-med64-waits-on-fill-buffers-measured-2026-10-11);
+  the sparse tier on [mod 30030](#sparse-tier-mod-30030-multiplier-wheel-tried-reverted-2026-10-11): slower.
 
 ## Contents
 
@@ -381,6 +383,25 @@ measured). So issuing more misses doesn't pay (the prefetch above, the medium ti
 L1-blocked band, half the L2: refuted on every machine). With two threads per core (dev PC
 `-t 12`) the core moves ~40 bytes per cycle at 2.96 cycles per hit: SMT overlaps more misses.
 
+### Small and med64 on Golden Cove: one store per core-cycle, med64 waits on fill buffers (measured, 2026-10-11)
+
+`scripts/tier_counters.sh` on the i5-13500's P-cores (pinned, `cpu_core` PMU), last 1e11 below
+1e12, against the dev PC (Rocket Lake) in the same window:
+
+| | small, 1 thread/core | small, 2/core | med64, 1/core | med64, 2/core |
+|---|---:|---:|---:|---:|
+| Golden Cove: hits per core-cycle | 0.95 | 0.85 | 0.29 | 0.44 |
+| Rocket Lake: hits per core-cycle | 0.57 | 0.86 | 0.24 | 0.38 |
+| Golden Cove: L1 fills per hit | 0.13 | 0.13 | 0.88 | 0.85 |
+| Golden Cove: fill buffers full | 0% | 16% | 57% | 38% |
+
+The small tier's ceiling is about one byte store per core-cycle on Golden Cove too: one thread
+per core already reaches 0.95, and a second one lowers it (on Rocket Lake one thread stays at 0.57,
+with 0.22 L1 fills per hit from the whole-L1d sub-block, and SMT fills the gap). No room for a
+small-tier loop that issues more stores per cycle. med64 has a fill buffer free in only 43% of its
+cycles with one thread per core while ~2.6 demand loads are pending on average: the buffers hold
+more than its loads, as on the tower and the dev PC (22-29%), here more clearly.
+
 ### med64 cutoff re-swept after the 5/8 sparse cutoff: 1/6 stays (measured, 2026-10-11)
 
 With the medium tier shortened from above by the 5/8 sparse cutoff, dev PC, 12 threads, last 1e11
@@ -652,6 +673,20 @@ L3 misses -32% (the shared bucket stream shrinks for all tiers). Full 1e14 4185.
 README's older 4530.74 s, ~3.5% from this. **Kept.** Not extended to medium (1-3 hits per
 segment, no room for 480 phases) or med64 (a 480-case switch).
 
+### Sparse tier: mod-30030 multiplier wheel (tried, reverted, 2026-10-11)
+
+13 is presieved too: 5760/30030 = 0.1918 candidates against 0.2078, -7.7% sparse hits. Entry:
+`idx` = class << 13 | phase in bits 0-15, `pos` in 16-35 (a sparse segment of at most 1 MiB,
+what the automatic width gives on every machine), `qp` in 36-63; table rows `mask | dm << 8 |
+corr << 13 | next phase << 18` (dm, corr <= 22) at class << 13 | phase, 8 x 8192 rows, 180 KiB
+touched; the next idx is `(ent & KEEP) | (row >> 18)`, the same instructions per hit as mod 2310.
+`make test` passed but for a forced 16 MiB segment (beyond 20 bits). Dev PC, 12 threads, last
+1e11 below N, 4 pairs: instructions -3.4 / -4.8 / -5.7 / -6.4 / -6.5% at 1e14..1e18, cycles:u
+**+3.7 / +4.8 / +4.8 / +4.0 / +7.0%**, every pair worse. The 15 KiB mod-2310 table lives in L1;
+this one doesn't, so each hit's row is one more L2 access next to the segment byte and the ring.
+A table small enough for L1 (per phase, plus small per-class tables) costs ~4-6 instructions per
+hit, more than the ~3 the fewer hits save. Closed: the sparse wheel stays at 2310.
+
 ### Per-tier cycles against primesieve at `-t 2`, and the sparse tier's block size: 4 KiB (kept, 2026-10-02)
 
 Dev PC, 1e15 tail, `-t 2`: below 2.1M the programs are even (83.7G vs ~82G); the gap is the
@@ -894,8 +929,11 @@ against 5/8: +0.55 / -0.18 / +0.77 / +0.86 / +3.16% at 1e14..1e18. 5/8 against 1
 from 5/8 of the width up have about one hit per segment. **Kept:** 5/8 inside the sparse regime when
 neither gate applies (chunks below narrow² keep the narrow configuration and 1/1); the new default
 against the old build: 1e15 -2.32% (3/3), 1e16 -3.11%, 1e17 -0.97% (5/5 each); `make test` OK. The
-gated machines are unchanged; whether their steps moved down too (3/8 where the gate gives 1/2) is
-open.
+gated machines are unchanged, and one step lower doesn't pay there: 3/8 against their 1/2, last 1e11
+below 1e14 / 1e16 / 1e18, 4 pairs: i5-3470 cycles:u +0.37 / +0.63 / -0.07% (instructions +1-2%),
+i5-13500 wall ~0 / -0.59 / -0.78%, i5-1235U wall ~0 / -0.24 / -0.26% (both 1e14 rows broken by the
+boost window: `benchmark_ab.sh` had no warm-up, and on the hybrids it fell back to wall time, both
+fixed since). The 1/2 step stays.
 
 ### Activation at the top of N: the integer division is not the cost (tried, reverted, 2026-10-04)
 
@@ -1570,9 +1608,6 @@ Where the time still goes, and what nothing measured so far has fixed:
   the wrap mask is gone, and taking the last spills out cut 1.4% of its
   instructions for no change in cycles
   ([entry](#sparse-tier-process_bigs-last-spills-out-of-the-loop-tried-neutral-2026-10-11)).
-- **The sparse cutoff on the gated machines**: 5/8 now beats 1/1 where no gate
-  applies ([entry](#sparse-cutoff-58-in-the-sparse-regime-without-a-cache-gate-kept-2026-10-11));
-  whether the 1/2 and 1/4 steps should move down as well is unmeasured.
 - **Activation at the top of N on old cores**: why taking the independent
   work away from the 64-bit division costs Ivy Bridge ~35 cycles per prime;
   hence `ERA_ACT_IDX` only with BMI2

@@ -64,6 +64,7 @@ struct Options {
     Fraction tune_small;  // small/med64 cutoff, default 1/4
     Fraction tune_med64;  // med64/medium cutoff, default 1/6 (0 = no med64 tier)
     Fraction tune_sparse; // medium/sparse cutoff, default 1/1, 1/2 or 1/4 (tuning.hpp); in (0, 1]
+    Fraction tune_subblock; // small-tier sub-block as a/b of the L1d, default 1/2 (1/1 one thread per core); in (0, 1]
     int medium_nta = -1; // medium-tier prefetchnta: -1 auto (L3 gate), 1 on, 0 off
     int huge = -1;       // sparse ring arenas as 2 MiB huge pages: -1 auto (one thread per core), 1 on, 0 off
 };
@@ -222,9 +223,14 @@ inline void parse_tune(Options& opt, const std::string& kv) {
         if (opt.tune_sparse.num == 0 || opt.tune_sparse.num > opt.tune_sparse.den)
             throw std::runtime_error("--tune sparse: expected a fraction in (0, 1], not '" + v + "'");
     }
+    else if (k == "subblock") {
+        opt.tune_subblock = parse_fraction(k, v);
+        if (opt.tune_subblock.num == 0 || opt.tune_subblock.num > opt.tune_subblock.den)
+            throw std::runtime_error("--tune subblock: expected a fraction in (0, 1], not '" + v + "'");
+    }
     else if (k == "medium_nta") opt.medium_nta = parse_switch(k, v, "1", "0") ? 1 : 0;
     else if (k == "huge") opt.huge = parse_switch(k, v, "1", "0") ? 1 : 0;
-    else throw std::runtime_error("--tune: unknown key '" + k + "' (small, med64, sparse, medium_nta, huge)");
+    else throw std::runtime_error("--tune: unknown key '" + k + "' (small, med64, sparse, subblock, medium_nta, huge)");
 }
 
 inline void print_usage(const char* prog) {
@@ -282,6 +288,8 @@ inline void print_usage(const char* prog) {
         "                         1/2 from 512 KiB and 1/4 from 1 MiB of L2 per\n"
         "                         thread, or 1/2 from 1.5 MiB and 1/4 from 4 MiB of\n"
         "                         L3 per active thread)\n"
+        "      subblock=a/b       Small-tier sub-block, as a/b of the L1d (default 1/2;\n"
+        "                         1/1 with one thread per core)\n"
         "      medium_nta=1|0     Force medium-tier prefetchnta on/off (default:\n"
         "                         on once its state outgrows the L3 share)\n"
         "      huge=1|0           Sparse ring arenas as 2 MiB huge pages (default:\n"
