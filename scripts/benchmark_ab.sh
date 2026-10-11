@@ -69,6 +69,10 @@ bash scripts/machine_info.sh "$THREADS" "last ${WIDTH_IN} below each N, A/B x$RE
 echo "A: $BIN_A ($(md5sum < "$BIN_A" | cut -c1-8)) ${A_CFG:-auto}"
 echo "B: $BIN_B ($(md5sum < "$BIN_B" | cut -c1-8)) ${B_CFG:-auto}"
 [ $HAVE_PERF = 1 ] && echo "perf_event_paranoid: $(cat /proc/sys/kernel/perf_event_paranoid 2>/dev/null || echo ?)"
+# The sum over core types moves with where the threads land (6-21% between
+# runs of one binary on the i5-13500, against 0.6-3.8% in wall time).
+[ $HAVE_PERF = 1 ] && [ -d /sys/bus/event_source/devices/cpu_core ] &&
+    echo "hybrid CPU: the events add P- and E-core counts and move with thread placement; judge by wall time"
 
 # run_one BIN OPTIONS N START: sets m1 m2 (the events, "-" without perf),
 # wall, cnt and startup (the configuration lines of the startup log).

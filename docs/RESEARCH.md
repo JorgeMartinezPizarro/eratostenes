@@ -101,7 +101,8 @@ What is in the code today, by the day it went in:
   `process_big`'s [last spills](#sparse-tier-process_bigs-last-spills-out-of-the-loop-tried-neutral-2026-10-11) neutral;
   the [med64 cutoff re-swept](#med64-cutoff-re-swept-after-the-58-sparse-cutoff-16-stays-measured-2026-10-11): 1/6 stays;
   [small and med64 on Golden Cove](#small-and-med64-on-golden-cove-one-store-per-core-cycle-med64-waits-on-fill-buffers-measured-2026-10-11);
-  the sparse tier on [mod 30030](#sparse-tier-mod-30030-multiplier-wheel-tried-reverted-2026-10-11): slower.
+  the sparse tier on [mod 30030](#sparse-tier-mod-30030-multiplier-wheel-tried-reverted-2026-10-11): slower;
+  the [sub-block re-swept](#sub-block-re-swept-with---tune-subblock-both-rules-stand-measured-2026-10-11): both rules stand.
 
 ## Contents
 
@@ -1102,6 +1103,30 @@ SMT): at `-t 2` 1e12 went 1.04x -> 0.97x. Dev PC `-t 1`: 48KiB with `small_limit
 per P-core -6.1%, two SMT threads on each of three P-cores +26.4%, unpinned -6.0% (Linux
 spreads one per core, P-cores first). Rule: the whole L1d when `-t` <= the physical cores
 with the largest L1d, else half; `small_limit` keeps the half-L1d value.
+
+### Sub-block re-swept with `--tune subblock`: both rules stand (measured, 2026-10-11)
+
+At one thread per core the dev PC's small tier had 0.22 L1 fills per hit with the whole-L1d
+sub-block against 0.09 at half, so a size in between looked worth a sweep. `--tune
+subblock=a/b` (a/b of the largest L1d, `small_limit` unchanged), last 1e11 below N, 4 pairs:
+
+| machine (threads), auto | B | 1e12 | 1e13 | 1e15 |
+|---|---|---:|---:|---:|
+| i5-3470 (4, one per core), 1/1 | 3/4 | +3.56% | +2.75% | +1.82% |
+| | 5/8 | +5.93% | +4.84% | +3.30% |
+| i5-11400F (`-t 6`), 1/1 | 3/4 | +1.18% | +1.49% | +0.17% |
+| | 5/8 | 0.00% | +0.34% | -0.91% |
+| | 1/2 | -0.30% | +1.23% | +0.45% |
+| i5-1235U (12, SMT), 1/2 | 3/8 | +1.26% | +1.27% | +0.86% |
+| | 5/8 | +3.59% | +3.70% | +1.06% |
+| i5-13500 (20, SMT), 1/2 | 3/8 | +0.60% | +0.74% | +0.90% |
+| | 5/8 | +3.35% | +1.32% | +0.43% |
+
+cycles:u on the i5-3470 (every pair worse) and the dev PC (5/8 at 1e13 / 1e15 with 6 pairs,
+overlapping), wall time on the hybrids. The L1 misses a smaller sub-block saves cost more in
+calls (+1-5% instructions). Both rules stand: the whole L1d with a core per thread, half with
+SMT. On the hybrids cycles:u summed over P- and E-cores spread 6-21% between runs of one binary
+(it moves with where the threads land), against 0.6-3.8% in wall time.
 
 ### Segment ceiling: half the L2 per thread, within 16-32 x L1d (kept, 2026-10-02)
 

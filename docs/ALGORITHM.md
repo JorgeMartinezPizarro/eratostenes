@@ -314,7 +314,8 @@ overrides for when detection can't be trusted) rather than a fixed guess:
   share. When no more threads run than physical cores with the largest L1d
   (VMs without SMT, `-t` below the core count), each thread has the L1d to
   itself and the sub-block takes all of it; the small/med64 cutoff stays at the
-  half-L1d value either way.
+  half-L1d value either way. `--tune subblock=a/b` sets it to a/b of the L1d for
+  sweeps.
 
 On a hybrid CPU (P-cores and E-cores with different caches) both are still
 applied **uniformly to every thread** -- threads migrate between core types at
