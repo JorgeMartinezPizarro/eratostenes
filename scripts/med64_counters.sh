@@ -2,10 +2,14 @@
 # med64: is it bound by L1<->L2 traffic? Run from the repo root.
 # perf stat (totals) + perf record (med64's share of each event), last W below N.
 # Env: N (default 1e12), W (window, 1e11), T (threads, nproc).
-set -euo pipefail
+set -uo pipefail
+fail() { echo "med64_counters: $*" >&2; exit 1; }
 N=${N:-1000000000000}; W=${W:-100000000000}; T=${T:-$(nproc)}
-make -s eratostenes
-D=$(mktemp -d "${TMPDIR:-/tmp}/m64.XXXXXX"); cp eratostenes "$D/era"; cd "$D"
+command -v perf >/dev/null || fail "perf is not on the PATH"
+make -s eratostenes || fail "make failed"
+D=$(mktemp -d "${TMPDIR:-/tmp}/m64.XXXXXX") || fail "mktemp failed"
+trap 'rm -rf "$D"' EXIT
+cp eratostenes "$D/era" && cd "$D" || fail "can't set up $D"
 avail=" $(perf list --raw-dump 2>/dev/null | tr '\n' ' ') "
 pick() { for e in "$@"; do [[ "$avail" == *" $e "* ]] && { echo "$e"; return; }; done; echo -; }
 roles="cyc ins brm st rep wb pend pcyc fbf l2s sl1 sb"
@@ -24,10 +28,14 @@ for r in $roles; do
     map+="$r=$n:u "; ev+="${ev:+,}$n:u"
 done
 S=$((N - W))
-perf stat -x, -e "$ev" -o stat.csv ./era "$N" --start "$S" -t "$T" >/dev/null 2>log.txt
-grep -E "^Starting|^  " log.txt || true
-perf record -q -F 499 -e "$ev" -o rec.data ./era "$N" --start "$S" -t "$T" >/dev/null 2>&1
-perf report -i rec.data --no-children --sort sym --stdio 2>/dev/null > rep.txt
+echo "events: $ev"
+perf stat -x, -e "$ev" -o stat.csv ./era "$N" --start "$S" -t "$T" >/dev/null 2>log.txt ||
+    { cat log.txt >&2; fail "perf stat failed (above)"; }
+grep -E "^Starting|^  " log.txt
+perf record -q -F 499 -e "$ev" -o rec.data ./era "$N" --start "$S" -t "$T" >/dev/null 2>log.txt ||
+    { cat log.txt >&2; fail "perf record failed (above)"; }
+perf report -i rec.data --no-children --sort sym --stdio 2>log.txt > rep.txt ||
+    { cat log.txt >&2; fail "perf report failed (above)"; }
 awk -v map="$map" -v T="$T" '
 BEGIN { n = split(map, a, " "); for (i = 1; i <= n; i++) { split(a[i], kv, "="); role[kv[2]] = kv[1] } }
 FILENAME == "stat.csv" { split($0, f, ","); if (f[3] in role && f[1] ~ /^[0-9.]+$/) tot[role[f[3]]] = f[1]; next }
@@ -53,4 +61,3 @@ END {
     if ("sb" in m) printf "  store buffer full %.0f%% of cycles\n", 100*m["sb"]/c
     printf "  branch misses/hit %.3f\n", m["brm"]/h
 }' stat.csv rep.txt
-cd / && rm -rf "$D"
