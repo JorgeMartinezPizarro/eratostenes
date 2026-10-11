@@ -371,3 +371,45 @@ size, zstd level), plus checks `.db` output against `--print` position by
 position. Raw sieve performance is checked separately against
 [primesieve](https://github.com/kimwalisch/primesieve) (see
 [BENCHMARK.md](BENCHMARK.md)).
+
+## 10. Credits
+
+Most of the sieve's core is [Kim Walisch](https://github.com/kimwalisch)'s
+[primesieve](https://github.com/kimwalisch/primesieve), re-derived here rather than
+copied. Its design is the baseline every change in [RESEARCH.md](RESEARCH.md) was
+measured against, and his [primecount](https://github.com/kimwalisch/primecount) is
+what the tests check against (§9).
+
+From primesieve:
+
+- The mod-30 byte layout: one byte holds 30 numbers, bit j the residue `WHEEL_R[j]` (§2).
+- The pre-sieve of 7..163, with primesieve's 16 groups and period-sized buffers (§3).
+- The split of the base primes by hits per segment into EratSmall, EratMedium and
+  EratBig (§6), and inside each:
+  - small: EratSmall's unrolled 8-hits-per-cycle loop, one kernel per residue class,
+    run L1-blocked;
+  - med64: EratMedium's loop shape, one running index and one bounds check per hit,
+    and its lists by (class, phase), so every call from one list enters at one phase;
+  - sparse: EratBig's bucket sieve (after Tomás Oliveira e Silva's), on a power-of-2
+    segment, with aligned blocks whose tail pointer marks a full block, and primes
+    with no multiple up to N left unfiled.
+- Stepping multipliers on the mod-210 wheel, as EratBig does (§2).
+- The segment ceiling of 16 x L1d (§7).
+
+This project's own, each measured against primesieve:
+
+- The mod-210 wheel in the dense tiers too (med64, medium; EratMedium steps mod 30),
+  and mod 2310 in the sparse tier (§2).
+- A fourth tier: med64 is EratMedium's design on the mod-210 wheel (384 lists instead
+  of 64), and the medium tier is a structure of arrays at 5 bytes per prime (§6).
+- Cache sizes for threads that compete for them: the segment from the per-thread L2
+  share (half, or whole in the sparse regime or with a core per thread), a narrow
+  segment below narrow², the smallest L2 and largest L1d on hybrid CPUs, and the
+  sparse cutoff from the L2 per thread and the L3 per active thread (§6, §7).
+- The sparse ring's doubled slots (no wrap mask), the next block's prefetch spread
+  over the current one, and the target byte prefetched 16 entries ahead (§6).
+- The base primes as one shared bitmap on the wheel, sieved once in parallel with the
+  main sieve's own kernels (§1).
+- Contiguous runs of chunks that carry the sieve across, steals priced with the run's
+  measured rates, and a thread cap by memory (§4).
+- The output: the `.db` format and the ordered parallel `--print` (§4, §8).
