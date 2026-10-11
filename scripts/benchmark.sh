@@ -24,6 +24,8 @@
 #            one goes first (era/ps, ps/era, ...); the table shows each
 #            one's mean (default: 1). Note that at N=1e13 each primesieve
 #            run costs minutes too.
+#   WARMUP   seconds of sieving on every thread before the first pair
+#            (default: 30; 0 = none), see warm_up in scripts/lib.sh
 #
 # Pairs and means, not "primesieve once, then the best of REPS": a
 # machine's speed drifts over a session, and interleaving the pairs and
@@ -36,6 +38,7 @@ BIN=./eratostenes
 THREADS="${THREADS:-$(nproc)}"
 SEGMENT="${SEGMENT:-}"
 REPS="${REPS:-1}"
+WARMUP="${WARMUP:-30}"
 
 if ! command -v primesieve >/dev/null 2>&1; then
     echo "primesieve is not on the PATH -- install it (docs/ISSUES.md: the same version on every machine)" >&2
@@ -46,7 +49,8 @@ fi
 echo "Rebuilding eratostenes..." >&2
 make re >/tmp/benchmark_build.log 2>&1 || { cat /tmp/benchmark_build.log >&2; exit 1; }
 
-source scripts/lib.sh # mean_of
+source scripts/lib.sh # mean_of, warm_up
+warm_up "$BIN" "$THREADS" "$WARMUP"
 
 NS=(1e10 1e11 1e12 1e13)
 # pi(N) for each N above, in the same order -- known values, used to catch

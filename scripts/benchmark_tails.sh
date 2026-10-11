@@ -29,6 +29,8 @@
 #            (152M base primes), ~0.4 GB at 1e18.
 #   WIDTH    window width, integer or 1eX (default: 1e11)
 #   SEGMENT  forced -s for eratostenes (default: unset, the CLI's auto width)
+#   WARMUP   seconds of sieving on every thread before the first pair
+#            (default: 30; 0 = none), see warm_up in scripts/lib.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -38,6 +40,7 @@ REPS="${REPS:-1}"
 NS="${NS:-1e13 1e14 1e15 1e16 1e17 1e18}"
 WIDTH="${WIDTH:-1e11}"
 SEGMENT="${SEGMENT:-}"   # forced -s for eratostenes (default: the CLI's own auto width)
+WARMUP="${WARMUP:-30}"
 
 if ! command -v primesieve >/dev/null 2>&1; then
     echo "primesieve is not on the PATH -- install it (docs/ISSUES.md: the same version on every machine)." >&2
@@ -50,7 +53,7 @@ fi
 
 # Numbers stay decimal strings: N goes up to 2^64 - 1, and bash arithmetic
 # stops at 2^63 - 1 (1e19 overflowed it).
-source scripts/lib.sh # to_dec, num_lt, mean_of
+source scripts/lib.sh # to_dec, num_lt, mean_of, warm_up
 dec_sub() { # a - b, in 9-digit limbs; fails when b > a
     local a=$1 b=$2 len i x y borrow=0 out="" limb
     len=$(( ${#a} > ${#b} ? ${#a} : ${#b} ))
@@ -74,6 +77,7 @@ dec_mod() { # a mod m, m small
 }
 
 width=$(to_dec "$WIDTH")
+warm_up "$BIN" "$THREADS" "$WARMUP"
 
 run_era() { # stop start -> sets t_e, c_e
     local out

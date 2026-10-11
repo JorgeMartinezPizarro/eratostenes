@@ -23,6 +23,20 @@ to_dec() {
 # fraction): exit status 0 when true.
 num_lt() { awk -v a="$1" -v b="$2" 'BEGIN{exit !(a < b)}'; }
 
+# warm_up BIN THREADS SECONDS: sieves on every thread for about SECONDS
+# (last 1e11 below 1e13, back to back) before the first measured pair, so
+# the first pairs run at the same clock as the rest. 0 skips it.
+warm_up() {
+    local bin=$1 threads=$2 secs=$3 end
+    (( secs > 0 )) || return 0
+    echo "Warming up for ~${secs}s..." >&2
+    end=$(( SECONDS + secs ))
+    while (( SECONDS < end )); do
+        "$bin" 10000000000000 --start 9900000000000 -t "$threads" >/dev/null 2>&1 ||
+            { echo "warm-up run failed: $bin" >&2; return 1; }
+    done
+}
+
 # mean_of DECIMALS t1 t2 ...: the mean of the times, printed with that many
 # decimals (3, as both eratostenes' `total:` and primesieve's `Seconds:`).
 mean_of() {

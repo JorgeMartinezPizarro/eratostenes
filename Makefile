@@ -116,8 +116,8 @@ test: $(BIN) $(NTH_BIN)
 	./scripts/test.sh
 
 # eratostenes vs primesieve, count mode (scripts/benchmark.sh): the tables
-# of docs/BENCHMARK.md and the README. THREADS/SEGMENT/REPS from the
-# environment.
+# of docs/BENCHMARK.md and the README. THREADS/SEGMENT/REPS/WARMUP from
+# the environment.
 benchmark:
 	./scripts/benchmark.sh
 
@@ -129,8 +129,8 @@ benchmark-io:
 	bash scripts/benchmark_io.sh
 
 # Top of the range vs primesieve (scripts/benchmark_tails.sh): the last 1e11
-# numbers below 1e14..1e18, same threads for both, counts cross-checked.
-# THREADS/REPS/NS/WIDTH from the environment.
+# numbers below 1e13..1e18, same threads for both, counts cross-checked.
+# THREADS/REPS/NS/WIDTH/WARMUP from the environment.
 # Example: REPS=2 THREADS=2 make benchmark-tails
 benchmark-tails: $(BIN)
 	bash scripts/benchmark_tails.sh
@@ -168,13 +168,13 @@ docker-test: docker-dev
 	$(COMPOSE) run --rm -e THREADS dev make test
 
 docker-benchmark: docker-dev
-	$(COMPOSE) run --rm -e THREADS -e SEGMENT -e REPS $(COMPOSE_ENV) dev make benchmark
+	$(COMPOSE) run --rm -e THREADS -e SEGMENT -e REPS -e WARMUP $(COMPOSE_ENV) dev make benchmark
 
 docker-benchmark-io: docker-dev
 	$(COMPOSE) run --rm -e THREADS -e SEGMENT -e WRITE_PATH -e KEEP_DB $(COMPOSE_ENV) dev make benchmark-io
 
 docker-benchmark-tails: docker-dev
-	$(COMPOSE) run --rm -e THREADS -e REPS -e NS -e WIDTH -e SEGMENT $(COMPOSE_ENV) dev make benchmark-tails
+	$(COMPOSE) run --rm -e THREADS -e REPS -e NS -e WIDTH -e SEGMENT -e WARMUP $(COMPOSE_ENV) dev make benchmark-tails
 
 docker-benchmark-mini: docker-dev
 	$(COMPOSE) run --rm -e THREADS -e N -e WIDTH -e SEGMENTS $(COMPOSE_ENV) dev make benchmark-mini
