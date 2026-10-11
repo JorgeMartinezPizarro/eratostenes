@@ -8,10 +8,10 @@ Intel Core i5-13500 (Raptor Lake, 2023), 64 GB. 20 threads (2 per core); L1d 544
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
-| 1e10 | 0.125s | 0.131s | 0.95x |
-| 1e11 | 1.759s | 2.112s | 0.83x |
-| 1e12 | 22.395s | 25.182s | 0.89x |
-| 1e13 | 279.230s | 294.566s | 0.95x |
+| 1e10 | 0.151s | 0.157s | 0.96x |
+| 1e11 | 1.819s | 2.086s | 0.87x |
+| 1e12 | 22.437s | 25.133s | 0.89x |
+| 1e13 | 278.587s | 292.453s | 0.95x |
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|

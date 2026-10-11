@@ -66,15 +66,24 @@ run() {
     perf report -i rec.data --no-children --sort sym --stdio 2>log.txt > rep.txt ||
         { cat log.txt >&2; fail "perf report failed (above)"; }
     awk -v map="$map" '
-    BEGIN { n = split(map, a, " "); for (i = 1; i <= n; i++) { k = index(a[i], "="); role[substr(a[i], k + 1)] = substr(a[i], 1, k - 1) } }
-    FILENAME == "stat.csv" { split($0, f, ","); if (f[3] in role && f[1] ~ /^[0-9.]+$/) tot[role[f[3]]] = f[1]; next }
-    /^# Samples:/ { e = $NF; gsub(/\047/, "", e); cur = (e in role) ? role[e] : ""; next }
+    # "cpu_core/cycles/u", "cycles:u", "cycles:uH" -> "cycles"
+    function norm(s) { sub(/^cpu_[a-z]+\//, "", s); sub(/\/[a-zA-Z]*$/, "", s); sub(/:[a-zA-Z]*$/, "", s); return s }
+    BEGIN { n = split(map, a, " "); for (i = 1; i <= n; i++) { k = index(a[i], "="); role[norm(substr(a[i], k + 1))] = substr(a[i], 1, k - 1) } }
+    FILENAME == "stat.csv" { split($0, f, ","); e = norm(f[3]); if (e in role && f[1] ~ /^[0-9.]+$/) tot[role[e]] = f[1]; next }
+    FNR <= 30 { head[FNR] = $0; nhead = FNR }
+    /^# Samples:/ { e = $NF; gsub(/\047/, "", e); e = norm(e); cur = (e in role) ? role[e] : ""; next }
     /^ +[0-9.]+%/ && cur != "" {
         t = $0 ~ /med64/ ? "med64" : $0 ~ /cross_off_medium/ ? "medium" : $0 ~ /cross_off</ ? "small" : \
             $0 ~ /Presieve/ ? "presieve" : $0 ~ /process_big|SparseTier/ ? "sparse" : "other"
         sh[cur, t] += $1 / 100
     }
     END {
+        if (sh["cyc","med64"] + sh["cyc","small"] == 0) {
+            nt = 0; for (r in tot) nt++
+            printf "  no small/med64 cycles samples (%d stat totals read, %.0f%% of cycles elsewhere); perf report begins:\n", nt, 100*sh["cyc","other"]
+            for (i = 1; i <= nhead; i++) print "    | " head[i]
+            exit
+        }
         printf "  cycles: med64 %.1f%%, small %.1f%%, medium %.1f%%, presieve %.1f%%, sparse %.1f%%\n",
             100*sh["cyc","med64"], 100*sh["cyc","small"], 100*sh["cyc","medium"], 100*sh["cyc","presieve"], 100*sh["cyc","sparse"]
         split("small med64", tiers, " ")
