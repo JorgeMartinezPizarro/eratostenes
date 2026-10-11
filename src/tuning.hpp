@@ -311,9 +311,9 @@ inline SievePlan plan_sieve(const Options& opt, const BasePrimes& base, uint64_t
     // below the cutoff pay the medium tier's fixed cost per segment (its
     // loop-exit mispredict), primes above it the bucket ring's cost per hit,
     // and what the ring costs depends on the cache the threads share. 1/1
-    // by default; inside the sparse regime 1/2 from 512 KiB of L2 per thread
-    // and 1/4 from 1 MiB (sysfs, regardless of --l2-bytes; undetected:
-    // 1/1). See
+    // below the sparse regime; inside it 5/8, 1/2 from 512 KiB of L2 per
+    // thread and 1/4 from 1 MiB (sysfs, regardless of --l2-bytes;
+    // undetected: 5/8). See
     // docs/RESEARCH.md#i5-13500-server-gap-vs-primesieve-medium-tier-call-count-sparse-cutoff-12-gated-on-per-thread-l2-2026-09-28
     // and docs/RESEARCH.md#sparse-cutoff-14-from-1-mib-of-l2-per-thread-kept-2026-10-03.
     // --tune sparse=a/b overrides it (lowering only). sparse_limit and
@@ -346,6 +346,14 @@ inline SievePlan plan_sieve(const Options& opt, const BasePrimes& base, uint64_t
     } else if (l3_per_thread >= SPARSE_HALF_MIN_L3_PER_THREAD && sparse_regime && sparse_den < 2) {
         sparse_den = 2;
         P.sparse_l3_gate = true;
+    }
+    // Neither gate: 5/8 inside the sparse regime. The primes from 5/8 of
+    // the width up (about one hit per segment) cost less in the ring than
+    // in the medium tier even with every hardware thread running. See
+    // docs/RESEARCH.md#sparse-cutoff-58-in-the-sparse-regime-without-a-cache-gate-kept-2026-10-11.
+    if (sparse_regime && sparse_den == 1) {
+        sparse_num = 5;
+        sparse_den = 8;
     }
     P.sparse_den_auto = sparse_den;
     if (opt.tune_sparse.den) { sparse_num = opt.tune_sparse.num; sparse_den = opt.tune_sparse.den; } // in (0, 1], parse_tune
@@ -508,7 +516,8 @@ inline void print_plan(const SievePlan& P, const Options& opt, unsigned actual_t
                      : P.sparse_l3_gate ? (P.sparse_den_auto == 4 ? " (L3 per active thread >= 4 MiB)"
                                                                    : " (L3 per active thread >= 1.5 MiB)")
                      : P.sparse_den_auto == 4 ? " (L2 per thread >= 1 MiB)"
-                     : P.sparse_den_auto == 2 ? " (L2 per thread >= 512 KiB)" : "");
+                     : P.sparse_den_auto == 2 ? " (L2 per thread >= 512 KiB)"
+                     : P.sparse_den_auto == 8 ? " (sparse regime, no cache gate)" : "");
     if (!P.wide.sparse.empty())
         std::fprintf(stderr, "  sparse ring: %s arenas%s\n",
                      cfg.huge_arenas ? "2 MiB huge-page" : "1 MiB",

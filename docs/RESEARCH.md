@@ -95,6 +95,10 @@ What is in the code today, by the day it went in:
   with the 5-byte state: unchanged; the `.db` encoder [over the whole segment, its state in locals](#db-encoder-over-the-whole-segment-its-state-in-locals-kept-2026-10-09);
   the text output's [counting pass from the prime count](#text-output-byte-counts-from-the-prime-count-where-a-chunks-numbers-share-a-digit-count-kept-2026-10-09);
   then [text files replaced by `--print`](#text-files-replaced-by---print-on-stdout-2026-10-09): `-o` writes a `.db` only.
+- **2026-10-11**: med64's [cache counters](#med64-l2-latency-at-24-34-misses-in-flight-not-l1-l2-bandwidth-measured-2026-10-11)
+  on the tower and the dev PC: L2 latency, not bandwidth; the sparse cutoff at
+  [5/8 without a cache gate](#sparse-cutoff-58-in-the-sparse-regime-without-a-cache-gate-kept-2026-10-11);
+  `process_big`'s [last spills](#sparse-tier-process_bigs-last-spills-out-of-the-loop-tried-neutral-2026-10-11) neutral.
 
 ## Contents
 
@@ -349,6 +353,32 @@ so K = 9 / 13 / 20 is ~2 / 3 / 5 hits ahead). Interleaved: Emerald Rapids plan, 
 +18.6%**. The out-of-order core already overlaps these RMWs; one more instruction per
 ~5-instruction hit costs more. Segment-byte software prefetch is closed for both dense tiers;
 knob removed.
+
+### med64: L2 latency at 2.4-3.4 misses in flight, not L1<->L2 bandwidth (measured, 2026-10-11)
+
+`scripts/med64_counters.sh`: perf stat totals times med64's share of each event in perf record,
+one thread per core:
+
+| | i5-3470, last 1e11 below 1e12, 4 threads | i5-11400F, last 1e11 below 1e13, 6 threads |
+|---|---:|---:|
+| med64 share of the cycles | 65.5% | 42.3% |
+| cycles per hit | 5.63 | 4.49 |
+| L1 fills / writebacks per hit | 0.77 / 0.75 | 0.82 / no event |
+| L1<->L2 bytes per cycle | 17.3 | ~23 (writebacks taken = fills) |
+| cycles with an L1 miss pending | 90% | 98% |
+| misses in flight | 2.43 | 3.44 |
+| fill buffers full | 22% of cycles | 29% |
+| branch misses per hit | 0.056 | 0.031 |
+
+The traffic per hit is the hypothesised one (a fill and a dirty victim, 97 bytes on the tower),
+but at 17.3 bytes per cycle it is about half the 32 that Ivy Bridge's L2 delivers to L1 even
+counting both directions against it, and ~23 of 64 on the dev PC: not bandwidth. A miss is
+pending in 90-98% of the cycles with only 2.4-3.4 in flight, while the fill buffers are full
+22-29% of the time: they hold more than the demand loads, the dirty victims the likely rest (not
+measured). So issuing more misses doesn't pay (the prefetch above, the medium tier's pairs and
+4-way interleave); only fewer misses per hit would, which needs a footprint nearer L1 (the
+L1-blocked band, half the L2: refuted on every machine). With two threads per core (dev PC
+`-t 12`) the core moves ~40 bytes per cycle at 2.96 cycles per hit: SMT overlaps more misses.
 
 ## Medium tier
 
@@ -687,13 +717,23 @@ thread per core) -0.54..-1.94% at 1e15-1e18; i5-13500 (20 threads) -1.2% / **-4.
 1e16/1e17/1e18 (1e15 within noise); the claude.ai sandboxes gain at 1e16-1e18. **Kept**
 (the only path since the 2026-10-07 cleanup). Leftovers: the spread's line pointer and one table row still go through the stack.
 
+### Sparse tier: `process_big`'s last spills out of the loop (tried, neutral, 2026-10-11)
+
+GCC kept `log2sb` in two registers (one for `shrx`, one zero-extended for `bzhi`) and reloaded
+`tails_cur` from the stack once per entry. `log2sb` as `uint64_t` with a 64-bit `bzhi` index
+(`__builtin_ia32_bzhi_di`) kept `tails_cur` and the spread's line pointer in registers: the spread
+loop went from 156 to 149 instructions per group of 4 entries, 1 stack access instead of 7; callgrind
+(1e9 window below 1e17, one thread, built without AVX-512 for valgrind) `process_big` 2.711G -> 2.673G
+Ir (-1.4%). Dev PC, 12 threads, 4 pairs: instructions -0.94% / -1.23% at the 1e15 / 1e17 tails,
+cycles:u +0.39% / -0.74%, overlapping. Not adopted: the reloads hit L1 and overlap with the misses.
+
 ## Activation and the medium/sparse cutoff
 
-Today a base prime goes to the sparse tier from `seg_k_width / den`, den = 1, 2 or 4, whichever of two
-gates lowers it more: the per-thread L2 share (inside the sparse regime only: 1/2 from 512 KiB, 1/4 from 1 MiB)
-and the L3 per active thread (L3 / min(threads, sharers): 1/2 from 1.5 MiB inside the sparse regime, 1/4
-from 4 MiB, also below it when an octave of base primes lands in the sparse tier); `--tune sparse`
-overrides. Sparse primes are a bitmap on the wheel that activation walks with ctz, bounded by one isqrt
+Today a base prime goes to the sparse tier from `seg_k_width` times 1/1 below the sparse regime and 5/8
+inside it, or 1/2 or 1/4, whichever of two gates lowers it more: the per-thread L2 share (inside the sparse
+regime only: 1/2 from 512 KiB, 1/4 from 1 MiB) and the L3 per active thread (L3 / min(threads, sharers):
+1/2 from 1.5 MiB inside the sparse regime, 1/4 from 4 MiB, also below it when an octave of base primes
+lands in the sparse tier); `--tune sparse` overrides. Sparse primes are a bitmap on the wheel that activation walks with ctz, bounded by one isqrt
 per segment; deriving `p` from the bitmap index (`ERA_ACT_IDX`) is on only with BMI2; the 64-bit division
 stays (the alternatives below were removed in the 2026-10-07 cleanup).
 
@@ -819,6 +859,29 @@ thread", never looked at by the L2 gate.
   knob that moved it is `med64=1/6` (-3.8%, 6/6). **Kept 2026-10-04: med64 default 1/12 -> 1/6**: the
   Cascade Lake -0.8% / -2.8% (overlapping), a tie on the i5-13500, the dev PC's full 1e12 count 23.51 /
   23.93 s vs 24.17 / 25.41 s; 1/4 on the tower (-4.3%) shows the gain saturating at 1/6.
+
+### Sparse cutoff 5/8 in the sparse regime without a cache gate (kept, 2026-10-11)
+
+Where neither gate lowers it (the dev PC at 12 threads: 256 KiB of L2 and 1 MiB of L3 per thread) the
+cutoff stayed at 1/1, since 1/2 was +8.7% there at the 1e14 tail on 2026-09-28. The sparse tier has got
+cheaper per hit since (mod 2310, 4 KiB blocks, the spread prefetch, groups of 4) and the sweep moved.
+Dev PC, 12 threads, last 1e11 below N, cycles:u against 1/1, 3 pairs:
+
+| cutoff | 1e14 | 1e16 |
+|---|---:|---:|
+| 1/2 | -2.85% | -0.22% |
+| 5/8 | -2.96% | -1.23% |
+| 3/4 | -1.68% | -1.90% |
+| 7/8 | -0.15% | -0.25% |
+
+3/4 with 4 pairs: 1e15 -1.17%, 1e17 -1.35%, 1e18 -0.06% (overlapping). Head to head, 5 pairs, 3/4
+against 5/8: +0.55 / -0.18 / +0.77 / +0.86 / +3.16% at 1e14..1e18. 5/8 against 1/1, 5 pairs: 1e13
+-0.73%, 1e14 -2.10%, 1e15 -1.41%, 1e16 -1.58%, 1e17 -2.00% (5/5 each), 1e18 -1.81% (3/5). The primes
+from 5/8 of the width up have about one hit per segment. **Kept:** 5/8 inside the sparse regime when
+neither gate applies (chunks below narrow² keep the narrow configuration and 1/1); the new default
+against the old build: 1e15 -2.32% (3/3), 1e16 -3.11%, 1e17 -0.97% (5/5 each); `make test` OK. The
+gated machines are unchanged; whether their steps moved down too (3/8 where the gate gives 1/2) is
+open.
 
 ### Activation at the top of N: the integer division is not the cost (tried, reverted, 2026-10-04)
 
@@ -1485,11 +1548,17 @@ Where the time still goes, and what nothing measured so far has fixed:
 - **med64 is 50-64% of the cycles at 1e13-1e14 on every machine**, bound by
   L1 misses, with no lever found
   ([i5-3470 profile](#i5-3470-profile-at-1e12-the-med64-tier-over-the-whole-l2-segment-is-59-of-the-cycles-open-2026-10-04)).
-  Hypothesis to check with counters on the tower: it is L1<->L2 bandwidth
-  (a fill plus a dirty victim, ~104 bytes per hit).
-- **`process_big` at 12 threads is issue-bound**; the wrap mask is gone since,
-  the spills are what is left
-  ([entry](#sparse-tier-process_big-is-issue-bound-at-12-threads-the-rings-wrap-mask-and-the-spills-are-what-is-left-open-2026-10-05)).
+  Not L1<->L2 bandwidth: L2 latency at 2.4-3.4 misses in flight
+  ([counters](#med64-l2-latency-at-24-34-misses-in-flight-not-l1-l2-bandwidth-measured-2026-10-11)),
+  so a lever needs fewer misses per hit.
+- **`process_big` at 12 threads is issue-bound**
+  ([entry](#sparse-tier-process_big-is-issue-bound-at-12-threads-the-rings-wrap-mask-and-the-spills-are-what-is-left-open-2026-10-05));
+  the wrap mask is gone, and taking the last spills out cut 1.4% of its
+  instructions for no change in cycles
+  ([entry](#sparse-tier-process_bigs-last-spills-out-of-the-loop-tried-neutral-2026-10-11)).
+- **The sparse cutoff on the gated machines**: 5/8 now beats 1/1 where no gate
+  applies ([entry](#sparse-cutoff-58-in-the-sparse-regime-without-a-cache-gate-kept-2026-10-11));
+  whether the 1/2 and 1/4 steps should move down as well is unmeasured.
 - **Activation at the top of N on old cores**: why taking the independent
   work away from the 64-bit division costs Ivy Bridge ~35 cycles per prime;
   hence `ERA_ACT_IDX` only with BMI2

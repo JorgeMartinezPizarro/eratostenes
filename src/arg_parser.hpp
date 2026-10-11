@@ -278,6 +278,7 @@ inline void print_usage(const char* prog) {
         "                         1/4; 1/2 on an L2 of 256 KiB or less)\n"
         "      med64=a/b          med64/medium cutoff (default 1/6; 0 = no med64)\n"
         "      sparse=a/b         Medium/sparse cutoff, in (0, 1] (default 1/1;\n"
+        "                         5/8 once sqrt(N) passes the segment width, and\n"
         "                         1/2 from 512 KiB and 1/4 from 1 MiB of L2 per\n"
         "                         thread, or 1/2 from 1.5 MiB and 1/4 from 4 MiB of\n"
         "                         L3 per active thread)\n"

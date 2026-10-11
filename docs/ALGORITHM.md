@@ -211,7 +211,8 @@ sparse, then extraction.
   most of these primes, so each one is filed into the ring slot of the segment its
   next hit falls in, and a segment only touches the primes due in it
   (`SparseTier::process_big`, primesieve's EratBig design). The cutoff is the
-  segment width by default; where the active threads have the cache bandwidth
+  segment width until `sqrt(N)` passes the base segment width (§7), and 5/8 of
+  it from there; where the active threads have the cache bandwidth
   for the ring's traffic it drops to 1/2 or 1/4 of it, since the ring beats the
   medium tier's per-call cost for primes with fewer than ~4 hits per segment
   (from 512 KiB / 1 MiB of L2 per thread, or 1.5 / 4 MiB of L3 per *active*
