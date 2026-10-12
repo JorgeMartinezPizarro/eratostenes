@@ -144,10 +144,6 @@ For more machines and results, see: [docs/BENCHMARK.md](docs/BENCHMARK.md).
 
 `make test` checks pi(N) and primes by position against [primecount](https://github.com/kimwalisch/primecount) across several N and parameter combinations (threads, segment width, cache-size overrides, `.db` block size, zstd level), and checks `.db` output against `--print` position by position.
 
-## Credits
-
-The core of this sieve is [Kim Walisch](https://github.com/kimwalisch)'s [primesieve](https://github.com/kimwalisch/primesieve): the mod-30 byte layout, the pre-sieve and its groups, and the split into small, medium and big sieving primes with its EratSmall, EratMedium and EratBig designs come from it, re-derived here rather than copied. primesieve is also the benchmark every change was measured against, and his [primecount](https://github.com/kimwalisch/primecount) is what `make test` checks against. [docs/ALGORITHM.md](docs/ALGORITHM.md#10-credits) lists what comes from primesieve and what this project adds.
-
 ## Issues
 
 See [docs/ISSUES.md](docs/ISSUES.md) for known issues.
