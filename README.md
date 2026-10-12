@@ -4,6 +4,10 @@
 
 A segmented, parallel, wheel-based Sieve of Eratosthenes written in C++. It is designed to count and generate primes up to very large N (10^15+), with a compact, randomly-indexable `.db` output format for storing dense prime tables at scale.
 
+## Intro
+
+I started sieving for primes back in 2001, when I first learned to program, on my first computer, an AMD Athlon with 1 GB of RAM. Back then, reaching primes around 10¹⁸ felt like a milestone. Over the years I have kept playing with these amazing numbers. Thanks to [GordonBGood](https://stackoverflow.com/users/549617/gordonbgood) and [Kim Walisch](https://github.com/kimwalisch), I have learned many new optimizations, and their work inspired me to rekindle this old passion with this project.
+
 ## Build
 
 Requires a C++20 compiler, POSIX `pwrite`/`ftruncate` (Linux or WSL; does not build as-is with MSVC/native Windows), and the SQLite3 and zstd development libraries (for `.db` output):
@@ -139,10 +143,6 @@ For more machines and results, see: [docs/BENCHMARK.md](docs/BENCHMARK.md).
 ## Validation
 
 `make test` checks pi(N) and primes by position against [primecount](https://github.com/kimwalisch/primecount) across several N and parameter combinations (threads, segment width, cache-size overrides, `.db` block size, zstd level), and checks `.db` output against `--print` position by position.
-
-## Credits
-
-The core of this sieve is [Kim Walisch](https://github.com/kimwalisch)'s [primesieve](https://github.com/kimwalisch/primesieve): the mod-30 byte layout, the pre-sieve and its groups, and the split into small, medium and big sieving primes with its EratSmall, EratMedium and EratBig designs come from it, re-derived here rather than copied. primesieve is also the benchmark every change was measured against, and his [primecount](https://github.com/kimwalisch/primecount) is what `make test` checks against. [docs/ALGORITHM.md](docs/ALGORITHM.md#10-credits) lists what comes from primesieve and what this project adds.
 
 ## Issues
 
