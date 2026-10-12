@@ -4,6 +4,10 @@
 
 A segmented, parallel, wheel-based Sieve of Eratosthenes written in C++. It is designed to count and generate primes up to very large N (10^15+), with a compact, randomly-indexable `.db` output format for storing dense prime tables at scale.
 
+## Intro
+
+I started sieving for primes back in 2001, when I first learned to program, on my first computer, an AMD Athlon with 1 GB of RAM. Back then, reaching primes around 10¹⁸ felt like a milestone. Over the years I have kept playing with these amazing numbers. Thanks to [GordonBGood](https://stackoverflow.com/users/549617/gordonbgood) and [Kim Walisch](https://github.com/kimwalisch), I have learned many new optimizations, and their work inspired me to rekindle this old passion with this project.
+
 ## Build
 
 Requires a C++20 compiler, POSIX `pwrite`/`ftruncate` (Linux or WSL; does not build as-is with MSVC/native Windows), and the SQLite3 and zstd development libraries (for `.db` output):
