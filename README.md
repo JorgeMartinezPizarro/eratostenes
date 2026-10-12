@@ -2,7 +2,7 @@
 
 <img src="assets/eratostenes.jpg" alt="Eratosthenes" width="80" align="right">
 
-A segmented, parallel, wheel-based Sieve of Eratosthenes written in C++. It is designed to count and generate primes up to very large N (10^15+), with a compact, randomly-indexable `.db` output format for storing dense prime tables at scale.
+An ultra fast Sieve of Eratosthenes written in C++. It is designed to count and generate primes up to very large N (10^15+), with a compact, randomly-indexable `.db` output format for storing dense prime tables at scale.
 
 ## Intro
 
