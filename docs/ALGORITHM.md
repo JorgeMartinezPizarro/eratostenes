@@ -148,8 +148,11 @@ the medium tier keeps 5, §6). Starting a run (or a stolen piece) at the top of
 1e18 activates all 50M base primes at once, ~1 s per thread, most of it the kernel
 faulting in the bucket pool the entries go to (§6, sparse); that fixed cost is what
 the contiguous runs in §4 avoid paying per chunk. A sparse prime whose first
-multiple lies past N is never filed, so a narrow window high up only pays for the
-few primes that hit it.
+multiple lies past the end of the thread's run (N for `--print`) is never filed,
+so a narrow window high up, or a short stolen piece, only pays for the few primes
+that hit it. Where that test is a coin flip (primes between an eighth of the run
+and four times it), a word of the bitmap goes in two passes: every prime's first
+multiplier with no branch on the test, then the filing of those that hit.
 
 ## 6. Four-tier marking within a segment (`segment_sieve.hpp`, `erat_small.hpp`, `sparse_tier.hpp`)
 

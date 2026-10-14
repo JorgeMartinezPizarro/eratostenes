@@ -50,7 +50,7 @@ for b in "$BIN_A" "$BIN_B"; do
     fi
 done
 
-source scripts/lib.sh # to_dec, warm_up
+source scripts/lib.sh # to_dec, dec_sub, dec_mod, warm_up
 WIDTH=$(to_dec "$WIDTH_IN")
 
 # perf usable with these events on this machine: every event counted. On a
@@ -120,8 +120,11 @@ compare() {
 warm_up "$BIN_A" "$THREADS" "$WARMUP"
 for N_IN in $NS; do
     N=$(to_dec "$N_IN")
-    if (( N <= WIDTH )); then echo "WIDTH=$WIDTH_IN doesn't fit below N=$N_IN" >&2; continue; fi
-    START=$(( (N - WIDTH) / 240 * 240 ))
+    # N goes past 2^63 (bash's own arithmetic), so the start is decimal-string arithmetic.
+    if ! diff=$(dec_sub "$N" "$WIDTH") || [ "$diff" = 0 ]; then
+        echo "WIDTH=$WIDTH_IN doesn't fit below N=$N_IN" >&2; continue
+    fi
+    START=$(dec_sub "$diff" "$(dec_mod "$diff" 240)")
     echo
     if [ $HAVE_PERF = 1 ]; then printf "%-6s %-3s %-3s %16s %16s %8s  %s\n" N bin rep "$E1" "${E2:--}" wall count
     else printf "%-6s %-3s %-3s %8s  %s\n" N bin rep wall count; fi

@@ -103,6 +103,10 @@ What is in the code today, by the day it went in:
   [small and med64 on Golden Cove](#small-and-med64-on-golden-cove-one-store-per-core-cycle-med64-waits-on-fill-buffers-measured-2026-10-11);
   the sparse tier on [mod 30030](#sparse-tier-mod-30030-multiplier-wheel-tried-reverted-2026-10-11): slower;
   the [sub-block re-swept](#sub-block-re-swept-with---tune-subblock-both-rules-stand-measured-2026-10-11): both rules stand.
+- **2026-10-14**: sparse activation [bounded by the end of the thread's run](#activation-bounded-by-the-end-of-the-threads-run-the-coin-flip-band-in-two-passes-kept-2026-10-14),
+  -13..-28% cycles on 1e9 windows at 1e17-2^64, -2..-21% on 1e10 windows; the pre-sieve past 163
+  [re-tested](#pre-sieve-past-163-re-tested-on-todays-fill-one-table-per-prime-and-a-regrouping-measured-2026-10-14):
+  163 stays; `benchmark_ab.sh` takes N up to 2^64.
 
 ## Contents
 
@@ -1002,6 +1006,45 @@ thread, ~0.6 -> 0.34 s on 12; 1e8 window 0.73-0.94 -> 0.47-0.58 s on 12; wide wi
 at 12 threads: last 1e11 below 1e18 -2.3% (instructions -5.2%: the chunks near N and the stolen pieces
 stop filing primes whose next multiple is past it), last 1e10 +0.7% (overlapping).
 
+### Activation bounded by the end of the thread's run; the coin-flip band in two passes (kept, 2026-10-14)
+
+The entry above stops filing a sparse prime whose first multiple is past N. But a thread only sieves
+its own run of contiguous chunks, and a steal starts afresh: `sieve_chunk` now bounds a fresh
+activation by the end of the run (`run_parallel_chunks` hands it out with each chunk, and a run only
+shrinks); a chunk past the bound starts afresh (never happens with today's steals, which never join
+a run's end). `--print` keeps N, its workers carrying on into the next chunk when they get it.
+
+- **v1**, the old branch on the new bound: last 1e9 below 1e17 / 1e18 -17.4% / -20.8% cycles:u
+  (-35% wall), but the last 1e10 below 1e17 **+4.1%**: there the test is a coin flip for most sparse
+  primes, `activate`'s branch misses went 17M -> 55M, +1.6G of the +1.9G cycles. The branch waits
+  on the prime's division, so a mispredict also stalls the next primes' divisions.
+- **v2**, every prime's entry computed with no branch, the hits pushed after: 1e10 windows fixed
+  (-1.2 / -3.4 / -4.2% at 1e17 / 1e18 / 1e19), but 1e9 windows +6% at 1e18 and +27..+31% at 1e19
+  and the ceiling (instructions +49..+53%): where nearly every prime misses, the predictable branch
+  skipping it early was the cheap path.
+- **v3**, two passes only in the band where the test is a coin flip, p in [L / 8, 4 L] (L the
+  numbers left to the bound; hits are ~4.8 p apart), the first pass on the first multiple m0 only:
+  1e10 windows still +3.4..+4.6%. In the band the step to the next multiplier coprime to 2310 often
+  decides it, so the exact test in the second pass was the coin flip again.
+- **v4, kept**: the first pass takes the exact multiplier and phase (a table step, no branch), the
+  second files the hits. Branch misses at the last 1e10 below 1e17: 0.142G against 0.136G before and
+  0.182G for v3.
+
+Dev PC, 12 threads, v4 against the build before, cycles:u / wall (single `--debug-idle` runs: no
+steals with the bound on these windows, 1-4 without it at the last 1e11 below 1e18):
+
+| window | 1e15 | 1e17 | 1e18 | 1e19 | ceiling |
+|---|---:|---:|---:|---:|---:|
+| last 1e11 (4 pairs) | +0.91 / -3.15% | +0.15 / -2.24% | -0.97 / -2.26% | -4.77 / -6.20% | -- |
+| last 1e10 (5 pairs) | -- | -2.32 / -8.83% | -11.33 / -27.92% | -21.03 / -37.97% | -- |
+| last 1e9 (5 pairs) | -- | -27.95 / -39.61% | -25.60 / -42.20% | -18.35 / -19.42% | -12.99 / -29.39% |
+
+Every B run below every A run from 1e18 down to the 1e9 windows. The wall time drops more than the
+cycles: fewer entries fault in fewer ring blocks (sys time 2.3-4.6 s -> 1.2-1.9 s on the last 1e10
+below 1e18). The band alone, with N as the bound, already helped where the old test was a coin flip
+for the threads near N: -1.2% / -7.8% at the last 1e10 below 1e17 / 1e18. Counts equal primecount's
+(1e10, the last 1e10 below 1e17 and 1e18, the last 1e9 below the ceiling); `make test` all OK.
+
 ### Base primes sieved into the wheel bitmap with the main sieve's kernels (kept, 2026-10-07)
 
 `sieve_base_primes` was a byte-per-odd-number sieve (no wheel) emitting every prime through a
@@ -1459,6 +1502,28 @@ groups (167+173, 179+181) at 1e12: cycles +1.6-1.8%, wall flat. Four well-sized 
 with a small partner, ~7-10 KB): cycles +4.3%, wall +3.7%: group count, not table size, is the
 cost. One 17th group of all four (~935 MB table), i5-11400F: +1.4% wall at 1e12 (single rep),
 streaming a table no cache holds. A win would need a per-group cost that scales with hits.
+
+### Pre-sieve past 163 re-tested on today's fill: one table per prime, and a regrouping (measured, 2026-10-14)
+
+The attempts above ran on the old `fill()`, one shift-and-OR pass per group; today it ORs 4 tables
+per pass with byte-aligned loads (vectorized, `vpternlogq` on the dev PC). Dev PC, 12 threads, last
+1e11 below N, cycles:u against 7..163:
+
+| pre-sieved up to | tables | 1e12 | 1e13 | 1e15 | 1e17 |
+|---|---:|---:|---:|---:|---:|
+| 199, one table per new prime (period p bytes) | 24 | +0.50% | +0.51% | +0.54% | +0.91% |
+| 251, same | 32 | +1.81% | +2.13% | -0.47% | +3.23% |
+| 317, same | 44 | +3.12% | +3.20% | +0.58% | -- |
+| 199, regrouped: the 3 triples, 41..199 paired smallest with largest | 20 | -0.39% | -0.13% | -0.37% | +0.86% |
+
+3 pairs (4 for the regrouping), instructions up +0.4 / +0.9 / +2% for the single tables, down 0.5-0.8%
+for the regrouping (except 1e17). A table costs `fill()` about what its primes save the small tier,
+so the cover only grows with tables of more primes, i.e. longer periods: a table's period is the
+product of its primes, so the primes covered bound the tables. Sum of ln p over 7..163 is ~150.6
+against 16 x ln(10 KB) = 147: primesieve's 16 tables (periods up to 9,797 bytes) sit on that bound.
+To 199 with 16 tables needs ~160 KB per table; with 20 (one more pass) ~14 KB, the regrouping above
+(max 13,837 bytes, ~292 KB with the tails): a tie, slightly ahead below 1e16 and behind at 1e17.
+Closed: 163 stays.
 
 ### `fill()`: skip the `self_k` correction loop when it can't possibly match (kept, 2026-09-26)
 

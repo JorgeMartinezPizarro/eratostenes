@@ -112,15 +112,40 @@ public:
         if (next_k_ < primes.k_begin) next_k_ = primes.k_begin;
         const uint64_t k_cut = wheel_count_upto(isqrt(high_n - 1)); // primes with p*p < high_n have k < k_cut
         const uint64_t k_stop = std::min(k_cut, primes.k_end);
+        // Whether a prime hits before range_end_n_ is a coin flip for p in
+        // [L / 8, 4 L], L the numbers left to it (a prime's hits are ~4.8 p
+        // apart): a branch on it mispredicts there, and it waits on the
+        // prime's division, stalling the next primes'. A word in that band
+        // goes in two passes, the test with no branch first; elsewhere the
+        // branch is predictable and skipping a prime early is cheaper.
+        const uint64_t left = range_end_n_ > low_n ? range_end_n_ - low_n : 0;
+        const uint64_t band_lo = wheel_count_upto(left / 8);
+        const uint64_t band_hi = left > UINT64_MAX / 8 ? UINT64_MAX : wheel_count_upto(4 * left);
         while (next_k_ < k_stop) {
             const uint64_t wi = next_k_ >> 6;
             const uint64_t word_end = std::min((wi + 1) << 6, k_stop);
             uint64_t bits = primes.words[wi] & (~uint64_t{0} << (next_k_ & 63));
             if (word_end & 63) bits &= (uint64_t{1} << (word_end & 63)) - 1; // partial last word
-            while (bits) {
-                file_sparse((wi << 6) + static_cast<uint64_t>(__builtin_ctzll(bits)), low_n, k_low);
-                ++activated;
-                bits &= bits - 1;
+            const uint64_t k0 = wi << 6;
+            // A prime whose first hit is past range_end_n_ never hits the
+            // run: it isn't filed (see set_range_end).
+            if (k0 + 64 <= band_lo || k0 >= band_hi) {
+                for (; bits; bits &= bits - 1, ++activated) {
+                    const uint64_t k = k0 + static_cast<uint64_t>(__builtin_ctzll(bits));
+                    uint64_t w;
+                    const uint64_t m = first_multiplier(k, low_n, w);
+                    if (wheel_number(k) * m <= range_end_n_) file_sparse(k, m, w, k_low);
+                }
+            } else {
+                uint64_t ks[64], ms[64], ws[64];
+                unsigned n = 0;
+                for (; bits; bits &= bits - 1, ++activated) {
+                    const uint64_t k = k0 + static_cast<uint64_t>(__builtin_ctzll(bits));
+                    ks[n] = k;
+                    ms[n] = first_multiplier(k, low_n, ws[n]);
+                    n += wheel_number(k) * ms[n] <= range_end_n_;
+                }
+                for (unsigned i = 0; i < n; ++i) file_sparse(ks[i], ms[i], ws[i], k_low);
             }
             next_k_ = word_end;
         }
@@ -252,11 +277,13 @@ public:
         }
     }
 
-    // The last number of the whole run (N). A prime whose first multiple at
-    // activation is past it never hits any segment this tier will see, so
-    // file_sparse doesn't file it (as primesieve's EratBig). In a narrow
-    // window that is most base primes: the last 1e4 below 1e18 is hit by
-    // ~8K of the 50.8M primes up to 1e9. Default: no bound.
+    // The last number this tier will sieve to: the end of the thread's run
+    // of contiguous chunks (main.cpp's sieve_chunk), N for --print. A prime
+    // whose first multiple at activation is past it never hits any segment
+    // of the run, so activate doesn't file it (EratBig does the same with
+    // N). In a narrow window that is most base primes: the last 1e4 below
+    // 1e18 is hit by ~8K of the 50.8M primes up to 1e9; and a thread's run
+    // is a twelfth of a window on 12 threads. Default: no bound.
     void set_range_end(uint64_t n) { range_end_n_ = n; }
 
     // Moves the cursor to the next segment's slot, after every segment.
@@ -265,12 +292,22 @@ public:
     }
 
 private:
-    // Files the prime of wheel index k into the ring: the smallest
-    // multiplier m coprime to 2310 with p*m >= max(p*p, low_n), packed into
-    // one entry, into the slot of the segment that hit falls in. qp and the
-    // residue class come from the index itself (ERA_ACT_IDX; k >> 3 and
+    // The first multiplier m coprime to 2310 with p*m >= max(p*p, low_n), p
+    // the prime of wheel index k, and its phase w (M2310[w] == m % 2310).
+    static uint64_t first_multiplier(uint64_t k, uint64_t low_n, uint64_t& w) {
+        const uint64_t p = wheel_number(k);
+        const uint64_t m0 = (std::max(p * p, low_n) + p - 1) / p;
+        uint64_t t = m0 / 2310;
+        w = big::NEXT_W2310[m0 % 2310];
+        if (w == big::W2310) { ++t; w = 0; }
+        return t * 2310 + big::M2310[w];
+    }
+
+    // Files the prime of wheel index k into the ring at multiplier m (phase
+    // w): one packed entry, into the slot of the segment p*m falls in. qp and
+    // the residue class come from the index itself (ERA_ACT_IDX; k >> 3 and
     // k & 7), not from dividing p.
-    void file_sparse(uint64_t k, uint64_t low_n, uint64_t k_low) {
+    void file_sparse(uint64_t k, uint64_t m, uint64_t w, uint64_t k_low) {
         uint64_t qp, ri, p;
         if constexpr (ERA_ACT_IDX) {
             qp = k >> WHEEL_SIZE_LOG2;             // p / WHEEL_MOD
@@ -282,15 +319,8 @@ private:
             qp = p / WHEEL_MOD;
             ri = static_cast<uint64_t>(WHEEL_POS[p % WHEEL_MOD]);
         }
-        uint64_t start_val = std::max(p * p, low_n);
-        uint64_t m = (start_val + p - 1) / p;
         // Packed as one word: idx (ri * 480 + w) in bits 0-11, pos in 12-35,
         // qp in 36-63 -- see process_big.
-        uint64_t t = m / 2310, sres = m % 2310;
-        uint64_t w = big::NEXT_W2310[sres];
-        if (w == big::W2310) { ++t; w = 0; }
-        m = t * 2310 + big::M2310[w];
-        if (p * m > range_end_n_) return; // never hits the range: not filed, see set_range_end
         uint64_t pos = p * m / WHEEL_MOD - k_low / 8;
         uint64_t ahead = pos >> log2_sb_;
         if (ahead >= num_buckets_) {

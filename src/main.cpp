@@ -151,6 +151,7 @@ struct SieveSlot {
     const TierSet* tiers = nullptr;
     std::unique_ptr<SegmentSieve> sieve;
     uint64_t next_k = UINT64_MAX;
+    uint64_t span_end_k = 0; // the activation's bound: chunks may carry on up to it
 };
 static SieveSlot& sieve_slot(const TierSet& t, uint64_t base_prime_max, const Presieve& presieve,
                              const SieveConfig& cfg) {
@@ -163,7 +164,6 @@ static SieveSlot& sieve_slot(const TierSet& t, uint64_t base_prime_max, const Pr
                                                      !t.sparse.empty(),
                                                      t.medium.size() >= cfg.medium_nta_min_primes, cfg.huge_arenas);
         slot->sieve->set_skip_below_k(cfg.skip_below_k);
-        slot->sieve->set_range_end(cfg.range_end);
         slot->tiers = &t;
         slot->next_k = UINT64_MAX;
     }
@@ -180,8 +180,12 @@ static SieveSlot& sieve_slot(const TierSet& t, uint64_t base_prime_max, const Pr
 // every base prime again -- at the top of 1e18 that is 50M primes, ~1.3s per
 // thread. Only valid after a chunk of whole segments (split_ranges aligns all
 // but the last), since the sparse ring counts in whole segments.
+//
+// span_end_k: the end of the contiguous chunks the thread will sieve from
+// here on (its run, see run_parallel_chunks). A fresh start files no sparse
+// prime whose next multiple lies past it, and a chunk past it starts afresh.
 template <typename Writer>
-static void sieve_chunk(ChunkRange range, const TierSet& t, uint64_t base_prime_max,
+static void sieve_chunk(ChunkRange range, uint64_t span_end_k, const TierSet& t, uint64_t base_prime_max,
                          const Presieve& presieve, const SieveConfig& cfg, Writer& out, uint64_t& local_count,
                          std::atomic<uint64_t>& progress) {
     SieveSlot* const slot = &sieve_slot(t, base_prime_max, presieve, cfg);
@@ -189,10 +193,12 @@ static void sieve_chunk(ChunkRange range, const TierSet& t, uint64_t base_prime_
     ChunkStats& st = t_chunk_stats;
     st = {};
     auto t0 = std::chrono::steady_clock::now();
-    if (slot->next_k != range.low) {
+    if (slot->next_k != range.low || range.high > slot->span_end_k) {
         // Fresh start: activate up front (the first sieve_and_emit would do
         // it anyway) so it can be timed apart from the sieving.
         sieve.begin_chunk();
+        sieve.set_range_end(std::min(cfg.range_end, wheel_number(span_end_k - 1)));
+        slot->span_end_k = span_end_k;
         st.activated = sieve.activate(range.low, std::min(range.low + t.width, range.high),
                                       t.small, t.med64, t.medium, t.sparse);
         const auto t1 = std::chrono::steady_clock::now();
@@ -289,7 +295,7 @@ static void run_parallel_chunks(unsigned workers, const std::vector<ChunkRange>&
     auto left_k = [&](const Run& r) { return static_cast<double>(ranges[r.end - 1].high - ranges[r.next].low); };
     // Next chunk index for worker w (done: what its last chunk measured), or
     // num_chunks when it should stop.
-    auto take = [&](unsigned w, const ChunkStats* done) -> unsigned {
+    auto take = [&](unsigned w, const ChunkStats* done, uint64_t& span_end_k) -> unsigned {
         std::lock_guard<std::mutex> lk(runs_mu);
         if (done) {
             sieve_s[w] += done->sieve_s;
@@ -328,6 +334,7 @@ static void run_parallel_chunks(unsigned workers, const std::vector<ChunkRange>&
             runs[victim].end = mid;
             ++steals;
         }
+        span_end_k = ranges[own.end - 1].high; // the run only ever shrinks from here
         return own.next++;
     };
     std::vector<std::exception_ptr> errors(workers);
@@ -341,8 +348,10 @@ static void run_parallel_chunks(unsigned workers, const std::vector<ChunkRange>&
     for (unsigned w = 0; w < workers; ++w) {
         pool.emplace_back([&fn, &errors, &take, num_chunks, w, debug_idle, &finish, t0]() {
             try {
-                for (unsigned idx = take(w, nullptr); idx < num_chunks; idx = take(w, &t_chunk_stats))
-                    fn(idx);
+                uint64_t span_end_k = 0;
+                for (unsigned idx = take(w, nullptr, span_end_k); idx < num_chunks;
+                     idx = take(w, &t_chunk_stats, span_end_k))
+                    fn(idx, span_end_k);
                 if (debug_idle) {
                     finish[w] = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
                 }
@@ -391,11 +400,11 @@ struct RunPlan {
     template <typename Fn>
     void pass(const char* label, Fn&& fn) const {
         Progress progress(C, label, total_span);
-        run_parallel_chunks(actual_threads, ranges, fresh_primes, sp.cfg, [&](unsigned i) {
+        run_parallel_chunks(actual_threads, ranges, fresh_primes, sp.cfg, [&](unsigned i, uint64_t span_end_k) {
             const ChunkRange& r = ranges[i];
             fn(i, [&](auto& out) {
                 uint64_t count = 0;
-                sieve_chunk(r, sp.tiers_for(r), base_limit, presieve, sp.cfg, out, count, progress.k);
+                sieve_chunk(r, span_end_k, sp.tiers_for(r), base_limit, presieve, sp.cfg, out, count, progress.k);
                 return count;
             });
         });
@@ -525,7 +534,10 @@ static int run_print(const RunPlan& plan) {
                 TextSink sink{s.text};
                 const ChunkRange& r = plan.ranges[i];
                 uint64_t primes = 0;
-                sieve_chunk(r, plan.sp.tiers_for(r), plan.base_limit, plan.presieve, plan.sp.cfg, sink, primes, done_k);
+                // In order, not by runs: a worker that gets the next chunk
+                // carries on, so the activation keeps N as its bound.
+                sieve_chunk(r, plan.ranges.back().high, plan.sp.tiers_for(r), plan.base_limit, plan.presieve,
+                            plan.sp.cfg, sink, primes, done_k);
                 {
                     std::lock_guard<std::mutex> lk(mu);
                     s.primes = primes;

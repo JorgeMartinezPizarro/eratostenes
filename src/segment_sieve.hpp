@@ -57,8 +57,8 @@ public:
     // down to). Default 1.
     void set_skip_below_k(uint64_t k) { skip_below_k_ = std::max<uint64_t>(k, 1); }
 
-    // The last number of the whole run (N): sparse primes with no multiple
-    // up to it aren't filed (SparseTier::set_range_end).
+    // The last number the run of chunks sieved from here will reach: sparse
+    // primes with no multiple up to it aren't filed (SparseTier::set_range_end).
     void set_range_end(uint64_t n) { sparse_.set_range_end(n); }
 
     // Must be called once before the first sieve_and_emit call for a new,

@@ -53,8 +53,8 @@ struct SieveConfig {
     // First wheel index the count includes: 1 (the number 1 is not prime),
     // or with --start the index of the first number >= start.
     uint64_t skip_below_k = 1;
-    // N: sparse primes whose first multiple lies past it aren't filed
-    // (SegmentSieve::set_range_end).
+    // N: no thread's run goes past it (main.cpp's sieve_chunk bounds each
+    // activation by the run's end, SegmentSieve::set_range_end).
     uint64_t range_end = UINT64_MAX;
 };
 
