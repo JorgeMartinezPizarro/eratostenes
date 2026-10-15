@@ -1,14 +1,12 @@
-# eratostenes
-
-<img src="assets/eratostenes.jpg" alt="Eratosthenes" width="80" align="right">
+## <img src="assets/eratostenes.jpg" alt="Eratosthenes" width="16" height="16" style="vertical-align: middle"> Eratostenes
 
 An ultra fast Sieve of Eratosthenes written in C++. It is designed to count and generate primes up to very large N (10^15+), with a compact, randomly-indexable `.db` output format for storing dense prime tables at scale.
 
-## Intro
+## 📖 Intro
 
 I started sieving for primes back in 2001, when I first learned to program, on my first computer, an AMD Athlon with 1 GB of RAM. Back then, reaching primes around 10¹⁸ felt like a milestone. Over the years I have kept playing with these amazing numbers. Thanks to [GordonBGood](https://stackoverflow.com/users/549617/gordonbgood) and [Kim Walisch](https://github.com/kimwalisch), I have learned many new optimizations, and their work inspired me to rekindle this old passion with this project.
 
-## Build
+## 🔨 Build
 
 Requires a C++20 compiler, POSIX `pwrite`/`ftruncate` (Linux or WSL; does not build as-is with MSVC/native Windows), and the SQLite3 and zstd development libraries (for `.db` output):
 
@@ -36,7 +34,7 @@ make benchmark-tails  # Count-only, the last 1e11 numbers below 1e13..1e18
 make benchmark-print  # --print against primesieve --print, N = 1e8..1e10
 ```
 
-## Docker
+## 🐳 Docker
 
 ```sh
 make docker                             # build the image
@@ -47,7 +45,7 @@ make run ARGS="100b -o /output/primes.db"  # run it
 `-o /output/<file>` in `ARGS` so the result lands somewhere accessible
 outside the container.
 
-## Usage
+## 🚀 Usage
 
 ```sh
 ./eratostenes N [options]
@@ -80,7 +78,7 @@ outside the container.
 ./eratostenes 1m --print > primes_1M.txt  # Print them
 ```
 
-## Database
+## 🗄️ Database
 
 `-o out.db` writes two files that travel together: `out.db`, a small SQLite index (one row per block of 65536 primes: position, count, first prime, and where the block sits in the sidecar), and `out.blk`, the gap-encoded, zstd-compressed blocks themselves, written in parallel by every sieve thread. The index stays in the MBs; the `.blk` is ~0.55 bytes per prime (~17 TB at 1e15; on ext4 a single file tops out at 16 TiB, XFS has no such limit). To query for primes you can use the `nth_prime` companion:
 
@@ -112,7 +110,7 @@ Below the results for `./eratostenes limit -o base.db`:
 |1E12   | 18.43 GiB  |      4.21 |  579.6 |   34.141 |
 |1E13   | 174.89 GiB |      4.34 |  470.5 |  399.110 
 
-## Algorithms
+## 🧮 Algorithms
 
 What this project is built from, one term each — follow the link for the concept itself. See [docs/ALGORITHM.md](docs/ALGORITHM.md) for how they combine, and [docs/RESEARCH.md](docs/RESEARCH.md) for the log of tried, measured, and reverted optimization attempts behind the current design.
 
@@ -125,7 +123,7 @@ What this project is built from, one term each — follow the link for the conce
 - [Random access](https://en.wikipedia.org/wiki/Random_access) 
 - [Delta encoding](https://en.wikipedia.org/wiki/Delta_encoding)
 
-## Benchmark
+## 📊 Benchmark
 
 `./eratostenes N` (counts only) on an Intel Core i5-13500 (Raptor Lake, 2023), [primesieve](https://github.com/kimwalisch/primesieve) alongside it for reference:
 
@@ -150,14 +148,10 @@ At the top of the 64-bit range, counting only the last numbers below 18446744004
 
 For more machines and results, see: [docs/BENCHMARK.md](docs/BENCHMARK.md).
 
-## Validation
+## ✅ Validation
 
 `make test` checks pi(N) and primes by position against [primecount](https://github.com/kimwalisch/primecount) across several N and parameter combinations (threads, segment width, cache-size overrides, `.db` block size, zstd level), and checks `.db` output against `--print` position by position.
 
-## License
+## 🏛️ License
 
-This software is licensed as a [HaaT](https://github.com/JorgeMartinezPizarro/haat/blob/main/LICENSE.md).
-
-## Issues
-
-See [docs/ISSUES.md](docs/ISSUES.md) for known issues.
+This product is created by [Jorge Martinez Pizarro](https://ideniox.com) and licensed as a [haat](https://github.com/JorgeMartinezPizarro/haat/blob/main/LICENSE.md).
