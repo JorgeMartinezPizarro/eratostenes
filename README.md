@@ -153,6 +153,10 @@ For more machines and results, see: [docs/BENCHMARK.md](docs/BENCHMARK.md).
 
 `make test` checks pi(N) and primes by position against [primecount](https://github.com/kimwalisch/primecount) across several N and parameter combinations (threads, segment width, cache-size overrides, `.db` block size, zstd level), and checks `.db` output against `--print` position by position.
 
+## License
+
+This software is licensed as a [HaaT](https://github.com/JorgeMartinezPizarro/haat/blob/main/LICENSE.md).
+
 ## Issues
 
 See [docs/ISSUES.md](docs/ISSUES.md) for known issues.
