@@ -23,10 +23,12 @@
 #            one goes first (era/ps, ps/era, ...); the table shows each
 #            one's mean (default: 1). See benchmark.sh for why pairs and
 #            means.
-#   NS       space-separated N list, integers or 1eX, up to 2^64 - 1 (~1.8e19)
-#            (default: "1e13 1e14 1e15 1e16 1e17 1e18"). Memory grows with
-#            pi(sqrt N) in both programs, per thread: ~1.2 GB each at 1e19
-#            (152M base primes), ~0.4 GB at 1e18.
+#   NS       space-separated N list, integers, 1eX or 1.8e19, up to
+#            eratostenes' ceiling 2^64 - 2^32 * 16 - 1 = 18446744004990074879
+#            (src/arg_parser.hpp MAX_LIMIT; default: "1e13 1e14 1e15 1e16
+#            1e17 1e18"). Memory grows with pi(sqrt N) in both programs, per
+#            thread: ~1.6 GB each at the ceiling (203M base primes), ~1.2 GB
+#            at 1e19 (152M), ~0.4 GB at 1e18.
 #   WIDTH    window width, integer or 1eX (default: 1e11)
 #   SEGMENT  forced -s for eratostenes (default: unset, the CLI's auto width)
 #   WARMUP   seconds of sieving on every thread before the first pair
@@ -56,6 +58,7 @@ fi
 source scripts/lib.sh # to_dec, dec_sub, dec_mod, num_lt, mean_of, warm_up
 
 width=$(to_dec "$WIDTH")
+for n in $NS; do to_dec "$n" >/dev/null || exit 1; done # a typo stops here, not after the warm-up
 warm_up "$BIN" "$THREADS" "$WARMUP"
 
 run_era() { # stop start -> sets t_e, c_e

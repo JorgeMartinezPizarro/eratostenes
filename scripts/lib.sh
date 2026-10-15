@@ -3,16 +3,23 @@
 # benchmark_mini.sh, benchmark_ab.sh): `source scripts/lib.sh` after the
 # cd to the repo root. Nothing here runs anything.
 
-# "1e13" / "100000" -> plain digits. Numbers stay decimal strings: N goes up
-# to 2^64 - 1, and bash arithmetic stops at 2^63 - 1 (1e19 overflowed it).
+# "1e13" / "1.8e19" / "100000" -> plain digits (a whole number, as the CLI
+# takes it). Numbers stay decimal strings: N goes up to 2^64 - 1, and bash
+# arithmetic stops at 2^63 - 1 (1e19 overflowed it).
 to_dec() {
-    local d
-    if [[ "$1" =~ ^([0-9]+)[eE]([0-9]+)$ ]]; then
-        d=${BASH_REMATCH[1]}$(printf '%*s' "${BASH_REMATCH[2]}" '' | tr ' ' 0)
+    local d frac e
+    if [[ "$1" =~ ^([0-9]+)(\.([0-9]*))?[eE]([0-9]+)$ ]]; then
+        frac=$(echo "${BASH_REMATCH[3]}" | sed 's/0*$//')
+        e=$(( 10#${BASH_REMATCH[4]} - ${#frac} ))
+        if (( e < 0 )); then
+            echo "invalid value: $1 (not a whole number)" >&2
+            return 1
+        fi
+        d=${BASH_REMATCH[1]}$frac$(printf '%*s' "$e" '' | tr ' ' 0)
     elif [[ "$1" =~ ^[0-9]+$ ]]; then
         d=$1
     else
-        echo "invalid value: $1 (use an integer or 1eX)" >&2
+        echo "invalid value: $1 (use an integer, 1eX or 1.8e19)" >&2
         return 1
     fi
     d=$(echo "$d" | sed 's/^0*//')

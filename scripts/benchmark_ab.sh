@@ -117,6 +117,7 @@ compare() {
         }'
 }
 
+for N_IN in $NS; do to_dec "$N_IN" >/dev/null || exit 1; done # a typo stops here, not after the warm-up
 warm_up "$BIN_A" "$THREADS" "$WARMUP"
 for N_IN in $NS; do
     N=$(to_dec "$N_IN")
