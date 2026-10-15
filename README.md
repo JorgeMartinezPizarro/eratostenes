@@ -142,7 +142,8 @@ At the top of the 64-bit range, counting only the last numbers below 18446744004
 
 | window | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
-| 1e10 | 2.882s | 4.068s | 0.71x |
+| 1e9 | 1.835s | 2.157s | 0.85x |
+| 1e10 | 2.920s | 4.179s | 0.70x |
 | 1e11 | 10.760s | 13.355s | 0.81x |
 | 1e12 | 73.721s | 85.073s | 0.87x |
 | 1e13 | 677.302s | 782.082s | 0.87x |
