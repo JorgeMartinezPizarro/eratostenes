@@ -2,7 +2,7 @@
 
 An ultra fast Sieve of Eratosthenes written in C++. It is designed to count and generate primes up to very large N (10^15+), with a compact, randomly-indexable `.db` output format for storing dense prime tables at scale.
 
-## 📖 Intro
+## 💡 Intro
 
 I started sieving for primes back in 2001, when I first learned to program, on my first computer, an AMD Athlon with 1 GB of RAM. Back then, reaching primes around 10¹⁸ felt like a milestone. Over the years I have kept playing with these amazing numbers. **Thanks** to [GordonBGood](https://stackoverflow.com/users/549617/gordonbgood) and [Kim Walisch](https://github.com/kimwalisch), I have learned many new optimizations, and their work inspired me to rekindle this old passion with this project.
 
@@ -34,7 +34,7 @@ make benchmark-tails  # Count-only, the last 1e11 numbers below 1e13..1e18
 make benchmark-print  # --print against primesieve --print, N = 1e8..1e10
 ```
 
-## 🐳 Docker
+## <img src="https://cdn.simpleicons.org/docker" width="26" height="26" align="absmiddle"> Docker
 
 ```sh
 make docker                             # build the image
