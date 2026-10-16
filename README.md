@@ -34,7 +34,7 @@ make benchmark-tails  # Count-only, the last 1e11 numbers below 1e13..1e18
 make benchmark-print  # --print against primesieve --print, N = 1e8..1e10
 ```
 
-## 🐳 Docker
+## <img src="https://cdn.simpleicons.org/docker" width="26" height="26" align="absmiddle"> Docker
 
 ```sh
 make docker                             # build the image
