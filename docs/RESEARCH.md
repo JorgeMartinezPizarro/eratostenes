@@ -970,6 +970,11 @@ buffer per group of 64 slots, dev PC 13.4 vs 11.5 ns).
   prime, and 1.16 GHz measured (the battery-less MacBook's SMC caps the CPU). Every Mac number is a
   1.2 GHz Nehalem, primesieve's too, so the ratios stand. The three flags stayed as off knobs until the
 2026-10-07 cleanup removed them.
+- **2026-10-16, with a new battery and paste, at full clock** (bb87f92, primesieve 12.12 on that machine,
+  the rest of the fleet on 12.16): about 2.4x faster for both programs, and BENCHMARK.md's i7-620M tables
+  replaced: tails 0.93-1.00x (were 0.95-1.11x), counts 0.77-0.96x (1e13 a mean of 2 pairs). The cores
+  reach 94 °C under full load: from 1e15 up the tails ran 10-22% slower than a first pass that morning,
+  both programs alike (0.94-1.00x there).
 
 ### Sparse activation from the bitmap index: 18% fewer instructions per prime (kept, 2026-10-05)
 
