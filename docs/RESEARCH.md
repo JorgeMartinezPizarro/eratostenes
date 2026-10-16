@@ -1525,6 +1525,29 @@ To 199 with 16 tables needs ~160 KB per table; with 20 (one more pass) ~14 KB, t
 (max 13,837 bytes, ~292 KB with the tails): a tie, slightly ahead below 1e16 and behind at 1e17.
 Closed: 163 stays.
 
+### Pre-sieve fill chunk re-swept, and the smallest primes in L1-sized tables (measured, 2026-10-16)
+
+Profile first, dev PC, 12 threads, last 1e11 below N, cycles:u: `Presieve::fill` takes 4.86G of 122.4G
+at 1e12 (4.0%) and 5.65G of 228.8G at 1e15 (2.5%); primesieve 12.16's AVX-512 pre-sieve
+(`presieve1/2_x86_avx512` and `preSieve`) 4.82G and 4.71G. It does the same work in half the
+instructions (64-byte vectors against this loop's 32-byte `vpternlogq`) and the same cycles: the fill is
+bound by streaming the 16 tables (~190 KB, more than an HT thread's half of the L1d) from L2, 16 bytes
+per segment byte, not by instructions.
+
+- `PRESIEVE_CHUNK_BYTES` (each table's tail), against 4 KiB, 3 pairs each: 1 KiB +1.15 / +0.07 / +0.18 /
+  +0.05% at 1e12 / 1e13 / 1e15 / 1e17 (instructions +0.4..+0.9%), 2 KiB -0.33 / -0.24 / -0.32 / +0.56%,
+  8 KiB +0.62 / +0.82 / -0.92 / +1.63%. 48 KB less of tails buys nothing: 4 KiB stays.
+- The 9 smallest primes in four tables small enough for L1, {7, 11, 13}, {17, 19}, {23, 29}, {31, 37}
+  (1,001 / 323 / 667 / 1,147 bytes), in place of the three triples, the 13 pairs unchanged (17 tables, 13
+  of them from L2): with 4 KiB chunks +1.01 / +0.33 / +0.75 / +1.10%, 2 KiB +0.40 / +0.54 / -0.39 /
+  +1.76%, 1 KiB +0.84 / +0.09 / -0.43 / +0.29%; `fill` 5.0-5.2G against 4.4-4.8G at 1e12. The small
+  tables don't stay in L1 while 13 others stream through it, so they come from L2 like the rest, and the
+  17th table adds its sixteenth.
+
+Closed, with the entry above: a table costs one stream from L2 whatever its primes or its size, which is
+why the cover grows only with longer periods. The one combination left, fewer and longer tables (16 of
+~32-64 KB reach ~173-181), puts ~0.5-1 MB of tables in the L2 that med64 waits on.
+
 ### `fill()`: skip the `self_k` correction loop when it can't possibly match (kept, 2026-09-26)
 
 A ~30-35-entry loop fixing each pre-sieve prime's self-hit ran on every `fill()` call, though a
