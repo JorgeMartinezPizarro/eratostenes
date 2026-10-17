@@ -134,7 +134,7 @@ What this project is built from, one term each — follow the link for the conce
 | 1e12 | 22.378s | 25.067s | 0.89x |
 | 1e13 | 278.806s | 293.146s | 0.95x |
 | 1e14 | 3263.201s | 3370.929s | 0.97x |
-| 1e15 | 39517.53s | 39053.581s | 1.01x |
+| 1e15 | 38207.677s | 39053.581s | 0.98x |
 
 At the top of the 64-bit range, counting only the last numbers below 18446744004990074879 = 2^64 − 2^36 − 1, the largest N eratostenes takes (`make benchmark-tails`):
 
