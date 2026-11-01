@@ -62,6 +62,26 @@ Intel Core i5-11400F (Rocket Lake, 2021), 32 GB. 12 threads (2 per core); L1d 28
 | 1e17 | 7.205s | 8.469s | 0.85x |
 | 1e18 | 9.346s | 11.083s | 0.84x |
 
+## Intel Core i7-4770HQ
+
+Intel Core i7-4770HQ (Haswell, 2014), 16 GB. 8 threads (2 per core); L1d 128 KiB (4 instances); L2 1 MiB (4 instances); L3 6 MiB.
+
+| N | eratostenes | primesieve | ratio |
+|---|---:|---:|---:|
+| 1e10 | 0.808s | 1.100s | 0.73x |
+| 1e11 | 8.352s | 10.974s | 0.76x |
+| 1e12 | 101.567s | 127.442s | 0.80x |
+| 1e13 | 1222.230s | 1461.708s | 0.84x |
+
+| N | eratostenes | primesieve | ratio |
+|---|---:|---:|---:|
+| 1e13 | 12.856s | 15.607s | 0.82x |
+| 1e14 | 14.989s | 17.724s | 0.85x |
+| 1e15 | 17.671s | 19.700s | 0.90x |
+| 1e16 | 19.617s | 21.353s | 0.92x |
+| 1e17 | 22.836s | 23.664s | 0.97x |
+| 1e18 | 26.855s | 28.746s | 0.93x |
+
 ## Intel Core i5-3470
 
 Intel Core i5-3470 (Ivy Bridge, 2012), 8 GB. 4 threads (1 per core); L1d 128 KiB (4 instances); L2 1 MiB (4 instances); L3 6 MiB.
