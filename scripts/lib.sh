@@ -67,6 +67,36 @@ warm_up() {
     done
 }
 
+# clock_start: samples the clock in the background from here to clock_stop
+# (or the end of the script): every 5 s, the fastest thread's MHz in
+# /proc/cpuinfo. The fastest, because a thread that is idle at that moment
+# says nothing about the clock the others sieve at; on a hybrid CPU that
+# makes it the P-cores' clock.
+clock_start() {
+    CLOCK_FILE=$(mktemp)
+    (
+        while sleep 5 && kill -0 $$ 2>/dev/null; do
+            awk '/^cpu MHz/ && $4 > m {m = $4} END {if (m) print m}' /proc/cpuinfo >>"$CLOCK_FILE" || true
+        done
+        rm -f "$CLOCK_FILE"
+    ) >/dev/null 2>&1 &
+    CLOCK_PID=$!
+}
+
+# clock_stop -> sets CLOCK: the mean and the lowest of the samples, for the
+# line above the table. The lowest shows a round whose clock fell at some
+# point, which the mean alone can hide. "clock ?" under 5 s or without the
+# value in /proc/cpuinfo, "clock ? (VM)" in a VM, where that value is a fixed
+# number and not the clock (WSL2 shows the CPU's nominal one).
+clock_stop() {
+    kill "$CLOCK_PID" 2>/dev/null || true
+    wait "$CLOCK_PID" 2>/dev/null || true
+    CLOCK=$(awk '{s += $1; if (NR == 1 || $1 < m) m = $1}
+        END {if (NR) printf "clock %.2f GHz (min %.2f)", s / NR / 1000, m / 1000; else printf "clock ?"}' "$CLOCK_FILE")
+    grep -qw hypervisor /proc/cpuinfo 2>/dev/null && CLOCK="clock ? (VM)"
+    rm -f "$CLOCK_FILE"
+}
+
 # mean_of DECIMALS t1 t2 ...: the mean of the times, printed with that many
 # decimals (3, as both eratostenes' `total:` and primesieve's `Seconds:`).
 mean_of() {

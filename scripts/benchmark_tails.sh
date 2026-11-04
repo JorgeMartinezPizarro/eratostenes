@@ -55,11 +55,12 @@ fi
 
 # Numbers stay decimal strings: N goes up to 2^64 - 1, and bash arithmetic
 # stops at 2^63 - 1 (1e19 overflowed it).
-source scripts/lib.sh # to_dec, dec_sub, dec_mod, num_lt, mean_of, warm_up
+source scripts/lib.sh # to_dec, dec_sub, dec_mod, num_lt, mean_of, warm_up, clock_start, clock_stop
 
 width=$(to_dec "$WIDTH")
 for n in $NS; do to_dec "$n" >/dev/null || exit 1; done # a typo stops here, not after the warm-up
 warm_up "$BIN" "$THREADS" "$WARMUP"
+clock_start
 
 run_era() { # stop start -> sets t_e, c_e
     local out
@@ -114,8 +115,9 @@ for n in $NS; do
     COUNT[$n]="$count"
 done
 
+clock_stop
 echo
-bash scripts/machine_info.sh "$THREADS" "last $WIDTH below N, mean of $REPS, pairs interleaved"
+bash scripts/machine_info.sh "$THREADS" "last $WIDTH below N, mean of $REPS, pairs interleaved; $CLOCK"
 echo
 # Same layout as README.md's tail table: the window width goes in the header
 # line above, the counts (checked above) stay in the progress lines.

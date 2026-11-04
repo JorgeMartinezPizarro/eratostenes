@@ -49,8 +49,9 @@ fi
 echo "Rebuilding eratostenes..." >&2
 make re >/tmp/benchmark_build.log 2>&1 || { cat /tmp/benchmark_build.log >&2; exit 1; }
 
-source scripts/lib.sh # mean_of, warm_up
+source scripts/lib.sh # mean_of, warm_up, clock_start, clock_stop
 warm_up "$BIN" "$THREADS" "$WARMUP"
+clock_start
 
 NS=(1e10 1e11 1e12 1e13)
 # pi(N) for each N above, in the same order -- known values, used to catch
@@ -97,8 +98,9 @@ for i in "${!NS[@]}"; do
     PRIMESIEVE_TIME["$n"]=$(mean_of 3 "${times_p[@]}")
 done
 
+clock_stop
 echo >&2
-bash scripts/machine_info.sh "$THREADS" "mean of $REPS, pairs interleaved"
+bash scripts/machine_info.sh "$THREADS" "mean of $REPS, pairs interleaved; $CLOCK"
 echo
 echo "| N | eratostenes | primesieve | ratio |"
 printf "|---|---:|---:|---:|\n"
