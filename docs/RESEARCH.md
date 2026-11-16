@@ -1581,7 +1581,35 @@ temperature: PL2 for the tau window (~28 s by default), then PL1; ~6% apart on t
 up to 40% on the 15 W laptop. Decision (user): the benchmarks ignore it -- interleaved pairs
 in alternating order, REPS times, means converging on the sustained speed; rows from
 different regimes are not compared. Open: the server's short PL1 window (1e11 1.49 s from
-idle vs 1.88-1.89 s in a REPS=5 round), RAPL readout pending.
+idle vs 1.88-1.89 s in a REPS=5 round). RAPL readout:
+[next entry](#the-i5-13500-at-pl1-95-w-both-programs-faster-eratostenes-more-at-the-top-tails-2026-11-16).
+
+### The i5-13500 at PL1 95 W: both programs faster, eratostenes more at the top tails (2026-11-16)
+
+The server's RAPL limits are PL1 65 W and PL2 117 W, set by the provider (65 W is Intel's
+base power for this CPU). Sustained at 65 W the P-cores hold ~3.3 GHz with the package at
+65 °C. The user raised PL1 to 95 W through powercap sysfs, which a reboot resets: ~3.8 GHz,
+77-78 °C, stable. Same build (fc05362), a REPS=3 round at each limit:
+
+| N | eratostenes | primesieve | ratio 65 W → 95 W |
+|---|---:|---:|---:|
+| 1e10 | -13.4% | -12.0% | 0.90 → 0.88x |
+| 1e11 | -13.1% | -11.9% | 0.85 → 0.83x |
+| 1e12 | -13.2% | -12.5% | 0.87 → 0.86x |
+| 1e13 | -13.7% | -13.5% | 0.94 → 0.93x |
+| tail 1e13 | -13.7% | -13.1% | 0.94 → 0.93x |
+| tail 1e14 | -14.4% | -15.3% | 0.94 → 0.95x |
+| tail 1e15 | -13.4% | -13.0% | 0.92 → 0.92x |
+| tail 1e16 | -13.0% | -11.1% | 0.93 → 0.91x |
+| tail 1e17 | -12.8% | -8.3% | 0.94 → 0.90x |
+| tail 1e18 | -12.2% | -8.3% | 0.92 → 0.88x |
+
+Up to the 1e15 tail both programs gain the same 12-15%, so the ratio barely moves (≤0.02).
+From 1e16 primesieve gains less (8-11%), and at the 1e17-1e18 tails eratostenes leads by
+0.04 more than at 65 W. Something in primesieve's top tails does not scale with the core
+clock; not profiled. The i5-1235U's tails moved the same way when it went from 15 W to
+28 W (2026-11-15), but the code changed between those rounds too, so that one is not a
+clean comparison. BENCHMARK.md's i5-13500 tables are the 95 W round.
 
 ### `--start`: the start itself was dropped when its wheel index was 63 mod 64 (bug, fixed 2026-10-05)
 
