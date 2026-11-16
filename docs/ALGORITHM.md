@@ -252,10 +252,11 @@ of `--print` (which turns each into a decimal line).
 The two cutoffs are tuned jointly (the lower bound of med64 *is* `small_limit`):
 `small_limit = sub-block / 4` (L1d/8: 6144 on a 48 KiB L1d) and `med64_limit =
 seg_k_width / 6`; on a core with an L2 of 256 KiB or less, `sub-block / 2` and the
-whole segment. On a hybrid where more than half the threads land on the E-cores
-(the CPUs with the smaller L1d), `small_limit` is the whole sub-block: Gracemont
-pays more for med64's L1 misses than for small-tier calls, the big cores the other
-way round. All are overridable via `--tune small=a/b` and `--tune med64=a/b`
+whole segment. On a hybrid whose E-cores (the CPUs with the smaller L1d) carry the
+run -- at least twice as many as big cores, and more than half the threads on them --
+`small_limit` is the whole sub-block: Gracemont pays more for med64's L1 misses than
+for small-tier calls, the big cores the other way round. All are overridable via
+`--tune small=a/b` and `--tune med64=a/b`
 for sweeps without recompiling; `--tune med64=0` disables med64, giving the
 three-tier layout back. See [RESEARCH.md](RESEARCH.md) for the sweeps.
 

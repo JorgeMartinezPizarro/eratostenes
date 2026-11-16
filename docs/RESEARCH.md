@@ -558,13 +558,24 @@ the big cores the other way round. The 1235U runs 8 of its 12 threads on E-cores
 the i5-13500 8 of 20 and loses. Also measured: the whole-L1d sub-block under SMT on the Macs,
 +16% (620M) and +26..+31% (4770HQ): that rule stands.
 
-**Rule (kept):** `small_limit` = the whole sub-block when more than half the run's threads land
-on the CPUs with the smaller L1d (a hybrid's E-cores), counting threads as Linux places them:
-one per big core first, then the E-cores, then the big cores' SMT siblings. The 1235U: 8 of 12
-threads (on), 6 of 8 at `-t 8` (on), 2 of 4 at `-t 4` (off); the i5-13500 at 20 threads: 8 of
-20 (off). Startup line `small cutoff: the whole sub-block (8 of 12 threads on the E-cores)`;
-`--tune small` overrides. Other machines unchanged: the 256 KiB-L2 cores keep 1/2, the rest
-1/4. Not covered: an E-core-only CPU (N100: one L1d size, nothing to tell it apart by cache).
+A first rule, the whole sub-block when more than half the run's threads land on the CPUs with
+the smaller L1d, fired on the i5-13500 at `-t 14` (8 of 14 threads on E-cores, the user's
+A/B, 4 pairs, wall): **+7.1% / +1.2% / +3.5%** at 1e12 / 1e13 / 1e15, no pair below. Its six
+P-cores, one thread each, carry more of the work than the 1235U's two. The pinned 1235U times
+fit a work-share view: with ~45% of the work on its E-cores, 0.45 x -26% + 0.55 x +10% = -6.3%,
+measured -6.4%.
+
+**Rule (kept):** `small_limit` = the whole sub-block when the hybrid has at least twice as many
+E-cores (CPUs with the smaller L1d) as big cores, and more than half the run's threads land on
+them, counting threads as Linux places them: one per big core first, then the E-cores, then
+the big cores' SMT siblings. The 1235U (8 E-cores, 2 big): 8 of 12 threads (on), 6 of 8 at
+`-t 8` (on), 2 of 4 at `-t 4` (off). The i5-13500 (8 and 6): off at any `-t`. Against the same
+binary without the rule, 1235U, 4 pairs, wall, every run below: 12 threads -6.4% / -5.5% /
+-3.2%, `-t 8` -5.8% / -4.8% / -3.1% at 1e12 / 1e13 / 1e15. Startup line `small cutoff: the
+whole sub-block (8 of 12 threads on 8 E-cores, 2 big cores)`; `--tune small` overrides. Other
+machines unchanged: the 256 KiB-L2 cores keep 1/2, the rest 1/4. Not covered: an E-core-only
+CPU (N100: one L1d size, nothing to tell it apart by cache); the 2x threshold sits between the
+two hybrids measured (4x on, 1.33x off).
 
 ## Medium tier
 

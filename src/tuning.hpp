@@ -87,6 +87,7 @@ struct SievePlan {
     bool small_l2_gate = false;      // small cutoff 1/2 of the sub-block, same rule
     bool small_e_gate = false;       // small cutoff the whole sub-block: most threads on E-cores
     unsigned small_e_threads = 0;    // threads expected on the cores with the smaller L1d
+    unsigned small_e_cores = 0;      // CPUs with the smaller L1d (a hybrid's E-cores)
     bool half_l2_few_primes = false; // base at half the whole-L2 width: one per core, few base primes
     bool whole_l2_base = false;
     bool sub_block_whole_l1d = false;
@@ -236,19 +237,24 @@ inline SievePlan plan_sieve(const Options& opt, const BasePrimes& base, uint64_t
         P.l1_big_cores = static_cast<unsigned>(big_cores + 0.5);
         // Applied in finish_threads, against the threads that actually run.
 
-        // Small cutoff = the whole sub-block when most threads run on a
-        // hybrid's E-cores (the CPUs with the smaller L1d): Gracemont pays
-        // far more for med64's L1 miss on every hit than for the small tier's
-        // calls, the big cores the other way round (i5-1235U pinned: -26% on
-        // its E-cores, +10% on its P-cores). Linux places threads one per big
-        // core first, then on the E-cores, then on the big cores' SMT
-        // siblings. --tune small overrides. See
+        // Small cutoff = the whole sub-block when a hybrid's E-cores (the
+        // CPUs with the smaller L1d) carry the run: Gracemont pays far more
+        // for med64's L1 miss on every hit than for the small tier's calls,
+        // the big cores the other way round (i5-1235U pinned: -26% on its
+        // E-cores, +10% on its P-cores), so it pays only where the E-cores
+        // do most of the work -- at least twice as many E-cores as big cores
+        // (1235U: 8 and 2; the i5-13500's 8 and 6 lose 2-7%) and more than
+        // half the threads on them. Linux places threads one per big core
+        // first, then on the E-cores, then on the big cores' SMT siblings.
+        // --tune small overrides. See
         // docs/RESEARCH.md#small-cutoff-re-swept-with-the-cheaper-small-tier-the-whole-sub-block-on-e-core-majority-runs-kept-2026-11-16.
         unsigned small_l1_cpus = 0;
         for (uint64_t s : topo.l1_raw) if (s && s < max_l1_raw) ++small_l1_cpus;
+        P.small_e_cores = small_l1_cpus;
         const unsigned on_big = std::min(opt.threads, P.l1_big_cores);
         P.small_e_threads = std::min(small_l1_cpus, opt.threads - on_big);
-        if (!opt.tune_small.den && 2 * P.small_e_threads > opt.threads) {
+        if (!opt.tune_small.den && P.l1_big_cores && small_l1_cpus >= 2 * P.l1_big_cores &&
+            2 * P.small_e_threads > opt.threads) {
             small_num = 1;
             small_den = 1;
             P.small_l2_gate = false;
@@ -561,8 +567,8 @@ inline void print_plan(const SievePlan& P, const Options& opt, unsigned actual_t
     if (P.small_l2_gate)
         std::fprintf(stderr, "  small cutoff: 1/2 of the sub-block (L2 of 256 KiB or less)\n");
     if (P.small_e_gate)
-        std::fprintf(stderr, "  small cutoff: the whole sub-block (%u of %u threads on the E-cores)\n",
-                     P.small_e_threads, opt.threads);
+        std::fprintf(stderr, "  small cutoff: the whole sub-block (%u of %u threads on %u E-cores, %u big cores)\n",
+                     P.small_e_threads, opt.threads, P.small_e_cores, P.l1_big_cores);
     if (P.med64_l2_gate)
         std::fprintf(stderr, "  med64 cutoff: the whole segment (L2 of 256 KiB or less)\n");
     if (P.narrow_k_end) {
