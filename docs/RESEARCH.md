@@ -107,6 +107,11 @@ What is in the code today, by the day it went in:
   -13..-28% cycles on 1e9 windows at 1e17-2^64, -2..-21% on 1e10 windows; the pre-sieve past 163
   [re-tested](#pre-sieve-past-163-re-tested-on-todays-fill-one-table-per-prime-and-a-regrouping-measured-2026-10-14):
   163 stays; `benchmark_ab.sh` takes N up to 2^64.
+- **2026-11-16**: the small tier's [per-call instructions](#small-tier-the-cycle-base-as-state-the-kernel-inlined-a-check-free-entry-cycle-kept-2026-11-16)
+  (cycle base as state, kernel inlined, check-free entry cycle): -6..-7% instructions and
+  -4.1..-4.5% wall at 1e12 (-1.7..-2.6% at 1e15) on the i7-620M and i7-4770HQ; med64's
+  re-filed entry [as one 64-bit word](#med64-the-re-filed-entry-built-as-one-64-bit-word-kept-2026-11-16):
+  -4% instructions at 1e12, ties at 1e15.
 
 ## Contents
 
@@ -419,6 +424,85 @@ below N, cycles:u against 1/6, 3 pairs:
 
 1/4 cuts 1.1-2.7% of the instructions and still loses cycles from 1e13 up; 1/8 adds both. 1/6
 stays.
+
+### Small tier: the cycle base as state, the kernel inlined, a check-free entry cycle (kept, 2026-11-16)
+
+The first profiles on the three laptops with `perf` (native Linux, all threads, `perf record -e
+instructions:u`, full count to 1e11, 4fd47d4 against primesieve 12.18) put the whole instruction
+gap in the small tier; med64 against EratMedium and the pre-sieve against primesieve's tie or win:
+
+| machine | small / EratSmall | med64 / EratMedium | pre-sieve | total |
+|---|---:|---:|---:|---:|
+| i7-4770HQ (Haswell, 8 threads) | 52.1G / 26.8G | 46.8G / 50.3G | 4.6G / 5.0G | 108.1G / 87.7G |
+| i7-620M (Nehalem, 4 threads) | 50.2G / 26.8G | 46.7G / 50.4G | 10.8G / 11.3G | 112.0G / 93.6G |
+| i5-1235U (Alder Lake, 12 threads) | 54.2G / 32.3G | 55.6G / 56.1G | ~6G / ~6G | 119.2G / 101.2G |
+
+In the last 1e10 below 1e15 eratostenes ran fewer instructions than primesieve everywhere (32.7G
+vs 33.0G on the 4770HQ, 45.4G vs 66.0G on the 1235U). An instruction histogram of `cross_off<3>`
+on the 4770HQ: 51% in the unrolled loop, 25% in the prologue, 11% in the entry chain, 8.5% in the
+exit chain, 4% in the epilogue. Per call (one per prime and sub-block) the prologue built the
+8-entry offset table `o[j]` on the stack for the indexed `b = i - o[j]` at entry and
+`i = b + o[j]` at exit, saved 6 registers, realigned the stack (and on Ubuntu checked a
+stack-protector canary), and the chains reloaded spilled offsets and set `j` before each check.
+Most small primes cross a 16-24 KiB sub-block in a few cycles, so that per-call work was half
+the tier.
+
+Two steps, each A/B'd on the three machines (last 1e11 below N, 3 interleaved pairs, medians;
+the 1235U is hybrid, so wall time only):
+
+1. **The cycle base as state.** `DenseState::pos` holds the base of the pending hit's cycle
+   (signed, sign-extended from 32 bits) instead of the hit's byte; `small_state` subtracts
+   `small_offset` once at activation, and `cross_off` returns `{b, j}` in two registers, each
+   exit with its own phase: no offset table, no pointer arguments. On the 4770HQ the full 1e11
+   count went from 108.1G to 100.4G instructions.
+2. **A check-free entry cycle and the kernel inlined** into `cross_off_class`'s loop
+   (`ERA_SMALL_FAST_ENTRY`, `ERA_SMALL_INLINE`): when the rest of the entry cycle lies before
+   `end` (the usual case) its hits go without checks, and no call or register saves per prime.
+
+| machine | N | step 1: instr / cycles / wall | step 2 (vs 1): instr / cycles / wall |
+|---|---|---:|---:|
+| i7-4770HQ | 1e12 | -4.20% / -2.30% / -3.60% | -3.17% / -1.05% / -0.89% |
+| i7-4770HQ | 1e15 | -2.43% / -1.07% / -1.14% | -1.80% / -0.32% / -0.55% |
+| i7-620M | 1e12 | -3.11% / -3.39% / -2.59% | -3.03% / -1.38% / -1.56% |
+| i7-620M | 1e15 | -1.78% / -1.18% / -1.65% | -1.71% / -1.76% / -1.00% |
+| i5-1235U | 1e12 | wall -1.60% | wall -0.13% |
+| i5-1235U | 1e15 | wall -0.29% | wall -1.21% |
+
+Step 1 was below the old code in every pair on the Macs (cycles) and in wall time on the 1235U
+at 1e12. Step 2's halves alone, 4770HQ: the check-free entry cut 1.1% / 0.6% of the
+instructions for cycles +0.01% / -0.17% and wall +0.5% / +0.3%; inlining alone 1e12 -1.4% wall,
+1e15 +0.7%. Together they paid on all three, so both are on (the knobs build the step-1 kernel
+for an A/B). On Nehalem cycles fell about as much as instructions; on the wider cores about half.
+After both steps the small tier still runs ~1.7x EratSmall's instructions: primesieve crosses off
+in whole-L1d chunks (half as many calls as our half-L1d sub-block under SMT) and its
+per-prime state is the running hit pointer. **Pending:** the dev PC (Rocket Lake) and the server
+(Golden Cove), where the small tier sits at one store per core-cycle
+([above](#small-and-med64-on-golden-cove-one-store-per-core-cycle-med64-waits-on-fill-buffers-measured-2026-10-11)).
+
+### med64: the re-filed entry built as one 64-bit word (kept, 2026-11-16)
+
+The same histogram on `process_med64<0>` (4770HQ, 1e11) left ~15% of med64's instructions in the
+per-call entry and exit (~20 + ~22 instructions per call against 4 per hit). Part of the exit:
+GCC built the `{qw, pos}` pair for `push_back` through vector registers (`vmovd`, `vpinsrd`,
+`vmovq`). `ERA_M64_PACK` builds it as `((qp << 6) | w) | ((i - bytes_needed) << 32)` and stores
+it with one `mov`. A/B against the small-tier change above, last 1e11 below N, medians:
+
+| machine | N | pairs | instr | cycles | wall |
+|---|---|---:|---:|---:|---:|
+| i7-4770HQ | 1e12 | 3 | -4.09% | -1.10% | -0.38% |
+| i7-4770HQ | 1e15 | 5 | -1.51% | +0.17% | -0.05% |
+| i7-620M | 1e12 | 3 | -3.94% | -1.59% | -1.32% |
+| i7-620M | 1e15 | 3 | -1.44% | -1.19% | -1.06% |
+| i5-1235U | 1e12 | 3 | hybrid | | -0.93% |
+| i5-1235U | 1e15 | 5 | hybrid | | -0.51% |
+
+1e12 below the old code in every pair (4770HQ and 620M in cycles, 1235U in wall), 1e15 a tie on
+the wider cores; kept, default on. The cut is larger than the packing alone: `process_med64<0>`
+went from 637 to 539 instructions of code, `bytes_needed` no longer spilled to the stack and the
+per-entry decode 2 instructions shorter. The earlier, larger
+attempts at med64's per-call work
+([re-filing without `push_back`](#med64-re-filing-without-stdvectorpush_back-tried-reverted-2026-09-29))
+cost code size; this one is shorter.
 
 ## Medium tier
 

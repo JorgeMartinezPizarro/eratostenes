@@ -143,8 +143,9 @@ already "activated," so across a thread's whole run of chunks (§4), every prime
 examined for activation exactly once, not once per segment. Activation finds the
 first multiplier `m` with `p*m >= max(p², segment start)` that is coprime to 30
 (small), 210 (med64, medium) or 2310 (sparse), and packs the prime's state into 8
-bytes (`p/30`, residue class, multiplier phase and the pending hit's position;
-the medium tier keeps 5, §6). Starting a run (or a stolen piece) at the top of
+bytes (`p/30`, residue class, multiplier phase and the pending hit's position,
+or for the small tier the base of that hit's multiplier cycle; the medium tier
+keeps 5, §6). Starting a run (or a stolen piece) at the top of
 1e18 activates all 50M base primes at once, ~1 s per thread, most of it the kernel
 faulting in the bucket pool the entries go to (§6, sparse); that fixed cost is what
 the contiguous runs in §4 avoid paying per chunk. A sparse prime whose first
@@ -174,10 +175,15 @@ sparse, then extraction.
   offsets `qp*(R[j]-1) + C[PR][j]` with fixed bit masks `M[PR][j]`, all
   compile-time constants once the residue class `PR` is a template parameter.
   That's under 2 instructions per hit (mostly `or byte [base+offset], mask`). A switch
-  enters the cycle at the pending hit's phase and a checked chain leaves it at
-  `end`. One list per residue class (`small_[8]`) keeps `PR` a template parameter
-  instead of a per-prime branch. Pending hits are rebased once, at the segment's
-  last sub-block.
+  enters the cycle at the pending hit's phase (with no per-hit check when the
+  rest of that cycle lies before `end`, the usual case) and a checked chain leaves
+  it at `end`. Each prime's state keeps the base of its pending cycle rather than
+  the hit's byte, so neither entry nor exit looks an offset up by phase, and the
+  kernel is inlined into the loop over a class's primes: most small primes cross a
+  sub-block in a few cycles, so the per-prime entry and exit are a large share of
+  the tier's instructions. One list per residue class (`small_[8]`) keeps `PR` a
+  template parameter instead of a per-prime branch. Pending cycles are rebased
+  once, at the segment's last sub-block.
 - **med64** (`small_limit <= p < med64_limit`): byte marking over the whole
   segment in one pass (these primes have too few hits per sub-block to amortize
   a call per sub-block), with primesieve EratMedium's loop shape

@@ -24,6 +24,28 @@
 #include "wheel.hpp"
 #include "wheel210_big.hpp"
 
+// Two ways of cutting the small tier's per-call instructions, on by
+// default; they only paid together (docs/RESEARCH.md, 2026-11-16), and
+// make variant DEFS="-DERA_SMALL_FAST_ENTRY=0 -DERA_SMALL_INLINE=0" builds
+// without them for an A/B.
+// ERA_SMALL_FAST_ENTRY: cross_off enters its first cycle without per-hit
+// checks when the whole rest of that cycle is below `end`.
+#ifndef ERA_SMALL_FAST_ENTRY
+#define ERA_SMALL_FAST_ENTRY 1
+#endif
+// ERA_SMALL_INLINE: cross_off inlined into its class loop, which goes out of
+// line instead (no call, no register saves per prime).
+#ifndef ERA_SMALL_INLINE
+#define ERA_SMALL_INLINE 1
+#endif
+#if ERA_SMALL_INLINE
+#define ERA_SMALL_KERNEL __attribute__((always_inline)) inline
+#define ERA_SMALL_CLASS __attribute__((noinline))
+#else
+#define ERA_SMALL_KERNEL __attribute__((noinline))
+#define ERA_SMALL_CLASS inline
+#endif
+
 namespace erat {
 
 // The mod-30 residues; C and M give the byte offset and bit mask of the
@@ -35,8 +57,10 @@ constexpr uint8_t M(int pr, int j) { return static_cast<uint8_t>(1u << WHEEL_POS
 // Per-prime state of the small and med64 tiers, and the sparse tier's 8-byte
 // entry slot: qw = (qp << 6) | (pr << 3) | j (small) or (qp << 6) | w (med64),
 // with qp = p / 30, pr the residue class and j / w the pending hit's
-// multiplier phase; pos is that hit's byte position relative to the current
-// segment. qp < 2^26 (p < ~2e9) is checked by SegmentSieve's constructor.
+// multiplier phase. pos, relative to the current segment's first byte: for
+// med64 the pending hit's byte position; for the small tier the base of
+// that hit's multiplier cycle (see cross_off), a signed value stored as its
+// low 32 bits. qp < 2^26 (p < ~2e9) is checked by SegmentSieve's constructor.
 struct DenseState {
     uint32_t qw;
     uint32_t pos;
@@ -44,9 +68,16 @@ struct DenseState {
 
 constexpr uint64_t QP_LIMIT = uint64_t{1} << 26;
 
+// Byte offset of the phase-j hit from its cycle base, for a prime of class
+// pr with qp = p / 30 (the o_j of cross_off, at run time).
+inline uint64_t small_offset(uint64_t qp, uint64_t pr, uint64_t j) {
+    return qp * (R[j] - 1) + R[pr] * R[j] / 30;
+}
+
 // Small-tier state for p's first hit at or past start_val (the smallest
-// multiplier coprime with 30 there), its byte position relative to byte
-// k_low / 8. Its residue class is (qw >> 3) & 7.
+// multiplier coprime with 30 there): its phase j, and the base of its cycle
+// relative to byte k_low / 8 (the hit's byte minus small_offset; may be
+// negative). Its residue class is (qw >> 3) & 7.
 inline DenseState small_state(uint64_t p, uint64_t start_val, uint64_t k_low) {
     const uint64_t pr = static_cast<uint64_t>(WHEEL_POS[p % WHEEL_MOD]);
     uint64_t m = (start_val + p - 1) / p;
@@ -55,18 +86,32 @@ inline DenseState small_state(uint64_t p, uint64_t start_val, uint64_t k_low) {
     m += step;
     r += step;
     if (r >= WHEEL_MOD) r -= WHEEL_MOD;
-    return {static_cast<uint32_t>(((p / WHEEL_MOD) << 6) | (pr << 3) | static_cast<uint64_t>(WHEEL_POS[r])),
-            static_cast<uint32_t>((p * m) / WHEEL_MOD - k_low / 8)};
+    const uint64_t qp = p / WHEEL_MOD;
+    const uint64_t j = static_cast<uint64_t>(WHEEL_POS[r]);
+    const uint64_t pos = (p * m) / WHEEL_MOD - k_low / 8;
+    return {static_cast<uint32_t>((qp << 6) | (pr << 3) | j), static_cast<uint32_t>(pos - small_offset(qp, pr, j))};
 }
 
-// Small tier: crosses off p = 30*qp + R[PR] in s[0, end), starting at the
-// pending hit (i, j); on return (i, j) is the first hit at or past `end`.
-// A switch enters the cycle at phase j, the unchecked loop runs whole
-// cycles, a checked chain leaves at `end`. Out of line, one call per prime
-// from cross_off_class. The locals are uint64_t on purpose (uint32_t is
+// cross_off's result, returned in two registers: the cycle base b and the
+// phase j of the first hit at or past `end`.
+struct SmallPending {
+    uint64_t b;
+    uint64_t j;
+};
+
+// Small tier: crosses off p = 30*qp + R[PR] in s[0, end), from the pending
+// hit at phase j of the cycle based at byte b (the hit is at b + o_j); returns
+// the first hit at or past `end` the same way. A switch enters the cycle at
+// phase j, the unchecked loop runs whole cycles, a checked chain leaves at
+// `end`. The state is the cycle base, not the hit's byte, so neither entry
+// nor exit needs o_j by index (an 8-entry table on the stack, rebuilt per
+// call); each exit returns its own phase. b may be "negative" (wrapped) when
+// the pending hit is early in its cycle: it's only ever used in sums b + o_j,
+// exact mod 2^64. Inlined into cross_off_class's loop over the primes
+// (ERA_SMALL_INLINE). The locals are uint64_t on purpose (uint32_t is
 // slower, docs/RESEARCH.md).
 template <int PR>
-__attribute__((noinline)) void cross_off(uint8_t* s, uint64_t end, uint64_t qp, uint64_t& i_io, uint32_t& j_io) {
+ERA_SMALL_KERNEL SmallPending cross_off(uint8_t* s, uint64_t end, uint64_t qp, uint64_t b, uint64_t j) {
     const uint64_t p = 30 * qp + R[PR];
     const uint64_t o0 = C(PR, 0);
     const uint64_t o1 = qp * (R[1] - 1) + C(PR, 1);
@@ -76,17 +121,42 @@ __attribute__((noinline)) void cross_off(uint8_t* s, uint64_t end, uint64_t qp, 
     const uint64_t o5 = qp * (R[5] - 1) + C(PR, 5);
     const uint64_t o6 = qp * (R[6] - 1) + C(PR, 6);
     const uint64_t o7 = qp * (R[7] - 1) + C(PR, 7);
-    const uint64_t o[8] = {o0, o1, o2, o3, o4, o5, o6, o7};
-
-    uint32_t j = j_io;
-    // Cycle base; may "underflow" (wrap) when the pending hit is early in
-    // its cycle -- only ever used in sums b + o_j, which are exact mod 2^64.
-    uint64_t b = i_io - o[j];
 
 #define ERAT_HIT(J) \
-    if (b + o##J >= end) { j = J; goto done; } \
+    if (b + o##J >= end) return {b, J}; \
     s[b + o##J] |= M(PR, J);
 
+#if ERA_SMALL_FAST_ENTRY
+    // The rest of the entry cycle almost always fits (p is a fraction of
+    // the sub-block): then its hits need no check each.
+    if (b + o7 < end) [[likely]] {
+        switch (j) {
+            case 0: s[b + o0] |= M(PR, 0); [[fallthrough]];
+            case 1: s[b + o1] |= M(PR, 1); [[fallthrough]];
+            case 2: s[b + o2] |= M(PR, 2); [[fallthrough]];
+            case 3: s[b + o3] |= M(PR, 3); [[fallthrough]];
+            case 4: s[b + o4] |= M(PR, 4); [[fallthrough]];
+            case 5: s[b + o5] |= M(PR, 5); [[fallthrough]];
+            case 6: s[b + o6] |= M(PR, 6); [[fallthrough]];
+            case 7: s[b + o7] |= M(PR, 7); break;
+            default: __builtin_unreachable();
+        }
+        b += p;
+    } else {
+        // Hit 7 is past `end`, so this chain returns before its end.
+        switch (j) {
+            case 0: ERAT_HIT(0) [[fallthrough]];
+            case 1: ERAT_HIT(1) [[fallthrough]];
+            case 2: ERAT_HIT(2) [[fallthrough]];
+            case 3: ERAT_HIT(3) [[fallthrough]];
+            case 4: ERAT_HIT(4) [[fallthrough]];
+            case 5: ERAT_HIT(5) [[fallthrough]];
+            case 6: ERAT_HIT(6) [[fallthrough]];
+            case 7: return {b, 7};
+            default: __builtin_unreachable();
+        }
+    }
+#else
     switch (j) {
         case 0: ERAT_HIT(0) [[fallthrough]];
         case 1: ERAT_HIT(1) [[fallthrough]];
@@ -97,7 +167,10 @@ __attribute__((noinline)) void cross_off(uint8_t* s, uint64_t end, uint64_t qp, 
         case 6: ERAT_HIT(6) [[fallthrough]];
         case 7: ERAT_HIT(7)
             b += p;
+            break;
+        default: __builtin_unreachable();
     }
+#endif
 
     // Offsets grow with j, so b + o7 < end means the whole cycle fits.
     while (b + o7 < end) {
@@ -119,12 +192,8 @@ __attribute__((noinline)) void cross_off(uint8_t* s, uint64_t end, uint64_t qp, 
     ERAT_HIT(4)
     ERAT_HIT(5)
     ERAT_HIT(6)
-    j = 7; // b + o7 >= end is already known from the loop exit
 #undef ERAT_HIT
-
-done:
-    i_io = b + o[j];
-    j_io = j;
+    return {b, 7}; // b + o7 >= end is already known from the loop exit
 }
 
 // med64 tier: same contract as cross_off, EratMedium's loop shape -- a
@@ -178,19 +247,19 @@ done:
 }
 
 // Runs every state in [first, last) -- all of residue class PR -- over
-// s[0, end), then rebases each pending hit by `rebase` bytes (the
+// s[0, end), then rebases each pending cycle base by `rebase` bytes (the
 // segment's byte width on its last pass over a segment, 0 otherwise). One
 // list per class (see SegmentSieve::small_) so the class dispatch happens
 // once per list, not as an unpredictable switch per prime.
 template <int PR>
-inline void cross_off_class(uint8_t* s, uint64_t end, DenseState* first, DenseState* last, uint64_t rebase) {
+ERA_SMALL_CLASS void cross_off_class(uint8_t* s, uint64_t end, DenseState* first, DenseState* last, uint64_t rebase) {
     for (DenseState* st = first; st != last; ++st) {
-        uint64_t i = st->pos;
-        uint64_t qp = st->qw >> 6;
-        uint32_t j = st->qw & 7;
-        cross_off<PR>(s, end, qp, i, j);
-        st->qw = static_cast<uint32_t>((qp << 6) | (PR << 3) | j);
-        st->pos = static_cast<uint32_t>(i - rebase);
+        const uint64_t qw = st->qw;
+        // The base is signed (small_state): sign-extended from its 32 bits.
+        const auto b = static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(st->pos)));
+        const SmallPending r = cross_off<PR>(s, end, qw >> 6, b, qw & 7);
+        st->qw = static_cast<uint32_t>((qw & ~uint64_t{7}) | r.j);
+        st->pos = static_cast<uint32_t>(r.b - rebase);
     }
 }
 
