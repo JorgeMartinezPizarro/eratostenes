@@ -108,10 +108,11 @@ What is in the code today, by the day it went in:
   [re-tested](#pre-sieve-past-163-re-tested-on-todays-fill-one-table-per-prime-and-a-regrouping-measured-2026-10-14):
   163 stays; `benchmark_ab.sh` takes N up to 2^64.
 - **2026-11-16**: the small tier's [per-call instructions](#small-tier-the-cycle-base-as-state-the-kernel-inlined-a-check-free-entry-cycle-kept-2026-11-16)
-  (cycle base as state, kernel inlined, check-free entry cycle): -6..-7% instructions and
-  -4.1..-4.5% wall at 1e12 (-1.7..-2.6% at 1e15) on the i7-620M and i7-4770HQ; med64's
+  (cycle base as state, kernel inlined, the entry cycle through the unrolled loop) and med64's
   re-filed entry [as one 64-bit word](#med64-the-re-filed-entry-built-as-one-64-bit-word-kept-2026-11-16):
-  -4% instructions at 1e12, ties at 1e15.
+  with the fans at max, -11.3..-12.6% instructions and -4.5..-7.1% wall at 1e12, -2.8..-4.3%
+  at 1e15 on the i7-620M and i7-4770HQ, -3.8% / -1.6% wall on the i5-1235U; the full 1e11 count
+  on the 4770HQ at 90.4G instructions, primesieve 87.7G (was 108.1G).
 
 ## Contents
 
@@ -447,7 +448,7 @@ stack-protector canary), and the chains reloaded spilled offsets and set `j` bef
 Most small primes cross a 16-24 KiB sub-block in a few cycles, so that per-call work was half
 the tier.
 
-Two steps, each A/B'd on the three machines (last 1e11 below N, 3 interleaved pairs, medians;
+Three steps, each A/B'd on the three machines (last 1e11 below N, 3 interleaved pairs, medians;
 the 1235U is hybrid, so wall time only):
 
 1. **The cycle base as state.** `DenseState::pos` holds the base of the pending hit's cycle
@@ -455,28 +456,49 @@ the 1235U is hybrid, so wall time only):
    `small_offset` once at activation, and `cross_off` returns `{b, j}` in two registers, each
    exit with its own phase: no offset table, no pointer arguments. On the 4770HQ the full 1e11
    count went from 108.1G to 100.4G instructions.
-2. **A check-free entry cycle and the kernel inlined** into `cross_off_class`'s loop
-   (`ERA_SMALL_FAST_ENTRY`, `ERA_SMALL_INLINE`): when the rest of the entry cycle lies before
-   `end` (the usual case) its hits go without checks, and no call or register saves per prime.
+2. **A check-free entry cycle and the kernel inlined** into `cross_off_class`'s loop: when the
+   rest of the entry cycle lies before `end` (the usual case) its hits go without checks, and
+   no call or register saves per prime. Alone, on the 4770HQ, each half was a wash (the
+   check-free entry -1.1% instructions for cycles +0.01%; inlining -1.4% wall at 1e12, +0.7% at
+   1e15); together they paid on all three.
+3. **The loop's address registers written out, the entry through the loop.** GCC's own loop
+   reaches the 8 hits from three bases moving by p (q = s + b, q + 6qp, q + 10qp) and two
+   fixed indices (6qp, 12qp), one `or` each; step 2's separate entry switch couldn't share them
+   and reloaded four spilled offsets per hit (16% of the tier's instructions, against 56% in
+   the loop). Written out in the source, with the switch entering the unrolled loop itself
+   (Duff's device), the entry cycle costs what the loop does. The same Duff entry on the
+   plain code made GCC drop the bases and recompute the step with an `imul` per cycle (~21
+   instructions per 8 hits against 14): not measured.
 
-| machine | N | step 1: instr / cycles / wall | step 2 (vs 1): instr / cycles / wall |
+Steps 1 and 2 were first measured with the Macs' fans on auto: the 4770HQ reached 97 °C and the
+620M 103 °C, both throttling (111k and 52k throttle events), so only their instruction counts
+(-4.2% / -3.1% at 1e12 for step 1, -3.2% / -3.0% for step 2) are worth keeping. Re-measured
+with the fans forced to max (`ventiladores-max`, no throttle event during the A/Bs; the first
+column includes med64's packed entry, next entry):
+
+| machine | N | 4fd47d4 -> steps 1-2: instr / cycles / wall | step 3 (vs 1-2): instr / cycles / wall |
 |---|---|---:|---:|
-| i7-4770HQ | 1e12 | -4.20% / -2.30% / -3.60% | -3.17% / -1.05% / -0.89% |
-| i7-4770HQ | 1e15 | -2.43% / -1.07% / -1.14% | -1.80% / -0.32% / -0.55% |
-| i7-620M | 1e12 | -3.11% / -3.39% / -2.59% | -3.03% / -1.38% / -1.56% |
-| i7-620M | 1e15 | -1.78% / -1.18% / -1.65% | -1.71% / -1.76% / -1.00% |
-| i5-1235U | 1e12 | wall -1.60% | wall -0.13% |
-| i5-1235U | 1e15 | wall -0.29% | wall -1.21% |
+| i7-4770HQ | 1e12 | -11.03% / -4.14% / -4.55% | -1.73% / -0.08% / +0.01% |
+| i7-4770HQ | 1e15 | -5.63% / -2.00% / -2.06% | -0.94% / -0.76% / -0.71% |
+| i7-620M | 1e12 | -9.76% / -6.06% / -5.66% | -1.72% / -2.34% / -1.49% |
+| i7-620M | 1e15 | -4.84% / -2.29% / -3.24% | -0.93% / -1.17% / -1.11% |
+| i5-1235U | 1e12 | wall -3.28% | wall -0.55% |
+| i5-1235U | 1e15 | wall -1.26% | wall -0.34% |
 
-Step 1 was below the old code in every pair on the Macs (cycles) and in wall time on the 1235U
-at 1e12. Step 2's halves alone, 4770HQ: the check-free entry cut 1.1% / 0.6% of the
-instructions for cycles +0.01% / -0.17% and wall +0.5% / +0.3%; inlining alone 1e12 -1.4% wall,
-1e15 +0.7%. Together they paid on all three, so both are on (the knobs build the step-1 kernel
-for an A/B). On Nehalem cycles fell about as much as instructions; on the wider cores about half.
-After both steps the small tier still runs ~1.7x EratSmall's instructions: primesieve crosses off
-in whole-L1d chunks (half as many calls as our half-L1d sub-block under SMT) and its
-per-prime state is the running hit pointer. **Pending:** the dev PC (Rocket Lake) and the server
-(Golden Cove), where the small tier sits at one store per core-cycle
+The first column: every new run below every old one, on the Macs in cycles and wall, on the
+1235U in wall. Step 3: every pair below on the 620M, a tie to -0.8% on the other two, never
+above; kept. The A/B knobs of the three steps are gone: compare against 4fd47d4. Also tried:
+the small tier's state written back as one 64-bit word (the med64 trick below): +0.03%
+instructions, GCC's vector path there was already three instructions; dropped. On Nehalem
+cycles fall about as much as instructions; on the wider cores about half.
+
+After the three steps the full 1e11 count on the 4770HQ runs 90.4G instructions against
+primesieve's 87.7G (was 108.1G); the small tier 39.0G against EratSmall's 26.9G (1.45x), med64
+45.2G against EratMedium's 50.3G. What is left of the small tier's excess is the number of
+calls: primesieve crosses off in whole-L1d chunks, our sub-block is half the L1d under SMT,
+and our small cutoff is 1/2 of it on these 256 KiB-L2 cores (primes to ~8.2K against
+EratSmall's ~5.7K), sizes tuned for cycles. **Pending:** the dev PC (Rocket Lake) and the
+server (Golden Cove), where the small tier sits at one store per core-cycle
 ([above](#small-and-med64-on-golden-cove-one-store-per-core-cycle-med64-waits-on-fill-buffers-measured-2026-10-11)).
 
 ### med64: the re-filed entry built as one 64-bit word (kept, 2026-11-16)
@@ -484,8 +506,10 @@ per-prime state is the running hit pointer. **Pending:** the dev PC (Rocket Lake
 The same histogram on `process_med64<0>` (4770HQ, 1e11) left ~15% of med64's instructions in the
 per-call entry and exit (~20 + ~22 instructions per call against 4 per hit). Part of the exit:
 GCC built the `{qw, pos}` pair for `push_back` through vector registers (`vmovd`, `vpinsrd`,
-`vmovq`). `ERA_M64_PACK` builds it as `((qp << 6) | w) | ((i - bytes_needed) << 32)` and stores
-it with one `mov`. A/B against the small-tier change above, last 1e11 below N, medians:
+`vmovq`). Built as `((qp << 6) | w) | ((i - bytes_needed) << 32)` it goes out with one `mov`.
+A/B against small-tier steps 1-2 above, last 1e11 below N, medians; the Macs' fans were on
+auto and the CPUs throttling, so their cycles and wall are approximate (the instructions are
+exact, and the fans-at-max A/B above includes this change):
 
 | machine | N | pairs | instr | cycles | wall |
 |---|---|---:|---:|---:|---:|
@@ -497,7 +521,7 @@ it with one `mov`. A/B against the small-tier change above, last 1e11 below N, m
 | i5-1235U | 1e15 | 5 | hybrid | | -0.51% |
 
 1e12 below the old code in every pair (4770HQ and 620M in cycles, 1235U in wall), 1e15 a tie on
-the wider cores; kept, default on. The cut is larger than the packing alone: `process_med64<0>`
+the wider cores; kept (its knob since removed). The cut is larger than the packing alone: `process_med64<0>`
 went from 637 to 539 instructions of code, `bytes_needed` no longer spilled to the stack and the
 per-entry decode 2 instructions shorter. The earlier, larger
 attempts at med64's per-call work

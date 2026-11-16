@@ -22,13 +22,6 @@
 #include "wheel.hpp"
 #include "wheel210_big.hpp"
 
-// med64 re-files its entry as one 64-bit word built with integer ops, on by
-// default (docs/RESEARCH.md, 2026-11-16); make variant DEFS=-DERA_M64_PACK=0
-// builds the two-field push_back for an A/B.
-#ifndef ERA_M64_PACK
-#define ERA_M64_PACK 1
-#endif
-
 // The widest segment the tiers' packed state supports: 16 MiB, the sparse
 // entry's 24-bit byte position (SparseTier). tuning.hpp keeps every
 // segment within it.
@@ -313,17 +306,13 @@ private:
                 uint64_t qp = st.qw >> 6;
                 uint32_t ww = st.qw & 63;
                 erat::cross_off_checked210<PR>(bytes, bytes_needed, qp, i, ww);
-#if ERA_M64_PACK
                 // The entry built as one 64-bit word (qw low, pos high): GCC
-                // packs the two 32-bit fields through vector registers otherwise.
+                // packs the two 32-bit fields through vector registers
+                // otherwise (docs/RESEARCH.md#med64-the-re-filed-entry-built-as-one-64-bit-word-kept-2026-11-16).
                 const uint64_t packed = ((qp << 6) | ww) | ((i - bytes_needed) << 32);
                 erat::DenseState e;
                 std::memcpy(&e, &packed, sizeof(e));
                 m64_nxt_[PR * 48 + ww].push_back(e);
-#else
-                m64_nxt_[PR * 48 + ww].push_back(
-                    {static_cast<uint32_t>((qp << 6) | ww), static_cast<uint32_t>(i - bytes_needed)});
-#endif
             }
         }
     }

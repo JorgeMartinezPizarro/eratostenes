@@ -24,28 +24,6 @@
 #include "wheel.hpp"
 #include "wheel210_big.hpp"
 
-// Two ways of cutting the small tier's per-call instructions, on by
-// default; they only paid together (docs/RESEARCH.md, 2026-11-16), and
-// make variant DEFS="-DERA_SMALL_FAST_ENTRY=0 -DERA_SMALL_INLINE=0" builds
-// without them for an A/B.
-// ERA_SMALL_FAST_ENTRY: cross_off enters its first cycle without per-hit
-// checks when the whole rest of that cycle is below `end`.
-#ifndef ERA_SMALL_FAST_ENTRY
-#define ERA_SMALL_FAST_ENTRY 1
-#endif
-// ERA_SMALL_INLINE: cross_off inlined into its class loop, which goes out of
-// line instead (no call, no register saves per prime).
-#ifndef ERA_SMALL_INLINE
-#define ERA_SMALL_INLINE 1
-#endif
-#if ERA_SMALL_INLINE
-#define ERA_SMALL_KERNEL __attribute__((always_inline)) inline
-#define ERA_SMALL_CLASS __attribute__((noinline))
-#else
-#define ERA_SMALL_KERNEL __attribute__((noinline))
-#define ERA_SMALL_CLASS inline
-#endif
-
 namespace erat {
 
 // The mod-30 residues; C and M give the byte offset and bit mask of the
@@ -100,100 +78,98 @@ struct SmallPending {
 };
 
 // Small tier: crosses off p = 30*qp + R[PR] in s[0, end), from the pending
-// hit at phase j of the cycle based at byte b (the hit is at b + o_j); returns
-// the first hit at or past `end` the same way. A switch enters the cycle at
-// phase j, the unchecked loop runs whole cycles, a checked chain leaves at
-// `end`. The state is the cycle base, not the hit's byte, so neither entry
-// nor exit needs o_j by index (an 8-entry table on the stack, rebuilt per
-// call); each exit returns its own phase. b may be "negative" (wrapped) when
-// the pending hit is early in its cycle: it's only ever used in sums b + o_j,
-// exact mod 2^64. Inlined into cross_off_class's loop over the primes
-// (ERA_SMALL_INLINE). The locals are uint64_t on purpose (uint32_t is
-// slower, docs/RESEARCH.md).
+// hit at phase j of the cycle based at byte b; returns the first hit at or
+// past `end` the same way. The phase-j hit is at b + o_j, o_j = qp*(R[j]-1) +
+// C(PR, j), and R[j] - 1 = 0, 6, 10, 12, 16, 18, 22, 28 for every class: three
+// bases moving by p per cycle (q = s + b, q + 6qp, q + 10qp) and two fixed
+// indices (6qp, 12qp) reach all 8 hits as base + index + constant, one `or`
+// each -- the address registers GCC's own strength reduction picks for this
+// loop, written out so the entry can share them. When the rest of the entry
+// cycle lies before `end` (the usual case: p is a fraction of the
+// sub-block), the switch enters the unrolled loop itself at phase j (Duff's
+// device); otherwise a checked chain returns within that cycle. After the
+// loop a checked chain leaves at `end`.
+//
+// The state is the cycle base, not the hit's byte, so no o_j is ever looked
+// up by phase; b may be "negative" (wrapped) when the pending hit is early in
+// its cycle, and is only ever used in sums, exact mod 2^64. Inlined into
+// cross_off_class's loop over a class's primes: no call per prime. Most small
+// primes cross a sub-block in a few cycles, so the entry and exit are a large
+// share of the tier: docs/RESEARCH.md#small-tier-the-cycle-base-as-state-the-kernel-inlined-a-check-free-entry-cycle-kept-2026-11-16.
 template <int PR>
-ERA_SMALL_KERNEL SmallPending cross_off(uint8_t* s, uint64_t end, uint64_t qp, uint64_t b, uint64_t j) {
+__attribute__((always_inline)) inline SmallPending cross_off(uint8_t* s, uint64_t end, uint64_t qp, uint64_t b, uint64_t j) {
     const uint64_t p = 30 * qp + R[PR];
-    const uint64_t o0 = C(PR, 0);
-    const uint64_t o1 = qp * (R[1] - 1) + C(PR, 1);
-    const uint64_t o2 = qp * (R[2] - 1) + C(PR, 2);
-    const uint64_t o3 = qp * (R[3] - 1) + C(PR, 3);
-    const uint64_t o4 = qp * (R[4] - 1) + C(PR, 4);
-    const uint64_t o5 = qp * (R[5] - 1) + C(PR, 5);
-    const uint64_t o6 = qp * (R[6] - 1) + C(PR, 6);
-    const uint64_t o7 = qp * (R[7] - 1) + C(PR, 7);
+    const uint64_t q6 = qp * 6, q12 = qp * 12;
+    const uint64_t o7 = qp * 28 + C(PR, 7);
+    const uintptr_t sa = reinterpret_cast<uintptr_t>(s);
+    const uintptr_t se = sa + end;
+    uintptr_t q = sa + b, a6 = q + q6, a10 = q + qp * 10;
+#define ERAT_A0 (q + C(PR, 0))
+#define ERAT_A1 (a6 + C(PR, 1))
+#define ERAT_A2 (a10 + C(PR, 2))
+#define ERAT_A3 (a6 + q6 + C(PR, 3))
+#define ERAT_A4 (a10 + q6 + C(PR, 4))
+#define ERAT_A5 (a6 + q12 + C(PR, 5))
+#define ERAT_A6 (a10 + q12 + C(PR, 6))
+#define ERAT_A7 (q + o7)
+#define ERAT_MARK(J) *reinterpret_cast<uint8_t*>(ERAT_A##J) |= M(PR, J)
+#define ERAT_CHK(J) \
+    if (ERAT_A##J >= se) return {q - sa, J}; \
+    ERAT_MARK(J);
 
-#define ERAT_HIT(J) \
-    if (b + o##J >= end) return {b, J}; \
-    s[b + o##J] |= M(PR, J);
-
-#if ERA_SMALL_FAST_ENTRY
-    // The rest of the entry cycle almost always fits (p is a fraction of
-    // the sub-block): then its hits need no check each.
-    if (b + o7 < end) [[likely]] {
+    // q < lim: hit 7 of the cycle based at q is before `end`. No wrap: s is
+    // far from 0 and every base within a cycle of the range.
+    const uintptr_t lim = se - o7;
+    if (q < lim) [[likely]] {
         switch (j) {
-            case 0: s[b + o0] |= M(PR, 0); [[fallthrough]];
-            case 1: s[b + o1] |= M(PR, 1); [[fallthrough]];
-            case 2: s[b + o2] |= M(PR, 2); [[fallthrough]];
-            case 3: s[b + o3] |= M(PR, 3); [[fallthrough]];
-            case 4: s[b + o4] |= M(PR, 4); [[fallthrough]];
-            case 5: s[b + o5] |= M(PR, 5); [[fallthrough]];
-            case 6: s[b + o6] |= M(PR, 6); [[fallthrough]];
-            case 7: s[b + o7] |= M(PR, 7); break;
             default: __builtin_unreachable();
+            for (;;) {
+                case 0: ERAT_MARK(0); [[fallthrough]];
+                case 1: ERAT_MARK(1); [[fallthrough]];
+                case 2: ERAT_MARK(2); [[fallthrough]];
+                case 3: ERAT_MARK(3); [[fallthrough]];
+                case 4: ERAT_MARK(4); [[fallthrough]];
+                case 5: ERAT_MARK(5); [[fallthrough]];
+                case 6: ERAT_MARK(6); [[fallthrough]];
+                case 7: ERAT_MARK(7);
+                q += p;
+                a6 += p;
+                a10 += p;
+                if (q >= lim) break;
+            }
         }
-        b += p;
     } else {
         // Hit 7 is past `end`, so this chain returns before its end.
         switch (j) {
-            case 0: ERAT_HIT(0) [[fallthrough]];
-            case 1: ERAT_HIT(1) [[fallthrough]];
-            case 2: ERAT_HIT(2) [[fallthrough]];
-            case 3: ERAT_HIT(3) [[fallthrough]];
-            case 4: ERAT_HIT(4) [[fallthrough]];
-            case 5: ERAT_HIT(5) [[fallthrough]];
-            case 6: ERAT_HIT(6) [[fallthrough]];
-            case 7: return {b, 7};
+            case 0: ERAT_CHK(0) [[fallthrough]];
+            case 1: ERAT_CHK(1) [[fallthrough]];
+            case 2: ERAT_CHK(2) [[fallthrough]];
+            case 3: ERAT_CHK(3) [[fallthrough]];
+            case 4: ERAT_CHK(4) [[fallthrough]];
+            case 5: ERAT_CHK(5) [[fallthrough]];
+            case 6: ERAT_CHK(6) [[fallthrough]];
+            case 7: return {q - sa, 7};
             default: __builtin_unreachable();
         }
     }
-#else
-    switch (j) {
-        case 0: ERAT_HIT(0) [[fallthrough]];
-        case 1: ERAT_HIT(1) [[fallthrough]];
-        case 2: ERAT_HIT(2) [[fallthrough]];
-        case 3: ERAT_HIT(3) [[fallthrough]];
-        case 4: ERAT_HIT(4) [[fallthrough]];
-        case 5: ERAT_HIT(5) [[fallthrough]];
-        case 6: ERAT_HIT(6) [[fallthrough]];
-        case 7: ERAT_HIT(7)
-            b += p;
-            break;
-        default: __builtin_unreachable();
-    }
-#endif
-
-    // Offsets grow with j, so b + o7 < end means the whole cycle fits.
-    while (b + o7 < end) {
-        s[b + o0] |= M(PR, 0);
-        s[b + o1] |= M(PR, 1);
-        s[b + o2] |= M(PR, 2);
-        s[b + o3] |= M(PR, 3);
-        s[b + o4] |= M(PR, 4);
-        s[b + o5] |= M(PR, 5);
-        s[b + o6] |= M(PR, 6);
-        s[b + o7] |= M(PR, 7);
-        b += p;
-    }
-
-    ERAT_HIT(0)
-    ERAT_HIT(1)
-    ERAT_HIT(2)
-    ERAT_HIT(3)
-    ERAT_HIT(4)
-    ERAT_HIT(5)
-    ERAT_HIT(6)
-#undef ERAT_HIT
-    return {b, 7}; // b + o7 >= end is already known from the loop exit
+    ERAT_CHK(0)
+    ERAT_CHK(1)
+    ERAT_CHK(2)
+    ERAT_CHK(3)
+    ERAT_CHK(4)
+    ERAT_CHK(5)
+    ERAT_CHK(6)
+#undef ERAT_CHK
+#undef ERAT_MARK
+#undef ERAT_A0
+#undef ERAT_A1
+#undef ERAT_A2
+#undef ERAT_A3
+#undef ERAT_A4
+#undef ERAT_A5
+#undef ERAT_A6
+#undef ERAT_A7
+    return {q - sa, 7}; // hit 7 is past `end` from the loop exit
 }
 
 // med64 tier: same contract as cross_off, EratMedium's loop shape -- a
@@ -250,9 +226,10 @@ done:
 // s[0, end), then rebases each pending cycle base by `rebase` bytes (the
 // segment's byte width on its last pass over a segment, 0 otherwise). One
 // list per class (see SegmentSieve::small_) so the class dispatch happens
-// once per list, not as an unpredictable switch per prime.
+// once per list, not as an unpredictable switch per prime. Out of line,
+// with cross_off inlined into it.
 template <int PR>
-ERA_SMALL_CLASS void cross_off_class(uint8_t* s, uint64_t end, DenseState* first, DenseState* last, uint64_t rebase) {
+__attribute__((noinline)) void cross_off_class(uint8_t* s, uint64_t end, DenseState* first, DenseState* last, uint64_t rebase) {
     for (DenseState* st = first; st != last; ++st) {
         const uint64_t qw = st->qw;
         // The base is signed (small_state): sign-extended from its 32 bits.

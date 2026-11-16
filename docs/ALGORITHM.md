@@ -174,14 +174,17 @@ sparse, then extraction.
   one multiplier cycle covers exactly `p` bytes and its 8 hits sit at fixed
   offsets `qp*(R[j]-1) + C[PR][j]` with fixed bit masks `M[PR][j]`, all
   compile-time constants once the residue class `PR` is a template parameter.
-  That's under 2 instructions per hit (mostly `or byte [base+offset], mask`). A switch
-  enters the cycle at the pending hit's phase (with no per-hit check when the
-  rest of that cycle lies before `end`, the usual case) and a checked chain leaves
-  it at `end`. Each prime's state keeps the base of its pending cycle rather than
-  the hit's byte, so neither entry nor exit looks an offset up by phase, and the
-  kernel is inlined into the loop over a class's primes: most small primes cross a
-  sub-block in a few cycles, so the per-prime entry and exit are a large share of
-  the tier's instructions. One list per residue class (`small_[8]`) keeps `PR` a
+  Three base pointers moving by `p` per cycle (the cycle base, +6qp, +10qp) and two
+  fixed indices (6qp, 12qp) reach all 8 hits as base + index + constant, so each
+  hit is one `or byte [base+index+c], mask`, plus three adds and a compare per
+  cycle. When the rest of the pending cycle lies before `end` (the usual case) a
+  switch enters that unrolled loop itself at the pending hit's phase (Duff's
+  device); otherwise a checked chain returns within the cycle, and a checked
+  chain leaves the loop at `end`. Each prime's state keeps the base of its
+  pending cycle rather than the hit's byte, so neither entry nor exit looks an
+  offset up by phase, and the kernel is inlined into the loop over a class's
+  primes: most small primes cross a sub-block in a few cycles, so the per-prime
+  entry and exit are a large share of the tier's instructions. One list per residue class (`small_[8]`) keeps `PR` a
   template parameter instead of a per-prime branch. Pending cycles are rebased
   once, at the segment's last sub-block.
 - **med64** (`small_limit <= p < med64_limit`): byte marking over the whole
