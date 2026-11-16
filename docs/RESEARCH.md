@@ -528,6 +528,44 @@ attempts at med64's per-call work
 ([re-filing without `push_back`](#med64-re-filing-without-stdvectorpush_back-tried-reverted-2026-09-29))
 cost code size; this one is shorter.
 
+### Small cutoff re-swept with the cheaper small tier: the whole sub-block on E-core-majority runs (kept, 2026-11-16)
+
+The small/med64 cutoffs were set when a small-tier call cost ~2x what it costs after the
+[changes above](#small-tier-the-cycle-base-as-state-the-kernel-inlined-a-check-free-entry-cycle-kept-2026-11-16),
+so `--tune small` was swept again (last 1e11 below 1e12 unless noted, interleaved rounds,
+medians against the auto cutoff; Macs with the fans at max):
+
+| machine (threads) | auto | 1/8 | 1/4 | 1/2 | 3/4 | 1/1 |
+|---|---|---:|---:|---:|---:|---:|
+| i7-4770HQ (8), cycles | 1/2 | +10.5% | +3.7% | -0.5% | -1.4% | -0.6% |
+| i7-620M (4), cycles | 1/2 | +6.4% | +1.8% | -0.4% | +0.3% | +1.3% |
+| i5-11400F (12, WSL), cycles | 1/4 | | | +1.8% | +5.3% | +8.9% |
+| i5-1235U (12), wall | 1/4 | +5.8% | -0.9% | -6.5% | -8.7% | -9.0% |
+
+(the auto and the explicit equal cutoff differ by up to 0.9%: the noise floor.) The 1235U then
+in `make benchmark-ab`, 4 pairs, wall: 1/1 -7.9% / -6.8% / -2.7% at 1e12 / 1e13 / 1e15, every
+run below; 3/4 to 2/1 within 1% of each other. The user's i5-13500 (20 threads), same A/B:
+1/1 **+2.4% / +2.2% / +2.2%**, no pair below. Both are Golden Cove + Gracemont hybrids, so the
+1235U pinned to one core type, auto against 1/1:
+
+| i5-1235U pinned to | auto (1/4) | 1/1 |
+|---|---:|---:|
+| P-cores 0-3 (Golden Cove, 4 threads) | 7.367 s | **+9.85%** |
+| E-cores 4-11 (Gracemont, 8 threads) | 8.855 s | **-26.28%** |
+
+Gracemont pays far more for med64's L1 miss on every hit than for the small tier's calls;
+the big cores the other way round. The 1235U runs 8 of its 12 threads on E-cores and gains,
+the i5-13500 8 of 20 and loses. Also measured: the whole-L1d sub-block under SMT on the Macs,
++16% (620M) and +26..+31% (4770HQ): that rule stands.
+
+**Rule (kept):** `small_limit` = the whole sub-block when more than half the run's threads land
+on the CPUs with the smaller L1d (a hybrid's E-cores), counting threads as Linux places them:
+one per big core first, then the E-cores, then the big cores' SMT siblings. The 1235U: 8 of 12
+threads (on), 6 of 8 at `-t 8` (on), 2 of 4 at `-t 4` (off); the i5-13500 at 20 threads: 8 of
+20 (off). Startup line `small cutoff: the whole sub-block (8 of 12 threads on the E-cores)`;
+`--tune small` overrides. Other machines unchanged: the 256 KiB-L2 cores keep 1/2, the rest
+1/4. Not covered: an E-core-only CPU (N100: one L1d size, nothing to tell it apart by cache).
+
 ## Medium tier
 
 `cross_off_medium` takes the primes above the med64 band (p >= seg_k_width / 6 by default; with at
