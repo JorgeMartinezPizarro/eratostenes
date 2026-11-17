@@ -1222,6 +1222,52 @@ below N, dev PC, two runs each: 1e18 1.23-1.39 -> 0.29 s on one thread (primesie
 the rest is the activation's walk over 203M base primes. Last 1e11 below 1e18, cycles:u ABBA at 12
 threads: -0.4% (overlapping). `make test` 115/115.
 
+### Top tails against primesieve on the laptops: profile, sub-block, sparse cutoff, `ERA_ACT_IDX` on Haswell (measured, 2026-11-17)
+
+`perf record -e cycles:u`, all threads, fc05362 built with `-g` against primesieve 12.18, last 1e11
+below 1e13 (t13) and 1e18 (t18), the Macs' fans at max. Totals and the tiers grouped, G cycles:
+
+| | i7-4770HQ t13 | i7-4770HQ t18 | i7-620M t13 | i7-620M t18 |
+|---|---:|---:|---:|---:|
+| total, eratostenes / primesieve | 224 / 298 | 465 / 514 | 293 / 326 | 593 / 619 |
+| `process_big` + `activate` / EratBig | 34 / 81 | 240 + 37 / 316 | 42 / 113 | 309 + 25 / 410 |
+| small + med64 / EratSmall + EratMedium | 178 / 205 | 179 / 159 | 233 / 194 | 238 / 170 |
+| pre-sieve | 7.9 / 6.8 | 8.0 / 5.0 | 15.6 / 13.0 | 17.2 / 13.4 |
+
+- The sparse tier wins at both heights; at the 1e18 tail it is half our cycles.
+- Up top the dense tiers lose: ours cost the same at both heights, primesieve's 12-22% less at t18
+  (not isolated). On these 256 KiB-L2 cores med64 takes the whole segment, so it carries primes up
+  to ~1.3M (99,758 med64 primes at the 1e18 tail on the 4770HQ) that primesieve gives to EratBig
+  (its EratMedium stops at 3x its 128 KiB sieve, ~393K).
+- Activation costs about what primesieve's does: `activate` 37.1G / 24.5G (4770HQ / 620M) against
+  `storeSievingPrime`'s 14.8G / 8.4G, but primesieve's division (`addSievingPrime`) is inlined into
+  `CountPrintPrimes::sieve` (28.6G / 19.5G with the counting). 4770HQ: 38.9 ns per prime
+  (`--debug-idle`, 8 workers, no steals); of `activate`'s samples 25% wait on the `div` and 27% on
+  the push (7% the `tail_[slot]` load, 19% the store into the slot's tail line).
+- `process_big`'s instruction histogram (i5-1235U, t18) is flat: no instruction above 7% of its
+  samples, the largest the loads of the entries 16 ahead for the segment prefetch.
+
+Knobs, same windows, interleaved rounds, wall medians against the auto (noise floor ~0.9%; 3 rounds
+for the first three rows and the 1235U, 4 for the rest):
+
+| knob | 4770HQ 1e18 | 1e15 | 1e13 | 620M 1e18 | 1e15 | 1e13 | 1235U 1e18 | 1e15 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `subblock=1/1` | +7.6% | +13.5% | -- | +3.8% | +6.2% | -- | +7.8% | +17.0% |
+| `sparse=1/1` | +1.4% | +2.0% | -- | +1.6% | +1.9% | -- | +0.1% | +1.5% |
+| `sparse=3/4` | +0.4% | +0.3% | -- | +0.2% | +0.1% | -- | -0.7% | +0.9% |
+| `sparse=1/2` | -0.6% | -0.6% | -0.2% | -0.2% | -0.8% | -1.7% | +0.3% | +0.1% |
+| `sparse=3/8` | -0.5% | +0.1% | +0.6% | -0.7% | -0.9% | -2.7% | -- | -- |
+| `sparse=1/4` | +0.3% | +1.4% | +2.4% | -0.8% | -0.5% | -1.8% | -- | -- |
+
+- The half-L1d sub-block under SMT holds at the tails too.
+- 5/8 stays on the 1235U (everything inside its hybrid noise). On the Macs every 1/2 point is below
+  the auto, the 3-round sweep agreeing at 1e18 / 1e15 (-0.2 / -0.2% and -0.8 / -0.6%), but only the
+  620M's 1e13 by more than the noise floor; the 620M is best at 3/8, the 4770HQ at 1/2. Not adopted:
+  a "256 KiB L2 or less: 1/2 in the sparse regime" rule would reach only the SMT Macs (the i5-3470
+  already gets 1/2 from its L3 gate, 6 MiB over 4 threads) for ~0.5%.
+- `-DERA_ACT_IDX=0` on the 4770HQ (Haswell), 3 pairs at the 1e17 / 1e18 tails: instructions
+  +0.24 / +0.61%, cycles -0.06 / +0.43%, wall +0.10 / +0.52%. The BMI2 gate is right on Haswell.
+
 ## Segment and sub-block sizing
 
 `plan_sieve` (src/tuning.hpp) derives every width from sysfs. The base segment is half of
@@ -1609,7 +1655,12 @@ From 1e16 primesieve gains less (8-11%), and at the 1e17-1e18 tails eratostenes 
 0.04 more than at 65 W. Something in primesieve's top tails does not scale with the core
 clock; not profiled. The i5-1235U's tails moved the same way when it went from 15 W to
 28 W (2026-11-15), but the code changed between those rounds too, so that one is not a
-clean comparison. BENCHMARK.md's i5-13500 tables are the 95 W round.
+clean comparison.
+
+BENCHMARK.md's i5-13500 tables are a later REPS=3 round at PL1 100 W against primesieve 12.18
+(2026-11-17, clock 3.9-4.0 GHz). The 95 W round above ran against the server's older 12.7,
+which tied 12.18 within 0.5% at the 1e9 and 1e10 ceiling windows. From 95 to 100 W every row
+moved by 2.5% or less, in both programs, and every ratio by at most 0.01.
 
 ### `--start`: the start itself was dropped when its wheel index was 63 mod 64 (bug, fixed 2026-10-05)
 
@@ -1915,7 +1966,9 @@ Where the time still goes, and what nothing measured so far has fixed:
   work away from the 64-bit division costs Ivy Bridge ~35 cycles per prime;
   hence `ERA_ACT_IDX` only with BMI2
   ([entry](#activation-at-the-top-of-n-on-old-cores-83-ns-per-prime-on-nehalem-two-flags-to-split-it-open-2026-10-04)).
-  Haswell..Skylake were never measured for that gate.
+  Haswell gains from it, so the gate is right there
+  ([entry](#top-tails-against-primesieve-on-the-laptops-profile-sub-block-sparse-cutoff-era_act_idx-on-haswell-measured-2026-11-17));
+  Skylake was never measured.
 - **1e10-1e11 full counts on the 2-vCPU VMs** stay at 1.03-1.10x primesieve.
   `--tune small=1/2` helps Emerald Rapids by 3% and hurts the dev PC (Rocket
   Lake): per microarchitecture, so it stays a manual `--tune`.

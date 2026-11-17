@@ -129,22 +129,22 @@ What this project is built from, one term each — follow the link for the conce
 
 | N | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
-| 1e10 | 0.123s | 0.139s | 0.88x |
-| 1e11 | 1.541s | 1.846s | 0.83x |
-| 1e12 | 18.920s | 21.877s | 0.86x |
-| 1e13 | 236.621s | 253.611s | 0.93x |
-| 1e14 | 3263.201s | 3370.929s | 0.97x |
+| 1e10 | 0.120s | 0.137s | 0.88x |
+| 1e11 | 1.521s | 1.800s | 0.84x |
+| 1e12 | 18.728s | 21.482s | 0.87x |
+| 1e13 | 234.613s | 251.793s | 0.93x |
+| 1e14 | 2774.358s | 2875.790s | 0.96x |
 | 1e15 | 38207.677s | 39053.581s | 0.98x |
 
 At the top of the 64-bit range, counting only the last numbers below 18446744004990074879 = 2^64 − 2^36 − 1, the largest N eratostenes takes (`make benchmark-tails`):
 
 | window | eratostenes | primesieve | ratio |
 |---|---:|---:|---:|
-| 1e9 | 1.835s | 2.157s | 0.85x |
-| 1e10 | 2.920s | 4.179s | 0.70x |
-| 1e11 | 10.760s | 13.355s | 0.81x |
-| 1e12 | 73.721s | 85.073s | 0.87x |
-| 1e13 | 677.302s | 782.082s | 0.87x |
+| 1e9 | 1.706s | 2.172s | 0.79x |
+| 1e10 | 2.457s | 3.659s | 0.67x |
+| 1e11 | 9.648s | 11.754s | 0.82x |
+| 1e12 | 66.122s | 77.517s | 0.85x |
+| 1e13 | 612.648s | 717.515s | 0.85x |
 
 For more machines and results, see: [docs/BENCHMARK.md](docs/BENCHMARK.md).
 
