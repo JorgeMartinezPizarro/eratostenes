@@ -1662,6 +1662,10 @@ BENCHMARK.md's i5-13500 tables are a later REPS=3 round at PL1 100 W against pri
 which tied 12.18 within 0.5% at the 1e9 and 1e10 ceiling windows. From 95 to 100 W every row
 moved by 2.5% or less, in both programs, and every ratio by at most 0.01.
 
+The README's full 1e15 count is a single run at 100 W against 12.18 (2026-11-18): 31305.756 s
+against 32500.682 s, 0.96x. The row it replaced (38207.677 / 39053.581 s, 0.98x) ran at 65 W on
+an older build, so its -18.1% / -16.8% mixes power and code; not a clean comparison.
+
 ### `--start`: the start itself was dropped when its wheel index was 63 mod 64 (bug, fixed 2026-10-05)
 
 `split_ranges` rounded `wheel_count_upto(start)`, the index *above* start, so a start at
