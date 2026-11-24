@@ -113,6 +113,11 @@ What is in the code today, by the day it went in:
   with the fans at max, -11.3..-12.6% instructions and -4.5..-7.1% wall at 1e12, -2.8..-4.3%
   at 1e15 on the i7-620M and i7-4770HQ, -3.8% / -1.6% wall on the i5-1235U; the full 1e11 count
   on the 4770HQ at 90.4G instructions, primesieve 87.7G (was 108.1G).
+- **2026-11-24**: the small tier's three steps [on Rocket Lake](#small-tier-the-cycle-base-as-state-the-kernel-inlined-a-check-free-entry-cycle-kept-2026-11-16):
+  -3.4% cycles at 1e12, a tie at 1e17; the [5/8 sparse cutoff re-swept](#sparse-cutoff-58-in-the-sparse-regime-without-a-cache-gate-kept-2026-10-11)
+  at the top: stays; the dev PC has [no burst regime](#two-power-regimes-on-every-machine-burst-and-sustained-open-2026-10-04);
+  [cycles per hit against primesieve 12.18](#cycles-per-hit-against-primesieve-1218-on-the-dev-pc-and-where-med64-gets-dearer-up-top-measured-2026-11-24):
+  the advantage at one thread is the hits, med64 costs more up top only at 12 threads.
 
 ## Contents
 
@@ -497,8 +502,23 @@ primesieve's 87.7G (was 108.1G); the small tier 39.0G against EratSmall's 26.9G 
 45.2G against EratMedium's 50.3G. What is left of the small tier's excess is the number of
 calls: primesieve crosses off in whole-L1d chunks, our sub-block is half the L1d under SMT,
 and our small cutoff is 1/2 of it on these 256 KiB-L2 cores (primes to ~8.2K against
-EratSmall's ~5.7K), sizes tuned for cycles. **Pending:** the dev PC (Rocket Lake) and the
-server (Golden Cove), where the small tier sits at one store per core-cycle
+EratSmall's ~5.7K), sizes tuned for cycles.
+
+Dev PC (Rocket Lake, i5-11400F under WSL, quiet machine, 2026-11-24): the last 1e11 below N at 12
+threads and the full 1e11 count at one thread, 6 interleaved rounds, the medians of the paired
+ratios (instr / cycles / wall; in brackets how many of the 6 rounds' cycles are below), 4fd47d4 to
+56adad6 (steps 1-2, with med64's packed entry) and 56adad6 to 6f6bd70 (step 3 and the later tuning):
+
+| N | steps 1-2 | step 3 | all three |
+|---|---:|---:|---:|
+| 1e12 | -4.02% / -2.23% / -2.17% (6) | -0.68% / -1.14% / -1.18% (6) | -4.67% / -3.44% / -3.38% (6) |
+| 1e13 | -3.30% / -1.90% / -1.81% (6) | -0.56% / -0.86% / -1.30% (4) | -3.84% / -2.69% / -2.99% (6) |
+| 1e15 | -1.89% / -0.97% / -0.65% (6) | -0.32% / -0.08% / -0.33% (4) | -2.20% / -1.42% / -1.43% (5) |
+| 1e17 | -1.35% / -0.07% / +0.39% (3) | -0.22% / -0.16% / +1.03% (3) | -1.57% / -0.13% / -0.07% (3) |
+| 1e11, `-t 1` | -2.66% / -1.13% / -1.13% (6) | +0.27% / -1.29% / -1.29% (6) | -2.40% / -2.38% / -2.41% (6) |
+
+A gain that fades with N (the small tier's share does), a tie at 1e17. **Pending:** the server
+(Golden Cove), where the small tier sits at one store per core-cycle
 ([above](#small-and-med64-on-golden-cove-one-store-per-core-cycle-med64-waits-on-fill-buffers-measured-2026-10-11)).
 
 ### med64: the re-filed entry built as one 64-bit word (kept, 2026-11-16)
@@ -1097,6 +1117,13 @@ i5-13500 wall ~0 / -0.59 / -0.78%, i5-1235U wall ~0 / -0.24 / -0.26% (both 1e14 
 boost window: `benchmark_ab.sh` had no warm-up, and on the hybrids it fell back to wall time, both
 fixed since). The 1/2 step stays.
 
+Re-swept at 6f6bd70 (dev PC, 12 threads, quiet machine, 1e11 windows above N, 8 interleaved rounds,
+cycles:u against the automatic 5/8, 2026-11-24): 3/4 +0.20% / -2.13% / -0.40% and 1/1 +1.21% /
+-0.99% / +0.03% at 1e16 / 1e17 / 1e18. A first sweep the same day, with the machine in use (wall
+spread 14-27%), gave 3/4 +0.8% / +1.0% / -2.2% / -1.8% at 1e15..1e18. Spread between rounds 2-7% in
+cycles. 1e17 repeats (-2.1% twice) but not the 1e16 and 1e18 around it, and the October head to head
+had 3/4 +0.86% there: 5/8 stays.
+
 ### Activation at the top of N: the integer division is not the cost (tried, reverted, 2026-10-04)
 
 `--debug-idle` prints the activation cost per base prime: dev PC, 1e18 tail (50.8M primes), 2 threads,
@@ -1267,6 +1294,37 @@ for the first three rows and the 1235U, 4 for the rest):
   already gets 1/2 from its L3 gate, 6 MiB over 4 threads) for ~0.5%.
 - `-DERA_ACT_IDX=0` on the 4770HQ (Haswell), 3 pairs at the 1e17 / 1e18 tails: instructions
   +0.24 / +0.61%, cycles -0.06 / +0.43%, wall +0.10 / +0.52%. The BMI2 gate is right on Haswell.
+
+### Cycles per hit against primesieve 12.18 on the dev PC, and where med64 gets dearer up top (measured, 2026-11-24)
+
+Dev PC (i5-11400F, WSL), 6f6bd70 and primesieve 12.18, `perf record -e cycles:u`, 3 interleaved reps,
+medians (spread 0.7-4.2%): 1e11 windows above N at 12 threads, 1e10 at one. The two programs cut their
+tiers at different primes (here: small to 6.1K, med64 to 699K, medium to 2.62M, sparse above; EratSmall
+to 9.8K, EratMedium to 786K, EratBig above), so the cycles of a tier say nothing about which is cheaper.
+Divided by its hits (the sum of 1/p over its primes times the density of its wheel: computed, not counted):
+
+| cycles:u per hit, 12 threads, ours / primesieve | 1e13 | 1e15 | 1e17 | 1e18 |
+|---|---:|---:|---:|---:|
+| small / EratSmall | 2.61 / 3.22 | 2.47 / 2.99 | 2.43 / 2.84 | 2.34 / 2.84 |
+| med64 / EratMedium | 6.37 / 6.45 | 7.02 / 6.89 | 7.56 / 6.83 | 7.49 / 6.94 |
+| medium | 19.3 | 20.1 | 21.4 | 22.2 |
+| sparse / EratBig | 20.7 / 19.2 | 22.3 / 24.1 | 26.3 / 29.6 | 30.1 / 34.1 |
+
+- Hits in all: 0.939 / 0.936 / 0.934 / 0.933x of primesieve's (mod 210 in med64 and medium against mod 30,
+  2310 against 210 in the sparse tier). One thread costs the same per hit, 3.01 / 2.97, 3.82 / 3.86 and
+  4.48 / 4.53 at 1e13 / 1e15 / 1e17, and the total is 0.958 / 0.940 / 0.933x: the hits. Twelve threads:
+  0.912 / 0.887 / 0.847 / 0.807x in cycles; beyond the hits, the sparse tier is 7-12% cheaper per hit from 1e15.
+- med64 goes from 6.37 to 7.56 cycles per hit (+19%) between 1e13 and 1e17 on the same 5.3 instructions;
+  EratMedium +6%. With the configuration fixed (segment, cutoffs, sub-block), at 1e13 / 1e17 / 1e18: `-t 12` 6.31 /
+  7.47 / 7.52, `-t 6` 4.59 / 4.91 / 4.92, `-t 3` 4.38 / 4.21 / 4.41, `-t 1` 3.75 / 3.72 / 3.97 (2 reps). L2
+  misses per hit (`l2_rqsts.miss`) are flat, 0.39 / 0.39 / 0.37; `mem_load_retired.l3_miss` goes 0.002 to
+  0.004; a 256 KiB segment takes the L2 misses from 0.39 to 0.17 per hit and med64 costs the same
+  (6.33 / 7.56 / 7.66, instructions +29%), a 1 MiB one 11-16. Not the L2 and not the RAM.
+- Same N = 1e13, only the sparse cutoff (5/8, 1/4, 1/6), so the sparse tier is 4 / 21 / 28% of the cycles:
+  med64 6.33 / 6.70 / 6.81, L1 fills flat. Extrapolated, ~70% of the rise to 1e17 is the sibling being more
+  in `process_big`; the rest comes with the height (L1 fills per hit 0.49 to 0.58). The mechanism was not
+  measured, and WSL can't pin threads to the host's cores (`-t 6` on CPUs 0,2,..,10 and on 0-5 give the same),
+  so the sibling itself was not isolated directly.
 
 ## Segment and sub-block sizing
 
@@ -1630,6 +1688,10 @@ different regimes are not compared. Open: the server's short PL1 window (1e11 1.
 idle vs 1.88-1.89 s in a REPS=5 round). RAPL readout:
 [next entry](#the-i5-13500-at-pl1-95-w-both-programs-faster-eratostenes-more-at-the-top-tails-2026-11-16).
 
+Not on the dev PC (i5-11400F, WSL, quiet, 2026-11-24): 12 full 1e12 counts back to back after 120 s
+idle, 12 threads, gave 22.13-22.30 s (0.8% from first to last, 264 s in all) at 4.05-4.07 GHz per
+thread (cycles:u / wall / threads) throughout, so there is no burst there to wait out.
+
 ### The i5-13500 at PL1 95 W: both programs faster, eratostenes more at the top tails (2026-11-16)
 
 The server's RAPL limits are PL1 65 W and PL2 117 W, set by the provider (65 W is Intel's
@@ -1960,7 +2022,10 @@ Where the time still goes, and what nothing measured so far has fixed:
   ([i5-3470 profile](#i5-3470-profile-at-1e12-the-med64-tier-over-the-whole-l2-segment-is-59-of-the-cycles-open-2026-10-04)).
   Not L1<->L2 bandwidth: L2 latency at 2.4-3.4 misses in flight
   ([counters](#med64-l2-latency-at-24-34-misses-in-flight-not-l1-l2-bandwidth-measured-2026-10-11)),
-  so a lever needs fewer misses per hit.
+  so a lever needs fewer misses per hit. Up top (12 threads, dev PC) its cost per
+  hit grows 19% from 1e13 to 1e17 against 6% for EratMedium's, from the SMT sibling
+  and not from L2 or RAM
+  ([entry](#cycles-per-hit-against-primesieve-1218-on-the-dev-pc-and-where-med64-gets-dearer-up-top-measured-2026-11-24)).
 - **`process_big` at 12 threads is issue-bound**
   ([entry](#sparse-tier-process_big-is-issue-bound-at-12-threads-the-rings-wrap-mask-and-the-spills-are-what-is-left-open-2026-10-05));
   the wrap mask is gone, and taking the last spills out cut 1.4% of its
@@ -1976,7 +2041,8 @@ Where the time still goes, and what nothing measured so far has fixed:
 - **1e10-1e11 full counts on the 2-vCPU VMs** stay at 1.03-1.10x primesieve.
   `--tune small=1/2` helps Emerald Rapids by 3% and hurts the dev PC (Rocket
   Lake): per microarchitecture, so it stays a manual `--tune`.
-- **Wall time has two power regimes** (burst and sustained) on every
-  machine, which short A/B windows can confuse with a code effect
+- **Wall time has two power regimes** (burst and sustained) on the
+  server and the laptops, not on the dev PC, which short A/B windows can
+  confuse with a code effect
   ([entry](#two-power-regimes-on-every-machine-burst-and-sustained-open-2026-10-04)).
 - **No AMD or ARM machine** has been measured.
