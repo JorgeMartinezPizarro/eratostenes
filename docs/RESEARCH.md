@@ -118,9 +118,6 @@ What is in the code today, by the day it went in:
   at the top: stays; the dev PC has [no burst regime](#two-power-regimes-on-every-machine-burst-and-sustained-open-2026-10-04);
   [cycles per hit against primesieve 12.18](#cycles-per-hit-against-primesieve-1218-on-the-dev-pc-and-where-med64-gets-dearer-up-top-measured-2026-11-24):
   the advantage at one thread is the hits, med64 costs more up top only at 12 threads.
-- **2026-11-25**: the sparse ring's pushes [through write-combining lines](#sparse-tier-the-rings-pushes-through-write-combining-lines-and-non-temporal-stores-prototype-off-2026-11-25)
-  (prototype, off): -3.4% at 1e17 and -5..-7% at 1e18 at 12 threads on the dev PC, -4..-6% wall at
-  1e16-1e17 on the i5-1235U; a loss on the 4770HQ and the 620M and with one thread per big core.
 
 ## Contents
 
@@ -965,7 +962,7 @@ loop went from 156 to 149 instructions per group of 4 entries, 1 stack access in
 Ir (-1.4%). Dev PC, 12 threads, 4 pairs: instructions -0.94% / -1.23% at the 1e15 / 1e17 tails,
 cycles:u +0.39% / -0.74%, overlapping. Not adopted: the reloads hit L1 and overlap with the misses.
 
-### Sparse tier: the ring's pushes through write-combining lines and non-temporal stores (prototype, off, 2026-11-25)
+### Sparse tier: the ring's pushes through write-combining lines and non-temporal stores (tried, reverted, 2026-11-25)
 
 A push writes 8 bytes into the tail block of one of the ring's slots (~900 ahead at 1e18). The line
 it lands on left the caches long ago, so the store is a read for ownership from DRAM. Prototype
@@ -1038,8 +1035,24 @@ Not isolated: the Macs have 10 fill buffers per core and DDR3, the 4770HQ also a
 620M stores 16 bytes at a time and the 4770HQ and the 1235U 32, so width alone does not split them.
 A rule needs more than the topology: the core's generation, or a measurement at startup.
 
-Not adopted. The i5-13500 (the 1235U's core types, more of them) is unmeasured. With it off the
-build is the old one (`process_big`'s code identical); with it on `make test` passes.
+The i5-13500 (6 P-cores with SMT and 8 E-cores, the 1235U's core types; 20 threads, f3388c1, `make
+variant` against the same build without the flag, `make benchmark-ab`, last 1e11 below N, 3 pairs
+after the warm-up, wall, counts equal) does not follow the 1235U:
+
+| wall, prototype against current | 1e16 | 1e17 | 1e18 |
+|---|---:|---:|---:|
+| median | +0.7% | +0.6% | +2.0% |
+| mean | +1.5% | +0.4% | +1.1% |
+| sorted pairs below | 0/3 | 0/3 | 1/3 |
+| spread of the current code | 1.6% | 2.5% | 0.5% |
+
+The runs overlap at every height, so it is a tie with nothing to show for it (at 1e18 one of the three
+prototype runs, 6.44 s, was below every current one), and a gain of the 1235U's size is out. Not
+isolated: the machines that gain (the dev PC and the 1235U) might be the ones short of memory
+bandwidth per thread; no counter here, and perf is not available on the server.
+
+Reverted: it wins on 2 of 5 machines, ties on 1 and loses on 2, and no rule seen so far tells them
+apart. `make test` passed with it on. The code (`ERA_BIG_WC` in src/sparse_tier.hpp) is in f3388c1.
 
 ## Activation and the medium/sparse cutoff
 
