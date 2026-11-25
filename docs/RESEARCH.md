@@ -118,6 +118,9 @@ What is in the code today, by the day it went in:
   at the top: stays; the dev PC has [no burst regime](#two-power-regimes-on-every-machine-burst-and-sustained-open-2026-10-04);
   [cycles per hit against primesieve 12.18](#cycles-per-hit-against-primesieve-1218-on-the-dev-pc-and-where-med64-gets-dearer-up-top-measured-2026-11-24):
   the advantage at one thread is the hits, med64 costs more up top only at 12 threads.
+- **2026-11-25**: the sparse ring's pushes [through write-combining lines](#sparse-tier-the-rings-pushes-through-write-combining-lines-and-non-temporal-stores-prototype-off-2026-11-25)
+  (prototype, off): -3.4% at 1e17 and -5..-7% at 1e18 at 12 threads on the dev PC, -4..-6% wall at
+  1e16-1e17 on the i5-1235U; a loss on the 4770HQ and the 620M and with one thread per big core.
 
 ## Contents
 
@@ -441,12 +444,16 @@ gap in the small tier; med64 against EratMedium and the pre-sieve against primes
 |---|---:|---:|---:|---:|
 | i7-4770HQ (Haswell, 8 threads) | 52.1G / 26.8G | 46.8G / 50.3G | 4.6G / 5.0G | 108.1G / 87.7G |
 | i7-620M (Nehalem, 4 threads) | 50.2G / 26.8G | 46.7G / 50.4G | 10.8G / 11.3G | 112.0G / 93.6G |
-| i5-1235U (Alder Lake, 12 threads) | 54.2G / 32.3G | 55.6G / 56.1G | ~6G / ~6G | 119.2G / 101.2G |
+| i5-1235U (Alder Lake, 12 threads) | 39.1G / 25.5G | 40.6G / 45.6G | 4.5G / 4.3G | 86.4G / 80.0G |
 
 In the last 1e10 below 1e15 eratostenes ran fewer instructions than primesieve everywhere (32.7G
-vs 33.0G on the 4770HQ, 45.4G vs 66.0G on the 1235U). An instruction histogram of `cross_off<3>`
-on the 4770HQ: 51% in the unrolled loop, 25% in the prologue, 11% in the entry chain, 8.5% in the
-exit chain, 4% in the epilogue. Per call (one per prime and sub-block) the prologue built the
+vs 33.0G on the 4770HQ, 30.1G vs 30.7G on the 1235U). The 1235U's figures are raw counts, taken
+again on 2026-11-25 with the same builds (`perf stat --no-scale`, the two core types added up); the
+first ones noted here (119.2G / 101.2G, 45.4G / 66.0G) were wrong: on a hybrid CPU perf stat
+extrapolates each core type's count over the time the threads spent on the other type, 1.26-1.38x
+in the first pair and 1.5x and 2.1x in the second. An instruction histogram of `cross_off<3>` on the
+4770HQ: 51% in the unrolled loop, 25% in the prologue, 11% in the entry chain, 8.5% in the exit
+chain, 4% in the epilogue. Per call (one per prime and sub-block) the prologue built the
 8-entry offset table `o[j]` on the stack for the indexed `b = i - o[j]` at entry and
 `i = b + o[j]` at exit, saved 6 registers, realigned the stack (and on Ubuntu checked a
 stack-protector canary), and the chains reloaded spilled offsets and set `j` before each check.
@@ -957,6 +964,82 @@ loop went from 156 to 149 instructions per group of 4 entries, 1 stack access in
 (1e9 window below 1e17, one thread, built without AVX-512 for valgrind) `process_big` 2.711G -> 2.673G
 Ir (-1.4%). Dev PC, 12 threads, 4 pairs: instructions -0.94% / -1.23% at the 1e15 / 1e17 tails,
 cycles:u +0.39% / -0.74%, overlapping. Not adopted: the reloads hit L1 and overlap with the misses.
+
+### Sparse tier: the ring's pushes through write-combining lines and non-temporal stores (prototype, off, 2026-11-25)
+
+A push writes 8 bytes into the tail block of one of the ring's slots (~900 ahead at 1e18). The line
+it lands on left the caches long ago, so the store is a read for ownership from DRAM. Prototype
+(`-DERA_BIG_WC=1`, lines of `ERA_WC_LINES` x 64 bytes, 4 by default): each slot has its own line;
+the push that fills it streams it whole to the block with non-temporal stores (AVX-512, AVX2 or
+SSE2) and starts it again. The hot path costs what it did: a pointer bump and a test on 256 bytes
+in place of 4096. The blocks' entries start at a whole line (480 of them instead of 510), and the
+entries left in a slot's line when it is drained are processed last.
+
+Dev PC (i5-11400F, WSL, quiet), 1e11 windows above N (5e10 at 6 and 4 threads, 1e10 at one), 4-5
+interleaved rounds, cycles:u against the current code, 256-byte lines:
+
+| threads | 1e14 | 1e15 | 1e16 | 1e17 | 1e18 |
+|---|---:|---:|---:|---:|---:|
+| 12 | +0.8% | +0.1 / -0.1% | -1.5 / -2.7% | -3.5 / -3.4% | -5.2 / -7.2% |
+| 10 | | | | -5.0% | -3.2% |
+| 8 | | | +2.0% | +0.8% | -0.5% |
+| 6 | | | | +2.6% | +0.1% |
+| 4 | | | | +7.4% | |
+| 1 | | | | +11% | |
+
+At 12 threads 4-5 of 5 rounds are below from 1e16 up (wall -5..-8%); it loses with one thread per
+core. Instructions +2..+3%. By tier at 12 threads and 1e17 / 1e18:
+med64 -12 / -10%, medium -9 / -8%, `process_big` -8 / -18%, but the flush itself (`flush_line`, out
+of line) is +11.5 / +24.9 Gcycles, and the total is -4.4 / -6.5%. Per hit in `process_big` at 1e18:
+L3-miss stalls 5.1 to 2.4 cycles, fill buffers full 4.6 to 2.6, dTLB store walks 0.67 to 0.05. So
+the sparse tier stops holding the fill buffers and the cache that its SMT sibling's med64 and medium
+want ([why med64 got dearer up top](#cycles-per-hit-against-primesieve-1218-on-the-dev-pc-and-where-med64-gets-dearer-up-top-measured-2026-11-24)).
+
+- 64- and 128-byte lines lose (12 threads, 1e17 / 1e18: +5.6 / +1.9% and +1.5 / -3.4%, first
+  version); 512 bytes is no better (-1.4 / -1.5 / -4.6% at 1e16 / 1e17 / 1e18 against -1.5 / -3.5 /
+  -5.2%). A test of the pointer against the line's end per push, in
+  place of the test after the bump, costs +10% instructions.
+- `prefetchnta` on the next block read (ERA_WC_NTA) +3.2 / +3.7 / +0.6% and the free blocks as a
+  queue (ERA_WC_FIFO) -2.3 / -0.9 / -4.6% against the current code at 1e16 / 1e17 / 1e18, the
+  plain line -2.7 / -3.4 / -7.2%: neither kept (the pair +9 / +16 / +9%).
+
+The laptops (2026-11-25, native Linux, fans at max, no throttling, 24/24 counts equal on each,
+interleaved rounds, 256-byte lines against the current code). Macs: cycles:u, the 4770HQ 1e11
+windows (5e10 at 4 threads) x4, the 620M 5e10 (2e10 at 2 threads) x3:
+
+| cycles:u | 1e15 | 1e16 | 1e17 | 1e18 |
+|---|---:|---:|---:|---:|
+| i7-4770HQ, 8 threads | +1.8% | +2.4% | +2.7% | +1.1% |
+| i7-4770HQ, 4 threads | | | +4.2% | |
+| i7-620M, 4 threads | +2.9% | +3.3% | +3.8% | +4.0% |
+| i7-620M, 2 threads | | | +7.0% | |
+
+No round below the current code in any cell. 128 and 512 bytes lose too (4770HQ +2.2..+7.9% and
++1.3..+5.2%, 620M +1.3..+10.3% and +6.6..+11.1%). The 620M slept 83 minutes in the middle of round
+2; the three runs it caught (1e17 and 1e18, 4 threads) are out of the figures.
+
+i5-1235U, wall (the events add both core types), 1e11 windows at 12 threads, 5e10 at 6, 4 rounds
+(1e15 the last 3: the first runs were in the burst regime):
+
+| wall | 1e15 | 1e16 | 1e17 | 1e18 |
+|---|---:|---:|---:|---:|
+| 12 threads | -2.8% (3/3) | -4.4% (4/4) | -6.1% (4/4) | |
+| 6 threads | | | -2.0% (4/4) | -2.9% (4/4) |
+
+The 1235U pinned to one core type with `taskset`, cycles:u raw (one PMU), 2e10-5e10 windows, 5 rounds: P-cores with
+SMT (4 threads on 2) -2.3% at 1e16 and -1.4% at 1e17 (4/5, 5/5); P-cores, one thread each, 1e17 +2.9% (0/5);
+E-cores, one thread each, -4.3% at 1e16 and -4.2% at 1e17 with 8 threads (5/5), -2.8% at 1e17 with
+the 4 of one cluster (5/5). The E-cores are the case the dev PC could not show: they gain with no
+sibling, not profiled (they share a 2 MiB L2 among 4 threads).
+
+So the threads per core do not say by themselves where it wins: the 4770HQ and the 620M run 2
+threads per core and lose, and the dev PC and the 1235U's P-cores lose with one and gain with two.
+Not isolated: the Macs have 10 fill buffers per core and DDR3, the 4770HQ also a 128 MiB L4; the
+620M stores 16 bytes at a time and the 4770HQ and the 1235U 32, so width alone does not split them.
+A rule needs more than the topology: the core's generation, or a measurement at startup.
+
+Not adopted. The i5-13500 (the 1235U's core types, more of them) is unmeasured. With it off the
+build is the old one (`process_big`'s code identical); with it on `make test` passes.
 
 ## Activation and the medium/sparse cutoff
 

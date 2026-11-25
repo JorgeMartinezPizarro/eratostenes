@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <memory>
 #include <stdexcept>
 #include <vector>
@@ -18,7 +19,7 @@
 // madvise(MADV_HUGEPAGE) for the ring's arenas (huge_arenas, decided in
 // tuning.hpp). Best effort: THP in "madvise" or "always" mode.
 #include <sys/mman.h>
-#ifdef __BMI2__
+#if defined(__BMI2__) || defined(__SSE2__)
 #include <immintrin.h>
 #endif
 
@@ -37,6 +38,25 @@
 #else
 #define ERA_ACT_IDX 0
 #endif
+#endif
+
+// Experimental, off (docs/RESEARCH.md): the ring's pushes go through a
+// per-slot line of ERA_WC_LINES x 64 bytes and reach the block as whole lines
+// with non-temporal stores, so appending an entry never reads the block's
+// line from memory first. The drained blocks' lines stay ordinary loads.
+#ifndef ERA_BIG_WC
+#define ERA_BIG_WC 0
+#endif
+#ifndef ERA_WC_LINES
+#define ERA_WC_LINES 4
+#endif
+// With ERA_BIG_WC: the next block read with prefetchnta instead of T1
+// (ERA_WC_NTA), and the free blocks as a queue instead of a stack (ERA_WC_FIFO).
+#ifndef ERA_WC_NTA
+#define ERA_WC_NTA 0
+#endif
+#ifndef ERA_WC_FIFO
+#define ERA_WC_FIFO 0
 #endif
 
 // v mod 2^nbits, with mask = 2^nbits - 1: one BMI2 instruction (bzhi) that
@@ -84,7 +104,14 @@ public:
         // hot loop has no wrap mask; wrap_ring() shifts the upper half down
         // once the cursor reaches num_buckets_. See process_big.
         head_.assign(2 * num_buckets_, nullptr);
+#if ERA_BIG_WC
+        wp_.assign(2 * num_buckets_, nullptr);
+        dest_.assign(2 * num_buckets_, nullptr);
+        wc_.reset(static_cast<char*>(std::aligned_alloc(WC_BYTES, 2 * num_buckets_ * WC_BYTES)));
+        reset_lines();
+#else
         tail_.assign(2 * num_buckets_, nullptr);
+#endif
     }
 
     // A new run of consecutive segments (SegmentSieve::begin_chunk): empty
@@ -93,7 +120,11 @@ public:
         cur_segment_ = 0;
         next_k_ = 0;
         std::fill(head_.begin(), head_.end(), nullptr);
+#if ERA_BIG_WC
+        reset_lines();
+#else
         std::fill(tail_.begin(), tail_.end(), nullptr);
+#endif
         // Every block ever allocated goes back on the free list.
         free_.clear();
         for (auto& c : chunks_)
@@ -170,15 +201,50 @@ public:
         // A hit `ahead` segments on files into tails_cur[ahead], so neither
         // the array base nor the cursor is live in the loop. The slow path
         // recovers the slot index from tail_.data().
+#if ERA_BIG_WC
+        uint64_t** const wp_rel = wp_.data() + cur_segment_;
+#else
         erat::DenseState** const tails_cur = tail_.data() + cur_segment_;
+#endif
         // uint32_t on purpose: as uint64_t GCC spills tails_cur.
         const uint32_t log2sb = log2_sb_;
         const uint64_t modsb = (uint64_t{1} << log2sb) - 1;
+#if ERA_BIG_WC
+        // Appends e to ring slot cur_segment_ + rel through the slot's line.
+        auto put = [&](uint64_t rel, uint64_t e) __attribute__((always_inline)) {
+            uint64_t* w = wp_rel[rel];
+            *w++ = e;
+            if ((reinterpret_cast<uintptr_t>(w) & (WC_BYTES - 1)) == 0) [[unlikely]]
+                w = flush_line(static_cast<uint32_t>(cur_segment_ + rel), w);
+            wp_rel[rel] = w;
+        };
+        // Marks the hit of entry ent and files its next one.
+        auto one = [&](uint64_t ent) __attribute__((always_inline)) {
+            uint64_t pos = (ent >> 12) & 0xffffff;
+            const uint64_t te = big::TABLE2310[ent & 4095]; // mask | dm << 8 | corr << 16 | next << 20
+            s[pos] |= static_cast<uint8_t>(te);
+            pos += (ent >> 36) * ((te >> 8) & 0xff) + ((te >> 16) & 15);
+            const uint64_t e = (ent & ~((uint64_t{1} << 36) - 1)) | (te >> 20) | (low_bits(pos, log2sb, modsb) << 12);
+            put(pos >> log2sb, e);
+        };
+        while (true) {
+            Blk* blk = head_[slot];
+            uint64_t* const base = reinterpret_cast<uint64_t*>(wc_.get() + static_cast<size_t>(slot) * WC_BYTES);
+            const size_t pend_n = static_cast<size_t>(wp_[slot] - base);
+            if (!blk && !pend_n) break;
+            erat::DenseState* last_end = reinterpret_cast<erat::DenseState*>(dest_[slot]);
+            uint64_t pend[WC_BYTES / sizeof(uint64_t)];
+            std::memcpy(pend, base, pend_n * sizeof(uint64_t));
+            head_[slot] = nullptr;
+            wp_[slot] = base;
+            dest_[slot] = nullptr;
+#else
         while (head_[slot]) {
             Blk* blk = head_[slot];
             erat::DenseState* last_end = tail_[slot];
             head_[slot] = nullptr;
             tail_[slot] = nullptr;
+#endif
             while (blk) {
                 Blk* next_blk = blk->next;
                 // The blocks of a chain are scattered in memory (LIFO free
@@ -223,6 +289,9 @@ public:
                         sl[k] = pos[k] >> log2sb; // segments ahead: the slot is tails_cur[sl]
                         e[k] = (ent[k] & ~((uint64_t{1} << 36) - 1)) | nidx[k] | (low_bits(pos[k], log2sb, modsb) << 12);
                     }
+#if ERA_BIG_WC
+                    for (int k = 0; k < U; ++k) put(sl[k], e[k]);
+#else
                     for (int k = 0; k < U; ++k) {
                         erat::DenseState** const tp = tails_cur + sl[k];
                         erat::DenseState* w = *tp;
@@ -231,6 +300,7 @@ public:
                         std::memcpy(w, &e[k], sizeof(uint64_t));
                         *tp = w + 1;
                     }
+#endif
                 };
                 // Groups of G entries, counted once per block: the first
                 // `spread` groups also prefetch line g of the next block (64
@@ -244,7 +314,7 @@ public:
                 const size_t spread = std::min<size_t>(groups, BLK_BYTES / 64);
                 const char* line = nb;
                 for (erat::DenseState* const ge = it + spread * G; it != ge; it += G) {
-                    __builtin_prefetch(line, 0, 2);
+                    __builtin_prefetch(line, 0, (ERA_BIG_WC && ERA_WC_NTA) ? 0 : 2);
                     line += 64;
                     seg_pf(it, G);
                     for (size_t k = 0; k < G; k += U) body(it + k);
@@ -258,6 +328,9 @@ public:
                 for (; it != end; ++it) {
                     uint64_t ent;
                     std::memcpy(&ent, it, sizeof(ent)); // idx | pos << 12 | qp << 36
+#if ERA_BIG_WC
+                    one(ent);
+#else
                     uint64_t pos = (ent >> 12) & 0xffffff;
                     const uint64_t te = big::TABLE2310[ent & 4095]; // mask | dm << 8 | corr << 16 | next << 20
                     s[pos] |= static_cast<uint8_t>(te);
@@ -270,10 +343,14 @@ public:
                         w = new_block(static_cast<uint32_t>(tp - tail_.data()));
                     std::memcpy(w, &e, sizeof(e));
                     *tp = w + 1;
+#endif
                 }
                 free_.push_back(blk);
                 blk = next_blk;
             }
+#if ERA_BIG_WC
+            for (size_t k = 0; k < pend_n; ++k) one(pend[k]);
+#endif
         }
     }
 
@@ -343,8 +420,21 @@ private:
         const auto nb = static_cast<std::ptrdiff_t>(num_buckets_);
         std::copy(head_.begin() + nb, head_.end(), head_.begin());
         std::fill(head_.begin() + nb, head_.end(), nullptr);
+#if ERA_BIG_WC
+        for (std::ptrdiff_t i = 0; i < nb; ++i) {
+            uint64_t* const from = line(static_cast<size_t>(i + nb));
+            uint64_t* const to = line(static_cast<size_t>(i));
+            const std::ptrdiff_t n = wp_[static_cast<size_t>(i + nb)] - from;
+            std::memcpy(to, from, static_cast<size_t>(n) * sizeof(uint64_t));
+            wp_[static_cast<size_t>(i)] = to + n;
+            dest_[static_cast<size_t>(i)] = dest_[static_cast<size_t>(i + nb)];
+            wp_[static_cast<size_t>(i + nb)] = from;
+            dest_[static_cast<size_t>(i + nb)] = nullptr;
+        }
+#else
         std::copy(tail_.begin() + nb, tail_.end(), tail_.begin());
         std::fill(tail_.begin() + nb, tail_.end(), nullptr);
+#endif
         cur_segment_ = 0;
     }
 
@@ -354,12 +444,69 @@ private:
     // `slot`'s tail block, starting a new one if the current tail is full
     // or the slot is empty.
     void push_sparse_entry(uint32_t slot, erat::DenseState entry) {
+#if ERA_BIG_WC
+        uint64_t* w = wp_[slot];
+        std::memcpy(w, &entry, sizeof(entry));
+        ++w;
+        if ((reinterpret_cast<uintptr_t>(w) & (WC_BYTES - 1)) == 0) w = flush_line(slot, w);
+        wp_[slot] = w;
+#else
         erat::DenseState* w = tail_[slot];
         if ((reinterpret_cast<uintptr_t>(w) & (BLK_BYTES - 1)) == 0) w = new_block(slot);
         *w = entry;
         tail_[slot] = w + 1;
+#endif
     }
 
+#if ERA_BIG_WC
+    // A slot's line (wc_, WC_BYTES, WC_BYTES-aligned) takes its entries; wp_
+    // points at the next free place in it. The push that fills the line
+    // streams it to dest_[slot], the address its next line goes to: null,
+    // or a multiple of BLK_BYTES, when it has no block or the last one is full.
+    static constexpr size_t WC_BYTES = 64 * ERA_WC_LINES;
+    static constexpr unsigned WC_LOG2 = ERA_WC_LINES == 1 ? 6 : ERA_WC_LINES == 2 ? 7 : ERA_WC_LINES == 4 ? 8 : 9;
+    static_assert((size_t{1} << WC_LOG2) == WC_BYTES, "ERA_WC_LINES: 1, 2, 4 or 8");
+
+    uint64_t* line(size_t slot) { return reinterpret_cast<uint64_t*>(wc_.get() + slot * WC_BYTES); }
+    void reset_lines() {
+        for (size_t i = 0; i < wp_.size(); ++i) wp_[i] = line(i);
+        std::fill(dest_.begin(), dest_.end(), nullptr);
+    }
+
+    // Non-temporal copy of a full line, WC_BYTES from src to dst (both aligned).
+    static __attribute__((always_inline)) void stream_line(char* dst, const char* src) {
+        for (size_t o = 0; o < WC_BYTES; o += 64) {
+#if defined(__AVX512F__)
+            _mm512_stream_si512(reinterpret_cast<__m512i*>(dst + o), _mm512_load_si512(src + o));
+#elif defined(__AVX2__)
+            _mm256_stream_si256(reinterpret_cast<__m256i*>(dst + o), _mm256_load_si256(reinterpret_cast<const __m256i*>(src + o)));
+            _mm256_stream_si256(reinterpret_cast<__m256i*>(dst + o + 32), _mm256_load_si256(reinterpret_cast<const __m256i*>(src + o + 32)));
+#else
+            for (size_t k = 0; k < 64; k += 16)
+                _mm_stream_si128(reinterpret_cast<__m128i*>(dst + o + k), _mm_load_si128(reinterpret_cast<const __m128i*>(src + o + k)));
+#endif
+        }
+    }
+
+    // Slot `slot`'s line is full (w is its end): streams it to the slot's
+    // block, a fresh one if it has none or the last is full, and returns the
+    // line's start. Out of line so the hot loop keeps its registers.
+    __attribute__((noinline))
+    uint64_t* flush_line(uint32_t slot, uint64_t* w) {
+        char* const base = reinterpret_cast<char*>(w) - WC_BYTES;
+        char* d = dest_[slot];
+        if ((reinterpret_cast<uintptr_t>(d) & (BLK_BYTES - 1)) == 0) [[unlikely]] {
+            Blk* nb = alloc_blk();
+            nb->next = nullptr;
+            if (!head_[slot]) head_[slot] = nb;
+            else reinterpret_cast<Blk*>(d - BLK_BYTES)->next = nb;
+            d = reinterpret_cast<char*>(nb->entries());
+        }
+        stream_line(d, base);
+        dest_[slot] = d + WC_BYTES;
+        return reinterpret_cast<uint64_t*>(base);
+    }
+#else
     // Slow path of a push (tail_[slot] null or at a block boundary): links a
     // fresh block into ring slot `slot` and returns its first entry. Out of
     // line so process_big's loop keeps its constants in registers.
@@ -372,6 +519,7 @@ private:
         else reinterpret_cast<Blk*>(reinterpret_cast<char*>(w) - BLK_BYTES)->next = nb;
         return nb->entries();
     }
+#endif
 
     // BLK_BYTES-aligned blocks from a pool of arena_bytes_-sized arenas
     // that never shrinks (chunks_ owns them, so block pointers stay valid as
@@ -382,7 +530,11 @@ private:
     static constexpr size_t SEG_PF_DIST = 16;
     struct Blk {
         Blk* next;
+#if ERA_BIG_WC
+        uint64_t pad[64 * ERA_WC_LINES / 8 - 1]; // the entries start at a whole line
+#else
         uint64_t pad;
+#endif
         erat::DenseState* entries() { return reinterpret_cast<erat::DenseState*>(this + 1); }
         erat::DenseState* block_end() { return reinterpret_cast<erat::DenseState*>(reinterpret_cast<char*>(this) + BLK_BYTES); }
     };
@@ -394,13 +546,28 @@ private:
             chunks_.emplace_back(c);
             for (size_t i = 0; i < arena_bytes_ / BLK_BYTES; ++i) free_.push_back(reinterpret_cast<Blk*>(c + i * BLK_BYTES));
         }
+#if ERA_BIG_WC && ERA_WC_FIFO
+        Blk* b = free_.front();
+        free_.pop_front();
+#else
         Blk* b = free_.back();
         free_.pop_back();
+#endif
         return b;
     }
     std::vector<Blk*> head_;
+#if ERA_BIG_WC
+    std::vector<uint64_t*> wp_;
+    std::vector<char*> dest_;
+    std::unique_ptr<char, AlignedFree> wc_;
+#else
     std::vector<erat::DenseState*> tail_;
+#endif
+#if ERA_BIG_WC && ERA_WC_FIFO
+    std::deque<Blk*> free_;
+#else
     std::vector<Blk*> free_;
+#endif
     std::vector<std::unique_ptr<char, AlignedFree>> chunks_;
     // Arena: 256 blocks (1 MiB), or one 2 MiB huge page (huge_arenas_).
     size_t arena_bytes_;
